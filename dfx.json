@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "canisters": {
+    "certified_assets": {
+      "type": "custom",
+      "candid": "assets.did",
+      "wasm": "target/wasm32-unknown-unknown/release/certified-assets.wasm",
+      "build": "cargo build --release --target wasm32-unknown-unknown"
+    }
+  },
+  "networks": {
+    "local": {
+      "bind": "127.0.0.1:8081",
+      "type": "ephemeral"
+    }
+  }
+}
