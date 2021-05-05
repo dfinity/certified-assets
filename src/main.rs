@@ -1,8 +1,8 @@
 use ic_cdk::api::{caller, time, trap};
-use ic_cdk::export::candid::{CandidType, Deserialize, Func, Principal};
+use ic_cdk::export::candid::{CandidType, Deserialize, Func, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use serde_bytes::ByteBuf;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryInto;
 
@@ -17,10 +17,10 @@ struct State {
     assets: RefCell<HashMap<Key, Asset>>,
 
     chunks: RefCell<HashMap<ChunkId, Chunk>>,
-    next_chunk_id: Cell<ChunkId>,
+    next_chunk_id: RefCell<ChunkId>,
 
     batches: RefCell<HashMap<BatchId, Batch>>,
-    next_batch_id: Cell<BatchId>,
+    next_batch_id: RefCell<BatchId>,
 
     authorized: RefCell<Vec<Principal>>,
 }
@@ -51,8 +51,8 @@ struct EncodedAsset {
     content: ByteBuf,
     content_type: String,
     content_encoding: String,
-    total_length: usize,
-    sha256: Option<[u8; 32]>,
+    total_length: Nat,
+    sha256: Option<ByteBuf>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -67,7 +67,7 @@ struct AssetEncodingDetails {
     modified: Timestamp,
     content_encoding: String,
     sha256: Option<[u8; 32]>,
-    length: usize,
+    length: Nat,
 }
 
 struct Chunk {
@@ -80,8 +80,8 @@ struct Batch {
 }
 
 type Timestamp = u64;
-type BatchId = u64;
-type ChunkId = u64;
+type BatchId = Nat;
+type ChunkId = Nat;
 type Key = String;
 
 // IDL Types
@@ -148,7 +148,7 @@ struct GetArg {
 struct GetChunkArg {
     key: Key,
     content_encoding: String,
-    index: u64,
+    index: Nat,
     sha256: Option<[u8; 32]>,
 }
 
@@ -265,14 +265,14 @@ fn create_batch() -> CreateBatchResponse {
     trap_if_unauthorized();
 
     STATE.with(|s| {
-        let batch_id = s.next_batch_id.get();
-        s.next_batch_id.set(batch_id + 1);
+        let batch_id = s.next_batch_id.borrow().clone();
+        *s.next_batch_id.borrow_mut() += 1;
 
         let now = time() as u64;
 
         let mut batches = s.batches.borrow_mut();
         batches.insert(
-            batch_id,
+            batch_id.clone(),
             Batch {
                 expires_at: now + BATCH_EXPIRY_NANOS,
             },
@@ -301,11 +301,11 @@ fn create_chunk(arg: CreateChunkArg) -> CreateChunkResponse {
             .unwrap_or_else(|| trap("batch not found"));
         batch.expires_at = now + BATCH_EXPIRY_NANOS;
 
-        let chunk_id = s.next_chunk_id.get();
-        s.next_chunk_id.set(chunk_id + 1);
+        let chunk_id = s.next_chunk_id.borrow().clone();
+        *s.next_chunk_id.borrow_mut() += 1;
 
         s.chunks.borrow_mut().insert(
-            chunk_id,
+            chunk_id.clone(),
             Chunk {
                 batch_id: arg.batch_id,
                 content: arg.content,
@@ -378,8 +378,8 @@ fn get(arg: GetArg) -> EncodedAsset {
                     content: asset_enc.content_chunks[0].clone(),
                     content_type: asset.content_type.clone(),
                     content_encoding: enc.clone(),
-                    total_length: asset_enc.total_length,
-                    sha256: asset_enc.sha256,
+                    total_length: Nat::from(asset_enc.total_length as u64),
+                    sha256: asset_enc.sha256.map(|digest| ByteBuf::from(digest)),
                 };
             }
         }
@@ -405,12 +405,13 @@ fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
                 trap("sha256 mismatch")
             }
         }
-        if arg.index as usize >= enc.content_chunks.len() {
+        if arg.index >= enc.content_chunks.len() {
             trap("chunk index out of bounds");
         }
+        let index: usize = arg.index.to_string().parse().unwrap();
 
         GetChunkResponse {
-            content: enc.content_chunks[arg.index as usize].clone(),
+            content: enc.content_chunks[index].clone(),
         }
     })
 }
@@ -429,7 +430,7 @@ fn list() -> Vec<AssetDetails> {
                         modified: enc.modified,
                         content_encoding: enc_name.clone(),
                         sha256: enc.sha256,
-                        length: enc.total_length,
+                        length: Nat::from(enc.total_length),
                     })
                     .collect();
                 encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
@@ -570,8 +571,8 @@ fn do_clear() {
         s.assets.borrow_mut().clear();
         s.batches.borrow_mut().clear();
         s.chunks.borrow_mut().clear();
-        s.next_batch_id.set(1);
-        s.next_chunk_id.set(1);
+        *s.next_batch_id.borrow_mut() = Nat::from(1);
+        *s.next_chunk_id.borrow_mut() = Nat::from(1);
     })
 }
 
@@ -589,6 +590,7 @@ fn certify_asset(_key: Key, _contents: &[u8]) {}
 #[init]
 fn init() {
     do_clear();
+    STATE.with(|s| s.authorized.borrow_mut().push(caller()));
 }
 
 #[pre_upgrade]

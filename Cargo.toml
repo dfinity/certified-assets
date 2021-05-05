@@ -13,3 +13,7 @@ ic-types = "0.1.1"
 serde = "1"
 serde_bytes = "0.11"
 sha2 = "0.9.1"
+
+[profile.release]
+lto = true
+opt-level = 'z'
