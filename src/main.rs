@@ -1,16 +1,27 @@
-use ic_cdk::api::{caller, time, trap};
+use ic_cdk::api::{caller, data_certificate, set_certified_data, time, trap};
 use ic_cdk::export::candid::{CandidType, Deserialize, Func, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
+use ic_certified_map::{AsHashTree, Hash, RbTree};
 use num_traits::ToPrimitive;
+use serde::Serialize;
 use serde_bytes::ByteBuf;
+use sha2::Digest;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+/// The amount of time a batch is kept alive. Modifying the batch
+/// delays the expiry further.
 const BATCH_EXPIRY_NANOS: u64 = 300_000_000_000;
+
+/// The order in which we pick encodings for certification.
+const ENCODING_CERTIFICATION_ORDER: &[&str] = &["identity", "gzip", "compress", "deflate", "br"];
 
 thread_local! {
     static STATE: State = State::default();
+    static ASSET_HASHES: RefCell<AssetHashes> = RefCell::new(RbTree::new());
 }
+
+type AssetHashes = RbTree<Key, Hash>;
 
 #[derive(Default)]
 struct State {
@@ -37,7 +48,7 @@ struct AssetEncoding {
     content_chunks: Vec<ByteBuf>,
     total_length: usize,
     certified: bool,
-    sha256: Option<ByteBuf>,
+    sha256: [u8; 32],
 }
 
 #[derive(Default, Clone, Debug, CandidType, Deserialize)]
@@ -248,21 +259,20 @@ fn store(arg: StoreArg) {
         let asset = assets.entry(arg.key.clone()).or_default();
         asset.content_type = arg.content_type;
 
-        let to_certify =
-            arg.content_encoding == "identity" || !asset.encodings.contains_key("identity");
-
-        if to_certify {
-            for (_, enc) in asset.encodings.iter_mut() {
-                enc.certified = false;
+        let hash = hash_bytes(&arg.content);
+        if let Some(provided_hash) = arg.sha256 {
+            if &hash != provided_hash.as_ref() {
+                trap("sha256 mismatch");
             }
-            certify_asset(arg.key, &arg.content);
         }
 
         let encoding = asset.encodings.entry(arg.content_encoding).or_default();
         encoding.total_length = arg.content.len();
         encoding.content_chunks = vec![arg.content];
         encoding.modified = time() as u64;
-        encoding.certified = to_certify;
+        encoding.sha256 = hash;
+
+        on_asset_change(&arg.key, asset);
     });
 }
 
@@ -385,7 +395,7 @@ fn get(arg: GetArg) -> EncodedAsset {
                     content_type: asset.content_type.clone(),
                     content_encoding: enc.clone(),
                     total_length: Nat::from(asset_enc.total_length as u64),
-                    sha256: asset_enc.sha256.clone(),
+                    sha256: Some(ByteBuf::from(asset_enc.sha256)),
                 };
             }
         }
@@ -406,15 +416,15 @@ fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
             .get(&arg.content_encoding)
             .unwrap_or_else(|| trap("no such encoding"));
 
-        if let (Some(l), Some(r)) = (arg.sha256, enc.sha256.clone()) {
-            if l != r {
+        if let Some(expected_hash) = arg.sha256 {
+            if expected_hash != enc.sha256 {
                 trap("sha256 mismatch")
             }
         }
         if arg.index >= enc.content_chunks.len() {
             trap("chunk index out of bounds");
         }
-        let index: usize = arg.index.to_string().parse().unwrap();
+        let index: usize = arg.index.0.to_usize().unwrap();
 
         GetChunkResponse {
             content: enc.content_chunks[index].clone(),
@@ -435,7 +445,7 @@ fn list() -> Vec<AssetDetails> {
                     .map(|(enc_name, enc)| AssetEncodingDetails {
                         modified: enc.modified,
                         content_encoding: enc_name.clone(),
-                        sha256: enc.sha256.clone(),
+                        sha256: Some(ByteBuf::from(enc.sha256)),
                         length: Nat::from(enc.total_length),
                     })
                     .collect();
@@ -470,8 +480,8 @@ fn create_strategy(
                 key: key.to_string(),
                 content_encoding: enc_name.to_string(),
                 index: Nat::from(chunk_index + 1),
-                sha256: enc.sha256.clone(),
-            }
+                sha256: Some(ByteBuf::from(enc.sha256)),
+            },
         })
     }
 }
@@ -483,12 +493,13 @@ fn build_200(
     key: &str,
     chunk_index: usize,
 ) -> HttpResponse {
-    let mut headers = vec![
-        ("Content-Type".to_string(), asset.content_type.to_string())
-    ];
+    let certificate_header = ASSET_HASHES.with(|t| make_certificate_header(&t.borrow_mut(), key));
+
+    let mut headers = vec![("Content-Type".to_string(), asset.content_type.to_string())];
     if enc_name != "identity" {
         headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
     }
+    headers.push(certificate_header);
 
     let streaming_strategy = create_strategy(asset, enc_name, enc, key, chunk_index);
 
@@ -500,28 +511,48 @@ fn build_200(
     }
 }
 
-fn build_404() -> HttpResponse {
+fn build_302(key: &str, location: String) -> HttpResponse {
+    let certificate_header = ASSET_HASHES.with(|t| make_certificate_header(&t.borrow_mut(), key));
+    HttpResponse {
+        status_code: 302,
+        headers: vec![certificate_header, ("Location".to_string(), location)],
+        body: ByteBuf::from("found"),
+        streaming_strategy: None,
+    }
+}
+
+fn build_404(key: &str) -> HttpResponse {
+    let certificate_header = ASSET_HASHES.with(|t| make_certificate_header(&t.borrow_mut(), key));
     HttpResponse {
         status_code: 404,
-        headers: vec![],
+        headers: vec![certificate_header],
         body: ByteBuf::from("not found"),
         streaming_strategy: None,
     }
 }
 
-fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> HttpResponse {
+fn build_http_response(
+    path: &str,
+    query: &str,
+    encodings: Vec<String>,
+    index: usize,
+) -> HttpResponse {
     STATE.with(|s| {
         let assets = s.assets.borrow();
-
-        if let Some(asset) = assets.get(path).or_else(|| assets.get("/index.html")) {
+        if path == "/" && !assets.contains_key("/") && assets.contains_key("/index.html") {
+            return build_302(path, format!("/index.html?{}", query));
+        }
+        if let Some(asset) = assets.get(path) {
             for enc_name in encodings.iter() {
                 if let Some(enc) = asset.encodings.get(enc_name) {
-                    return build_200(asset, enc_name, enc, &path, index);
+                    if enc.certified {
+                        return build_200(asset, enc_name, enc, path, index);
+                    }
                 }
             }
         }
 
-        build_404()
+        build_404(path)
     })
 }
 
@@ -548,16 +579,12 @@ fn convert_percent(iter: &mut std::slice::Iter<u8>) -> Option<u8> {
 impl<'a> Iterator for UrlDecode<'a> {
     type Item = char;
 
-     fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<Self::Item> {
         let b = self.bytes.next()?;
         match b {
-            b'%' => {
-                Some(char::from(
-                        convert_percent(&mut self.bytes)
-                        .expect("error decoding url: % must be followed by '%' or two hex digits")
-                    )
-                )
-            }
+            b'%' => Some(char::from(convert_percent(&mut self.bytes).expect(
+                "error decoding url: % must be followed by '%' or two hex digits",
+            ))),
             b'+' => Some(' '),
             x => Some(char::from(*x)),
         }
@@ -570,7 +597,10 @@ impl<'a> Iterator for UrlDecode<'a> {
 }
 
 fn url_decode(url: &str) -> String {
-    UrlDecode { bytes: url.as_bytes().into_iter() }.collect()
+    UrlDecode {
+        bytes: url.as_bytes().into_iter(),
+    }
+    .collect()
 }
 
 #[test]
@@ -595,13 +625,29 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
     encodings.push("identity".to_string());
 
-    let parts: Vec<_> = req.url.split('?').collect();
-    build_http_response(&url_decode(&parts[0]), encodings, 0)
+    let (path, query) = match req.url.find('?') {
+        Some(i) => (&req.url[..i], &req.url[(i + 1)..]),
+        None => (&req.url[..], ""),
+    };
+
+    build_http_response(&url_decode(&path), query, encodings, 0)
 }
 
 #[query]
-fn http_request_streaming_callback(Token { key, content_encoding, index, .. } : Token) -> HttpResponse {
-    build_http_response(&key, vec![content_encoding], index.0.to_usize().unwrap_or(usize::MAX))
+fn http_request_streaming_callback(
+    Token {
+        key,
+        content_encoding,
+        index,
+        ..
+    }: Token,
+) -> HttpResponse {
+    build_http_response(
+        &key,
+        "",
+        vec![content_encoding],
+        index.0.to_usize().unwrap_or(usize::MAX),
+    )
 }
 
 fn do_create_asset(arg: CreateAssetArguments) {
@@ -641,11 +687,21 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
         let mut chunks = s.chunks.borrow_mut();
 
         let mut content_chunks = vec![];
+        let mut hasher = sha2::Sha256::new();
         for chunk_id in arg.chunk_ids.iter() {
             let chunk = chunks
                 .remove(chunk_id)
                 .unwrap_or_else(|| trap(&format!("chunk {} not found", chunk_id)));
+            hasher.update(&chunk.content);
             content_chunks.push(chunk.content);
+        }
+
+        let sha256 = hasher.finalize().into();
+
+        if let Some(expected_hash) = arg.sha256 {
+            if expected_hash != sha256 {
+                trap("sha256 mismatch");
+            }
         }
 
         let total_length: usize = content_chunks.iter().map(|c| c.len()).sum();
@@ -654,11 +710,11 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
             content_chunks,
             certified: false,
             total_length,
-            sha256: arg.sha256.map(|b| {
-                ByteBuf::from(b.to_vec())
-            }),
+            sha256,
         };
         asset.encodings.insert(arg.content_encoding, enc);
+
+        on_asset_change(&arg.key, asset);
     })
 }
 
@@ -668,7 +724,10 @@ fn do_unset_asset_content(arg: UnsetAssetContentArguments) {
         let asset = assets
             .get_mut(&arg.key)
             .unwrap_or_else(|| trap("asset not found"));
-        asset.encodings.remove(&arg.content_encoding);
+
+        if asset.encodings.remove(&arg.content_encoding).is_some() {
+            on_asset_change(&arg.key, asset);
+        }
     })
 }
 
@@ -676,7 +735,8 @@ fn do_delete_asset(arg: DeleteAssetArguments) {
     STATE.with(|s| {
         let mut assets = s.assets.borrow_mut();
         assets.remove(&arg.key);
-    })
+    });
+    delete_asset_hash(&arg.key);
 }
 
 fn do_clear() {
@@ -698,7 +758,93 @@ fn trap_if_unauthorized() {
     })
 }
 
-fn certify_asset(_key: Key, _contents: &[u8]) {}
+fn on_asset_change(key: &str, asset: &mut Asset) {
+    // If the most preferred encoding is present and certified,
+    // there is nothing to do.
+    for enc_name in ENCODING_CERTIFICATION_ORDER.iter() {
+        if let Some(enc) = asset.encodings.get(*enc_name) {
+            if enc.certified {
+                return;
+            }
+        }
+    }
+
+    if asset.encodings.is_empty() {
+        delete_asset_hash(key);
+        return;
+    }
+
+    // An encoding with a higher priority was added, let's certify it
+    // instead.
+
+    for enc in asset.encodings.values_mut() {
+        enc.certified = false;
+    }
+
+    for enc_name in ENCODING_CERTIFICATION_ORDER.iter() {
+        if let Some(enc) = asset.encodings.get_mut(*enc_name) {
+            certify_asset(key.to_string(), &enc.sha256);
+            enc.certified = true;
+            return;
+        }
+    }
+
+    // No known encodings found. Just pick the first one. The exact
+    // order is hard to predict because we use a hash map. Should
+    // almost never happen anyway.
+    if let Some(enc) = asset.encodings.values_mut().next() {
+        certify_asset(key.to_string(), &enc.sha256);
+        enc.certified = true;
+    }
+}
+
+fn certify_asset(key: Key, content_hash: &Hash) {
+    ASSET_HASHES.with(|t| {
+        let mut tree = t.borrow_mut();
+        tree.insert(key, *content_hash);
+        set_root_hash(&*tree);
+    });
+}
+
+fn delete_asset_hash(key: &str) {
+    ASSET_HASHES.with(|t| {
+        let mut tree = t.borrow_mut();
+        tree.delete(key.as_bytes());
+        set_root_hash(&*tree);
+    });
+}
+
+fn set_root_hash(tree: &AssetHashes) {
+    use ic_certified_map::labeled_hash;
+    let full_tree_hash = labeled_hash(b"http_assets", &tree.root_hash());
+    set_certified_data(&full_tree_hash);
+}
+
+fn make_certificate_header(t: &AssetHashes, name: &str) -> (String, String) {
+    use ic_certified_map::labeled;
+
+    let hash_tree = labeled(b"http_assets", t.witness(name.as_bytes()));
+    let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
+    serializer.self_describe().unwrap();
+    hash_tree.serialize(&mut serializer).unwrap();
+
+    let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
+
+    (
+        "IC-Certificate".to_string(),
+        format!(
+            "certificate=:{}:, tree=:{}:",
+            base64::encode(&certificate),
+            base64::encode(&serializer.into_inner())
+        ),
+    )
+}
+
+fn hash_bytes(bytes: &[u8]) -> Hash {
+    let mut hash = sha2::Sha256::new();
+    hash.update(bytes);
+    hash.finalize().into()
+}
 
 #[init]
 fn init() {
