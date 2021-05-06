@@ -856,19 +856,50 @@ fn witness_to_header<'a>(witness: HashTree<'a>) -> HeaderField {
 }
 
 fn merge_hash_trees<'a>(lhs: HashTree<'a>, rhs: HashTree<'a>) -> HashTree<'a> {
-    use HashTree::{Fork, Labeled, Pruned};
+    use HashTree::{Empty, Fork, Labeled, Leaf, Pruned};
 
     match (lhs, rhs) {
+        (Pruned(l), Pruned(r)) => {
+            if l != r {
+                trap(&format!(
+                    "merge_hash_trees: inconsistent pruned hashes: {} != {}",
+                    hex::encode(l),
+                    hex::encode(r),
+                ));
+            }
+            Pruned(l)
+        }
         (Pruned(_), r) => r,
         (l, Pruned(_)) => l,
         (Fork(l), Fork(r)) => Fork(Box::new((
             merge_hash_trees(l.0, r.0),
             merge_hash_trees(l.1, r.1),
         ))),
-        (Labeled(l_label, l), Labeled(_, r)) => {
+        (Labeled(l_label, l), Labeled(r_label, r)) => {
+            if l_label != r_label {
+                trap(&format!(
+                    "merge_hash_trees: inconsistent hash tree labels {} != {}",
+                    hex::encode(l_label),
+                    hex::encode(r_label)
+                ));
+            }
             Labeled(l_label, Box::new(merge_hash_trees(*l, *r)))
         }
-        (other, _) => other,
+        (Empty, Empty) => Empty,
+        (Leaf(l), Leaf(r)) => {
+            if l != r {
+                trap(&format!(
+                    "merge_hash_trees: inconsistent leaves: {} != {}",
+                    hex::encode(l),
+                    hex::encode(r),
+                ));
+            }
+            Leaf(l)
+        }
+        (l, r) => trap(&format!(
+            "merge_hash_trees: inconsistent tree structure: {:#?} !~ {:#?}",
+            l, r,
+        )),
     }
 }
 
