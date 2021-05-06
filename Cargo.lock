@@ -150,6 +150,7 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-macros",
  "ic-types",
+ "num-traits",
  "serde",
  "serde_bytes",
  "sha2",

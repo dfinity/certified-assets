@@ -1,10 +1,10 @@
 use ic_cdk::api::{caller, time, trap};
 use ic_cdk::export::candid::{CandidType, Deserialize, Func, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
+use num_traits::ToPrimitive;
 use serde_bytes::ByteBuf;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::convert::TryInto;
 
 const BATCH_EXPIRY_NANOS: u64 = 300_000_000_000;
 
@@ -37,7 +37,7 @@ struct AssetEncoding {
     content_chunks: Vec<ByteBuf>,
     total_length: usize,
     certified: bool,
-    sha256: Option<[u8; 32]>,
+    sha256: Option<ByteBuf>,
 }
 
 #[derive(Default, Clone, Debug, CandidType, Deserialize)]
@@ -66,7 +66,7 @@ struct AssetDetails {
 struct AssetEncodingDetails {
     modified: Timestamp,
     content_encoding: String,
-    sha256: Option<[u8; 32]>,
+    sha256: Option<ByteBuf>,
     length: Nat,
 }
 
@@ -135,7 +135,7 @@ struct StoreArg {
     content_type: String,
     content_encoding: String,
     content: ByteBuf,
-    sha256: Option<[u8; 32]>,
+    sha256: Option<ByteBuf>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -149,7 +149,7 @@ struct GetChunkArg {
     key: Key,
     content_encoding: String,
     index: Nat,
-    sha256: Option<[u8; 32]>,
+    sha256: Option<ByteBuf>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -193,7 +193,13 @@ struct HttpResponse {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-struct Token {}
+struct Token {
+    key: String,
+    content_encoding: String,
+    index: Nat,
+    // We don't care about the sha, we just want to be backward compatible.
+    sha256: Option<ByteBuf>,
+}
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 enum StreamingStrategy {
@@ -207,7 +213,7 @@ struct StreamingCallbackHttpResponse {
 }
 
 #[update]
-fn autorize(other: Principal) {
+fn authorize(other: Principal) {
     let caller = caller();
     STATE.with(|s| {
         let caller_autorized = s.authorized.borrow().iter().any(|p| *p == caller);
@@ -227,7 +233,7 @@ fn retrieve(key: Key) -> ByteBuf {
             .get("identity")
             .unwrap_or_else(|| trap("no identity encoding"));
         if id_enc.content_chunks.len() > 1 {
-            trap("Asset is too large. Uset get() and get_chunk() instead.");
+            trap("Asset too large. Use get() and get_chunk() instead.");
         }
         id_enc.content_chunks[0].clone()
     })
@@ -379,7 +385,7 @@ fn get(arg: GetArg) -> EncodedAsset {
                     content_type: asset.content_type.clone(),
                     content_encoding: enc.clone(),
                     total_length: Nat::from(asset_enc.total_length as u64),
-                    sha256: asset_enc.sha256.map(|digest| ByteBuf::from(digest)),
+                    sha256: asset_enc.sha256.clone(),
                 };
             }
         }
@@ -400,7 +406,7 @@ fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
             .get(&arg.content_encoding)
             .unwrap_or_else(|| trap("no such encoding"));
 
-        if let (Some(l), Some(r)) = (arg.sha256, enc.sha256) {
+        if let (Some(l), Some(r)) = (arg.sha256, enc.sha256.clone()) {
             if l != r {
                 trap("sha256 mismatch")
             }
@@ -429,7 +435,7 @@ fn list() -> Vec<AssetDetails> {
                     .map(|(enc_name, enc)| AssetEncodingDetails {
                         modified: enc.modified,
                         content_encoding: enc_name.clone(),
-                        sha256: enc.sha256,
+                        sha256: enc.sha256.clone(),
                         length: Nat::from(enc.total_length),
                     })
                     .collect();
@@ -445,6 +451,138 @@ fn list() -> Vec<AssetDetails> {
     })
 }
 
+fn create_strategy(
+    _asset: &Asset,
+    enc_name: &str,
+    enc: &AssetEncoding,
+    key: &str,
+    chunk_index: usize,
+) -> Option<StreamingStrategy> {
+    if chunk_index + 1 >= enc.content_chunks.len() {
+        None
+    } else {
+        Some(StreamingStrategy::Callback {
+            callback: ic_cdk::export::candid::Func {
+                method: "http_request_streaming_callback".to_string(),
+                principal: ic_cdk::id(),
+            },
+            token: Token {
+                key: key.to_string(),
+                content_encoding: enc_name.to_string(),
+                index: Nat::from(chunk_index + 1),
+                sha256: enc.sha256.clone(),
+            }
+        })
+    }
+}
+
+fn build_200(
+    asset: &Asset,
+    enc_name: &str,
+    enc: &AssetEncoding,
+    key: &str,
+    chunk_index: usize,
+) -> HttpResponse {
+    let mut headers = vec![
+        ("Content-Type".to_string(), asset.content_type.to_string())
+    ];
+    if enc_name != "identity" {
+        headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
+    }
+
+    let streaming_strategy = create_strategy(asset, enc_name, enc, key, chunk_index);
+
+    HttpResponse {
+        status_code: 200,
+        headers,
+        body: enc.content_chunks[chunk_index].clone(),
+        streaming_strategy,
+    }
+}
+
+fn build_404() -> HttpResponse {
+    HttpResponse {
+        status_code: 404,
+        headers: vec![],
+        body: ByteBuf::from("not found"),
+        streaming_strategy: None,
+    }
+}
+
+fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> HttpResponse {
+    STATE.with(|s| {
+        let assets = s.assets.borrow();
+
+        if let Some(asset) = assets.get(path).or_else(|| assets.get("/index.html")) {
+            for enc_name in encodings.iter() {
+                if let Some(enc) = asset.encodings.get(enc_name) {
+                    return build_200(asset, enc_name, enc, &path, index);
+                }
+            }
+        }
+
+        build_404()
+    })
+}
+
+/// An iterator-like structure that decode a URL.
+struct UrlDecode<'a> {
+    bytes: std::slice::Iter<'a, u8>,
+}
+
+fn convert_percent(iter: &mut std::slice::Iter<u8>) -> Option<u8> {
+    let mut cloned_iter = iter.clone();
+    let result = match cloned_iter.next()? {
+        b'%' => b'%',
+        h => {
+            let h = char::from(*h).to_digit(16)?;
+            let l = char::from(*cloned_iter.next()?).to_digit(16)?;
+            h as u8 * 0x10 + l as u8
+        }
+    };
+    // Update this if we make it this far, otherwise "reset" the iterator.
+    *iter = cloned_iter;
+    Some(result)
+}
+
+impl<'a> Iterator for UrlDecode<'a> {
+    type Item = char;
+
+     fn next(&mut self) -> Option<Self::Item> {
+        let b = self.bytes.next()?;
+        match b {
+            b'%' => {
+                Some(char::from(
+                        convert_percent(&mut self.bytes)
+                        .expect("error decoding url: % must be followed by '%' or two hex digits")
+                    )
+                )
+            }
+            b'+' => Some(' '),
+            x => Some(char::from(*x)),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let bytes = self.bytes.len();
+        (bytes / 3, Some(bytes))
+    }
+}
+
+fn url_decode(url: &str) -> String {
+    UrlDecode { bytes: url.as_bytes().into_iter() }.collect()
+}
+
+#[test]
+fn check_url_decode() {
+    assert_eq!(url_decode("/%"), "/%");
+    assert_eq!(url_decode("/%%"), "/%");
+    assert_eq!(url_decode("/%20a"), "/ a");
+    assert_eq!(url_decode("/%%+a%20+%@"), "/% a  %@");
+    assert_eq!(url_decode("/has%percent.txt"), "/has%percent.txt");
+    assert_eq!(url_decode("/%e6"), "/æ");
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     let mut encodings = vec![];
@@ -457,36 +595,13 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
     encodings.push("identity".to_string());
 
-    STATE.with(|s| {
-        let assets = s.assets.borrow();
-        let mut headers = vec![];
-        // TODO: urldecode
-        let parts: Vec<_> = req.url.split('?').collect();
+    let parts: Vec<_> = req.url.split('?').collect();
+    build_http_response(&url_decode(&parts[0]), encodings, 0)
+}
 
-        if let Some(asset) = assets.get(parts[0]).or_else(|| assets.get("/index.html")) {
-            for enc_name in encodings.iter() {
-                if let Some(enc) = asset.encodings.get(enc_name) {
-                    headers.push(("Content-Type".to_string(), asset.content_type.to_string()));
-                    if enc_name != "identity" {
-                        headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
-                    }
-
-                    return HttpResponse {
-                        status_code: 200,
-                        headers,
-                        body: enc.content_chunks[0].clone(),
-                        streaming_strategy: None,
-                    };
-                }
-            }
-        }
-        HttpResponse {
-            status_code: 404,
-            headers,
-            body: ByteBuf::from("not found"),
-            streaming_strategy: None,
-        }
-    })
+#[query]
+fn http_request_streaming_callback(Token { key, content_encoding, index, .. } : Token) -> HttpResponse {
+    build_http_response(&key, vec![content_encoding], index.0.to_usize().unwrap_or(usize::MAX))
 }
 
 fn do_create_asset(arg: CreateAssetArguments) {
@@ -540,9 +655,7 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
             certified: false,
             total_length,
             sha256: arg.sha256.map(|b| {
-                b.to_vec()
-                    .try_into()
-                    .unwrap_or_else(|_| trap("invalid hash length"))
+                ByteBuf::from(b.to_vec())
             }),
         };
         asset.encodings.insert(arg.content_encoding, enc);
