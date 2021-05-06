@@ -1,7 +1,7 @@
 use ic_cdk::api::{caller, data_certificate, set_certified_data, time, trap};
 use ic_cdk::export::candid::{CandidType, Deserialize, Func, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
-use ic_certified_map::{AsHashTree, Hash, RbTree};
+use ic_certified_map::{AsHashTree, Hash, HashTree, RbTree};
 use num_traits::ToPrimitive;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
@@ -15,6 +15,9 @@ const BATCH_EXPIRY_NANOS: u64 = 300_000_000_000;
 
 /// The order in which we pick encodings for certification.
 const ENCODING_CERTIFICATION_ORDER: &[&str] = &["identity", "gzip", "compress", "deflate", "br"];
+
+/// The file to serve if the requested file wasn't found.
+const INDEX_FILE: &str = "/index.html";
 
 thread_local! {
     static STATE: State = State::default();
@@ -492,9 +495,8 @@ fn build_200(
     enc: &AssetEncoding,
     key: &str,
     chunk_index: usize,
+    certificate_header: HeaderField,
 ) -> HttpResponse {
-    let certificate_header = ASSET_HASHES.with(|t| make_certificate_header(&t.borrow_mut(), key));
-
     let mut headers = vec![("Content-Type".to_string(), asset.content_type.to_string())];
     if enc_name != "identity" {
         headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
@@ -511,18 +513,7 @@ fn build_200(
     }
 }
 
-fn build_302(key: &str, location: String) -> HttpResponse {
-    let certificate_header = ASSET_HASHES.with(|t| make_certificate_header(&t.borrow_mut(), key));
-    HttpResponse {
-        status_code: 302,
-        headers: vec![certificate_header, ("Location".to_string(), location)],
-        body: ByteBuf::from("found"),
-        streaming_strategy: None,
-    }
-}
-
-fn build_404(key: &str) -> HttpResponse {
-    let certificate_header = ASSET_HASHES.with(|t| make_certificate_header(&t.borrow_mut(), key));
+fn build_404(certificate_header: HeaderField) -> HttpResponse {
     HttpResponse {
         status_code: 404,
         headers: vec![certificate_header],
@@ -531,28 +522,53 @@ fn build_404(key: &str) -> HttpResponse {
     }
 }
 
-fn build_http_response(
-    path: &str,
-    query: &str,
-    encodings: Vec<String>,
-    index: usize,
-) -> HttpResponse {
+fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> HttpResponse {
     STATE.with(|s| {
         let assets = s.assets.borrow();
-        if path == "/" && !assets.contains_key("/") && assets.contains_key("/index.html") {
-            return build_302(path, format!("/index.html?{}", query));
-        }
-        if let Some(asset) = assets.get(path) {
-            for enc_name in encodings.iter() {
-                if let Some(enc) = asset.encodings.get(enc_name) {
+
+        let index_redirect_certificate = ASSET_HASHES.with(|t| {
+            let tree = t.borrow();
+            if tree.get(path.as_bytes()).is_none() && tree.get(INDEX_FILE.as_bytes()).is_some() {
+                let absence_proof = tree.witness(path.as_bytes());
+                let index_proof = tree.witness(INDEX_FILE.as_bytes());
+                let combined_proof = merge_hash_trees(absence_proof, index_proof);
+                Some(witness_to_header(combined_proof))
+            } else {
+                None
+            }
+        });
+
+        if let Some(certificate_header) = index_redirect_certificate {
+            if let Some(asset) = assets.get(INDEX_FILE) {
+                for (enc_name, enc) in asset.encodings.iter() {
                     if enc.certified {
-                        return build_200(asset, enc_name, enc, path, index);
+                        return build_200(
+                            asset,
+                            enc_name,
+                            enc,
+                            INDEX_FILE,
+                            index,
+                            certificate_header,
+                        );
                     }
                 }
             }
         }
 
-        build_404(path)
+        let certificate_header =
+            ASSET_HASHES.with(|t| witness_to_header(t.borrow().witness(path.as_bytes())));
+
+        if let Some(asset) = assets.get(path) {
+            for enc_name in encodings.iter() {
+                if let Some(enc) = asset.encodings.get(enc_name) {
+                    if enc.certified {
+                        return build_200(asset, enc_name, enc, path, index, certificate_header);
+                    }
+                }
+            }
+        }
+
+        build_404(certificate_header)
     })
 }
 
@@ -625,12 +641,12 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
     encodings.push("identity".to_string());
 
-    let (path, query) = match req.url.find('?') {
-        Some(i) => (&req.url[..i], &req.url[(i + 1)..]),
-        None => (&req.url[..], ""),
+    let path = match req.url.find('?') {
+        Some(i) => &req.url[..i],
+        None => &req.url[..],
     };
 
-    build_http_response(&url_decode(&path), query, encodings, 0)
+    build_http_response(&url_decode(&path), encodings, 0)
 }
 
 #[query]
@@ -644,7 +660,6 @@ fn http_request_streaming_callback(
 ) -> HttpResponse {
     build_http_response(
         &key,
-        "",
         vec![content_encoding],
         index.0.to_usize().unwrap_or(usize::MAX),
     )
@@ -820,10 +835,10 @@ fn set_root_hash(tree: &AssetHashes) {
     set_certified_data(&full_tree_hash);
 }
 
-fn make_certificate_header(t: &AssetHashes, name: &str) -> (String, String) {
+fn witness_to_header<'a>(witness: HashTree<'a>) -> HeaderField {
     use ic_certified_map::labeled;
 
-    let hash_tree = labeled(b"http_assets", t.witness(name.as_bytes()));
+    let hash_tree = labeled(b"http_assets", witness);
     let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
     serializer.self_describe().unwrap();
     hash_tree.serialize(&mut serializer).unwrap();
@@ -838,6 +853,23 @@ fn make_certificate_header(t: &AssetHashes, name: &str) -> (String, String) {
             base64::encode(&serializer.into_inner())
         ),
     )
+}
+
+fn merge_hash_trees<'a>(lhs: HashTree<'a>, rhs: HashTree<'a>) -> HashTree<'a> {
+    use HashTree::{Fork, Labeled, Pruned};
+
+    match (lhs, rhs) {
+        (Pruned(_), r) => r,
+        (l, Pruned(_)) => l,
+        (Fork(l), Fork(r)) => Fork(Box::new((
+            merge_hash_trees(l.0, r.0),
+            merge_hash_trees(l.1, r.1),
+        ))),
+        (Labeled(l_label, l), Labeled(_, r)) => {
+            Labeled(l_label, Box::new(merge_hash_trees(*l, *r)))
+        }
+        (other, _) => other,
+    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> Hash {
@@ -865,11 +897,20 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade() {
     do_clear();
+
     let (stable_state,): (StableState,) = ic_cdk::storage::stable_restore()
         .unwrap_or_else(|e| trap(&format!("failed to restore stable state: {}", e)));
+
     STATE.with(|s| {
         s.authorized.replace(stable_state.authorized);
         s.assets.replace(stable_state.stable_assets);
+
+        for (asset_name, asset) in s.assets.borrow_mut().iter_mut() {
+            for enc in asset.encodings.values_mut() {
+                enc.certified = false;
+            }
+            on_asset_change(asset_name, asset);
+        }
     });
 }
 
