@@ -1,3 +1,6 @@
+mod rc_bytes;
+
+use crate::rc_bytes::RcBytes;
 use ic_cdk::api::{caller, data_certificate, set_certified_data, time, trap};
 use ic_cdk::export::candid::{CandidType, Deserialize, Func, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
@@ -48,7 +51,7 @@ struct StableState {
 #[derive(Default, Clone, Debug, CandidType, Deserialize)]
 struct AssetEncoding {
     modified: Timestamp,
-    content_chunks: Vec<ByteBuf>,
+    content_chunks: Vec<RcBytes>,
     total_length: usize,
     certified: bool,
     sha256: [u8; 32],
@@ -62,7 +65,7 @@ struct Asset {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 struct EncodedAsset {
-    content: ByteBuf,
+    content: RcBytes,
     content_type: String,
     content_encoding: String,
     total_length: Nat,
@@ -86,7 +89,7 @@ struct AssetEncodingDetails {
 
 struct Chunk {
     batch_id: BatchId,
-    content: ByteBuf,
+    content: RcBytes,
 }
 
 struct Batch {
@@ -168,7 +171,7 @@ struct GetChunkArg {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 struct GetChunkResponse {
-    content: ByteBuf,
+    content: RcBytes,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -202,7 +205,7 @@ struct HttpRequest {
 struct HttpResponse {
     status_code: u16,
     headers: Vec<HeaderField>,
-    body: ByteBuf,
+    body: RcBytes,
     streaming_strategy: Option<StreamingStrategy>,
 }
 
@@ -222,7 +225,7 @@ enum StreamingStrategy {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 struct StreamingCallbackHttpResponse {
-    body: ByteBuf,
+    body: RcBytes,
     token: Option<Token>,
 }
 
@@ -238,7 +241,7 @@ fn authorize(other: Principal) {
 }
 
 #[query]
-fn retrieve(key: Key) -> ByteBuf {
+fn retrieve(key: Key) -> RcBytes {
     STATE.with(|s| {
         let assets = s.assets.borrow();
         let asset = assets.get(&key).unwrap_or_else(|| trap("asset not found"));
@@ -271,7 +274,7 @@ fn store(arg: StoreArg) {
 
         let encoding = asset.encodings.entry(arg.content_encoding).or_default();
         encoding.total_length = arg.content.len();
-        encoding.content_chunks = vec![arg.content];
+        encoding.content_chunks = vec![RcBytes::from(arg.content)];
         encoding.modified = time() as u64;
         encoding.sha256 = hash;
 
@@ -327,7 +330,7 @@ fn create_chunk(arg: CreateChunkArg) -> CreateChunkResponse {
             chunk_id.clone(),
             Chunk {
                 batch_id: arg.batch_id,
-                content: arg.content,
+                content: RcBytes::from(arg.content),
             },
         );
 
@@ -517,7 +520,7 @@ fn build_404(certificate_header: HeaderField) -> HttpResponse {
     HttpResponse {
         status_code: 404,
         headers: vec![certificate_header],
-        body: ByteBuf::from("not found"),
+        body: RcBytes::from(ByteBuf::from("not found")),
         streaming_strategy: None,
     }
 }
@@ -707,7 +710,7 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
             let chunk = chunks
                 .remove(chunk_id)
                 .unwrap_or_else(|| trap(&format!("chunk {} not found", chunk_id)));
-            hasher.update(&chunk.content);
+            hasher.update(&*chunk.content);
             content_chunks.push(chunk.content);
         }
 
