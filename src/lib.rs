@@ -690,10 +690,7 @@ fn do_create_asset(arg: CreateAssetArguments) {
 fn do_set_asset_content(arg: SetAssetContentArguments) {
     STATE.with(|s| {
         if arg.chunk_ids.is_empty() {
-            trap(&format!(
-                "({}): must have at least one chunk",
-                arg.content_encoding
-            ));
+            trap("encoding must have at least one chunk");
         }
 
         let mut assets = s.assets.borrow_mut();
@@ -709,7 +706,7 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
         for chunk_id in arg.chunk_ids.iter() {
             let chunk = chunks
                 .remove(chunk_id)
-                .unwrap_or_else(|| trap(&format!("chunk {} not found", chunk_id)));
+                .expect("chunk not found");
             hasher.update(&*chunk.content);
             content_chunks.push(chunk.content);
         }
@@ -850,11 +847,11 @@ fn witness_to_header<'a>(witness: HashTree<'a>) -> HeaderField {
 
     (
         "IC-Certificate".to_string(),
-        format!(
-            "certificate=:{}:, tree=:{}:",
-            base64::encode(&certificate),
-            base64::encode(&serializer.into_inner())
-        ),
+        String::from("certificate=:")
+            + &base64::encode(&certificate)
+            + ":, tree=:"
+            + &base64::encode(&serializer.into_inner())
+            + ":",
     )
 }
 
@@ -864,11 +861,7 @@ fn merge_hash_trees<'a>(lhs: HashTree<'a>, rhs: HashTree<'a>) -> HashTree<'a> {
     match (lhs, rhs) {
         (Pruned(l), Pruned(r)) => {
             if l != r {
-                trap(&format!(
-                    "merge_hash_trees: inconsistent pruned hashes: {} != {}",
-                    hex::encode(l),
-                    hex::encode(r),
-                ));
+                trap("merge_hash_trees: inconsistent hashes");
             }
             Pruned(l)
         }
@@ -880,29 +873,20 @@ fn merge_hash_trees<'a>(lhs: HashTree<'a>, rhs: HashTree<'a>) -> HashTree<'a> {
         ))),
         (Labeled(l_label, l), Labeled(r_label, r)) => {
             if l_label != r_label {
-                trap(&format!(
-                    "merge_hash_trees: inconsistent hash tree labels {} != {}",
-                    hex::encode(l_label),
-                    hex::encode(r_label)
-                ));
+                trap("merge_hash_trees: inconsistent hash tree labels");
             }
             Labeled(l_label, Box::new(merge_hash_trees(*l, *r)))
         }
         (Empty, Empty) => Empty,
         (Leaf(l), Leaf(r)) => {
             if l != r {
-                trap(&format!(
-                    "merge_hash_trees: inconsistent leaves: {} != {}",
-                    hex::encode(l),
-                    hex::encode(r),
-                ));
+                trap("merge_hash_trees: inconsistent leaves");
             }
             Leaf(l)
         }
-        (l, r) => trap(&format!(
-            "merge_hash_trees: inconsistent tree structure: {:#?} !~ {:#?}",
-            l, r,
-        )),
+        (_l, _r) => {
+            trap("merge_hash_trees: inconsistent tree structure");
+        }
     }
 }
 
@@ -925,7 +909,7 @@ fn pre_upgrade() {
         stable_assets: s.assets.take(),
     });
     ic_cdk::storage::stable_save((stable_state,))
-        .unwrap_or_else(|e| trap(&format!("failed to save stable state: {}", e)));
+        .expect("failed to save stable state");
 }
 
 #[post_upgrade]
@@ -933,7 +917,7 @@ fn post_upgrade() {
     do_clear();
 
     let (stable_state,): (StableState,) = ic_cdk::storage::stable_restore()
-        .unwrap_or_else(|e| trap(&format!("failed to restore stable state: {}", e)));
+        .expect("failed to restore stable state");
 
     STATE.with(|s| {
         s.authorized.replace(stable_state.authorized);
@@ -947,5 +931,3 @@ fn post_upgrade() {
         }
     });
 }
-
-fn main() {}
