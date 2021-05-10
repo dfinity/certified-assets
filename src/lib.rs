@@ -467,29 +467,39 @@ fn list() -> Vec<AssetDetails> {
     })
 }
 
-fn create_strategy(
+fn create_token(
     _asset: &Asset,
     enc_name: &str,
     enc: &AssetEncoding,
     key: &str,
     chunk_index: usize,
-) -> Option<StreamingStrategy> {
+) -> Option<Token> {
     if chunk_index + 1 >= enc.content_chunks.len() {
         None
     } else {
-        Some(StreamingStrategy::Callback {
-            callback: ic_cdk::export::candid::Func {
-                method: "http_request_streaming_callback".to_string(),
-                principal: ic_cdk::id(),
-            },
-            token: Token {
-                key: key.to_string(),
-                content_encoding: enc_name.to_string(),
-                index: Nat::from(chunk_index + 1),
-                sha256: Some(ByteBuf::from(enc.sha256)),
-            },
+        Some(Token {
+            key: key.to_string(),
+            content_encoding: enc_name.to_string(),
+            index: Nat::from(chunk_index + 1),
+            sha256: Some(ByteBuf::from(enc.sha256)),
         })
     }
+}
+
+fn create_strategy(
+    asset: &Asset,
+    enc_name: &str,
+    enc: &AssetEncoding,
+    key: &str,
+    chunk_index: usize,
+) -> Option<StreamingStrategy> {
+    create_token(asset, enc_name, enc, key, chunk_index).map(|token| StreamingStrategy::Callback {
+        callback: ic_cdk::export::candid::Func {
+            method: "http_request_stream_callback".to_string(),
+            principal: ic_cdk::id(),
+        },
+        token,
+    })
 }
 
 fn build_200(
@@ -653,19 +663,31 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 }
 
 #[query]
-fn http_request_streaming_callback(
+fn http_request_stream_callback(
     Token {
         key,
         content_encoding,
         index,
         ..
     }: Token,
-) -> HttpResponse {
-    build_http_response(
-        &key,
-        vec![content_encoding],
-        index.0.to_usize().unwrap_or(usize::MAX),
-    )
+) -> StreamingCallbackHttpResponse {
+    STATE.with(|s| {
+        let assets = s.assets.borrow();
+        let asset = assets
+            .get(&key)
+            .expect("Invalid token on streaming: key not found.");
+        let enc = asset
+            .encodings
+            .get(&content_encoding)
+            .expect("Invalid token on streaming: encoding not found.");
+        // MAX is good enough. This means a chunk would be above 64-bits, which is impossible...
+        let chunk_index = index.0.to_usize().unwrap_or(usize::MAX);
+
+        StreamingCallbackHttpResponse {
+            body: enc.content_chunks[chunk_index].clone(),
+            token: create_token(&asset, &content_encoding, enc, &key, chunk_index),
+        }
+    })
 }
 
 fn do_create_asset(arg: CreateAssetArguments) {
@@ -704,9 +726,7 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
         let mut content_chunks = vec![];
         let mut hasher = sha2::Sha256::new();
         for chunk_id in arg.chunk_ids.iter() {
-            let chunk = chunks
-                .remove(chunk_id)
-                .expect("chunk not found");
+            let chunk = chunks.remove(chunk_id).expect("chunk not found");
             hasher.update(&*chunk.content);
             content_chunks.push(chunk.content);
         }
@@ -908,16 +928,15 @@ fn pre_upgrade() {
         authorized: s.authorized.take(),
         stable_assets: s.assets.take(),
     });
-    ic_cdk::storage::stable_save((stable_state,))
-        .expect("failed to save stable state");
+    ic_cdk::storage::stable_save((stable_state,)).expect("failed to save stable state");
 }
 
 #[post_upgrade]
 fn post_upgrade() {
     do_clear();
 
-    let (stable_state,): (StableState,) = ic_cdk::storage::stable_restore()
-        .expect("failed to restore stable state");
+    let (stable_state,): (StableState,) =
+        ic_cdk::storage::stable_restore().expect("failed to restore stable state");
 
     STATE.with(|s| {
         s.authorized.replace(stable_state.authorized);
