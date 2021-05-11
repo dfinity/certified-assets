@@ -256,10 +256,8 @@ fn retrieve(key: Key) -> RcBytes {
     })
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn store(arg: StoreArg) {
-    trap_if_unauthorized();
-
     STATE.with(move |s| {
         let mut assets = s.assets.borrow_mut();
         let asset = assets.entry(arg.key.clone()).or_default();
@@ -282,10 +280,8 @@ fn store(arg: StoreArg) {
     });
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn create_batch() -> CreateBatchResponse {
-    trap_if_unauthorized();
-
     STATE.with(|s| {
         let batch_id = s.next_batch_id.borrow().clone();
         *s.next_batch_id.borrow_mut() += 1;
@@ -311,10 +307,8 @@ fn create_batch() -> CreateBatchResponse {
     })
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn create_chunk(arg: CreateChunkArg) -> CreateChunkResponse {
-    trap_if_unauthorized();
-
     STATE.with(|s| {
         let mut batches = s.batches.borrow_mut();
         let now = time() as u64;
@@ -338,39 +332,33 @@ fn create_chunk(arg: CreateChunkArg) -> CreateChunkResponse {
     })
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn create_asset(arg: CreateAssetArguments) {
-    trap_if_unauthorized();
     do_create_asset(arg);
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn set_asset_content(arg: SetAssetContentArguments) {
-    trap_if_unauthorized();
     do_set_asset_content(arg);
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn unset_asset_content(arg: UnsetAssetContentArguments) {
-    trap_if_unauthorized();
     do_unset_asset_content(arg);
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn delete_content(arg: DeleteAssetArguments) {
-    trap_if_unauthorized();
     do_delete_asset(arg);
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn clear() {
-    trap_if_unauthorized();
     do_clear();
 }
 
-#[update]
+#[update(guard = "is_authorized")]
 fn commit_batch(arg: CommitBatchArguments) {
-    trap_if_unauthorized();
     let batch_id = arg.batch_id;
     for op in arg.operations {
         match op {
@@ -508,13 +496,15 @@ fn build_200(
     enc: &AssetEncoding,
     key: &str,
     chunk_index: usize,
-    certificate_header: HeaderField,
+    certificate_header: Option<HeaderField>,
 ) -> HttpResponse {
     let mut headers = vec![("Content-Type".to_string(), asset.content_type.to_string())];
     if enc_name != "identity" {
         headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
     }
-    headers.push(certificate_header);
+    if let Some(head) = certificate_header {
+        headers.push(head);
+    }
 
     let streaming_strategy = create_strategy(asset, enc_name, enc, key, chunk_index);
 
@@ -561,7 +551,7 @@ fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> Http
                             enc,
                             INDEX_FILE,
                             index,
-                            certificate_header,
+                            Some(certificate_header),
                         );
                     }
                 }
@@ -575,7 +565,28 @@ fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> Http
             for enc_name in encodings.iter() {
                 if let Some(enc) = asset.encodings.get(enc_name) {
                     if enc.certified {
-                        return build_200(asset, enc_name, enc, path, index, certificate_header);
+                        return build_200(
+                            asset,
+                            enc_name,
+                            enc,
+                            path,
+                            index,
+                            Some(certificate_header),
+                        );
+                    } else {
+                        // Find if identity is certified, if it's not.
+                        if let Some(id_enc) = asset.encodings.get("identity") {
+                            if id_enc.certified {
+                                return build_200(
+                                    asset,
+                                    enc_name,
+                                    enc,
+                                    path,
+                                    index,
+                                    Some(certificate_header),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -784,12 +795,13 @@ fn do_clear() {
     })
 }
 
-fn trap_if_unauthorized() {
-    let caller = caller();
+fn is_authorized() -> Result<(), String> {
     STATE.with(|s| {
-        if s.authorized.borrow().iter().all(|p| *p != caller) {
-            trap("caller is not authorized");
-        }
+        s.authorized
+            .borrow()
+            .contains(&caller())
+            .then(|| ())
+            .ok_or("Caller is not authorized".to_string())
     })
 }
 
