@@ -483,7 +483,7 @@ fn create_strategy(
 ) -> Option<StreamingStrategy> {
     create_token(asset, enc_name, enc, key, chunk_index).map(|token| StreamingStrategy::Callback {
         callback: ic_cdk::export::candid::Func {
-            method: "http_request_stream_callback".to_string(),
+            method: "http_request_streaming_callback".to_string(),
             principal: ic_cdk::id(),
         },
         token,
@@ -674,7 +674,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 }
 
 #[query]
-fn http_request_stream_callback(
+fn http_request_streaming_callback(
     Token {
         key,
         content_encoding,
