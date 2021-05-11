@@ -214,7 +214,8 @@ struct Token {
     key: String,
     content_encoding: String,
     index: Nat,
-    // We don't care about the sha, we just want to be backward compatible.
+    // The sha ensures that a client doesn't stream part of one version of an asset
+    // followed by part of a different asset, even if not checking the certificate.
     sha256: Option<ByteBuf>,
 }
 
@@ -679,6 +680,7 @@ fn http_request_stream_callback(
         key,
         content_encoding,
         index,
+        sha256,
         ..
     }: Token,
 ) -> StreamingCallbackHttpResponse {
@@ -691,6 +693,12 @@ fn http_request_stream_callback(
             .encodings
             .get(&content_encoding)
             .expect("Invalid token on streaming: encoding not found.");
+        if let Some(expected_hash) = sha256 {
+            if expected_hash != enc.sha256 {
+                trap("sha256 mismatch")
+            }
+        }
+
         // MAX is good enough. This means a chunk would be above 64-bits, which is impossible...
         let chunk_index = index.0.to_usize().unwrap_or(usize::MAX);
 
