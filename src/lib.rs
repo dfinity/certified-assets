@@ -2,7 +2,7 @@ mod rc_bytes;
 
 use crate::rc_bytes::RcBytes;
 use ic_cdk::api::{caller, data_certificate, set_certified_data, time, trap};
-use ic_cdk::export::candid::{CandidType, Deserialize, Func, Nat, Principal};
+use ic_cdk::export::candid::{CandidType, Deserialize, Func, Int, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use ic_certified_map::{AsHashTree, Hash, HashTree, RbTree};
 use num_traits::ToPrimitive;
@@ -81,10 +81,10 @@ struct AssetDetails {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 struct AssetEncodingDetails {
-    modified: Timestamp,
     content_encoding: String,
     sha256: Option<ByteBuf>,
     length: Nat,
+    modified: Timestamp,
 }
 
 struct Chunk {
@@ -96,7 +96,7 @@ struct Batch {
     expires_at: Timestamp,
 }
 
-type Timestamp = u64;
+type Timestamp = Int;
 type BatchId = Nat;
 type ChunkId = Nat;
 type Key = String;
@@ -210,7 +210,7 @@ struct HttpResponse {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-struct Token {
+struct StreamingCallbackToken {
     key: String,
     content_encoding: String,
     index: Nat,
@@ -220,13 +220,16 @@ struct Token {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 enum StreamingStrategy {
-    Callback { callback: Func, token: Token },
+    Callback {
+        callback: Func,
+        token: StreamingCallbackToken,
+    },
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 struct StreamingCallbackHttpResponse {
     body: RcBytes,
-    token: Option<Token>,
+    token: Option<StreamingCallbackToken>,
 }
 
 #[update]
@@ -273,7 +276,7 @@ fn store(arg: StoreArg) {
         let encoding = asset.encodings.entry(arg.content_encoding).or_default();
         encoding.total_length = arg.content.len();
         encoding.content_chunks = vec![RcBytes::from(arg.content)];
-        encoding.modified = time() as u64;
+        encoding.modified = Int::from(time() as u64);
         encoding.sha256 = hash;
 
         on_asset_change(&arg.key, asset);
@@ -292,7 +295,7 @@ fn create_batch() -> CreateBatchResponse {
         batches.insert(
             batch_id.clone(),
             Batch {
-                expires_at: now + BATCH_EXPIRY_NANOS,
+                expires_at: Int::from(now + BATCH_EXPIRY_NANOS),
             },
         );
         s.chunks.borrow_mut().retain(|_, c| {
@@ -315,7 +318,7 @@ fn create_chunk(arg: CreateChunkArg) -> CreateChunkResponse {
         let mut batch = batches
             .get_mut(&arg.batch_id)
             .unwrap_or_else(|| trap("batch not found"));
-        batch.expires_at = now + BATCH_EXPIRY_NANOS;
+        batch.expires_at = Int::from(now + BATCH_EXPIRY_NANOS);
 
         let chunk_id = s.next_chunk_id.borrow().clone();
         *s.next_chunk_id.borrow_mut() += 1;
@@ -437,10 +440,10 @@ fn list() -> Vec<AssetDetails> {
                     .encodings
                     .iter()
                     .map(|(enc_name, enc)| AssetEncodingDetails {
-                        modified: enc.modified,
                         content_encoding: enc_name.clone(),
                         sha256: Some(ByteBuf::from(enc.sha256)),
                         length: Nat::from(enc.total_length),
+                        modified: enc.modified.clone(),
                     })
                     .collect();
                 encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
@@ -461,11 +464,11 @@ fn create_token(
     enc: &AssetEncoding,
     key: &str,
     chunk_index: usize,
-) -> Option<Token> {
+) -> Option<StreamingCallbackToken> {
     if chunk_index + 1 >= enc.content_chunks.len() {
         None
     } else {
-        Some(Token {
+        Some(StreamingCallbackToken {
             key: key.to_string(),
             content_encoding: enc_name.to_string(),
             index: Nat::from(chunk_index + 1),
@@ -675,12 +678,12 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 
 #[query]
 fn http_request_streaming_callback(
-    Token {
+    StreamingCallbackToken {
         key,
         content_encoding,
         index,
-        ..
-    }: Token,
+        sha256,
+    }: StreamingCallbackToken,
 ) -> StreamingCallbackHttpResponse {
     STATE.with(|s| {
         let assets = s.assets.borrow();
@@ -691,6 +694,13 @@ fn http_request_streaming_callback(
             .encodings
             .get(&content_encoding)
             .expect("Invalid token on streaming: encoding not found.");
+
+        if let Some(expected_hash) = sha256 {
+            if expected_hash != enc.sha256 {
+                trap("sha256 mismatch");
+            }
+        }
+
         // MAX is good enough. This means a chunk would be above 64-bits, which is impossible...
         let chunk_index = index.0.to_usize().unwrap_or(usize::MAX);
 
@@ -730,7 +740,7 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
         let asset = assets
             .get_mut(&arg.key)
             .unwrap_or_else(|| trap("asset not found"));
-        let now = time() as u64;
+        let now = Int::from(time() as u64);
 
         let mut chunks = s.chunks.borrow_mut();
 
