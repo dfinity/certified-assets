@@ -546,16 +546,18 @@ fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> Http
 
         if let Some(certificate_header) = index_redirect_certificate {
             if let Some(asset) = assets.get(INDEX_FILE) {
-                for (enc_name, enc) in asset.encodings.iter() {
-                    if enc.certified {
-                        return build_200(
-                            asset,
-                            enc_name,
-                            enc,
-                            INDEX_FILE,
-                            index,
-                            Some(certificate_header),
-                        );
+                for enc_name in encodings.iter() {
+                    if let Some(enc) = asset.encodings.get(enc_name) {
+                        if enc.certified {
+                            return build_200(
+                                asset,
+                                enc_name,
+                                enc,
+                                INDEX_FILE,
+                                index,
+                                Some(certificate_header),
+                            );
+                        }
                     }
                 }
             }
@@ -822,6 +824,8 @@ fn on_asset_change(key: &str, asset: &mut Asset) {
         if let Some(enc) = asset.encodings.get(*enc_name) {
             if enc.certified {
                 return;
+            } else {
+                break;
             }
         }
     }
