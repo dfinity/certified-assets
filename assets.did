@@ -1,6 +1,7 @@
 type BatchId = nat;
 type ChunkId = nat;
 type Key = text;
+type Time = int;
 
 type CreateAssetArguments = record {
   key: Key;
@@ -57,15 +58,20 @@ type HttpResponse = record {
 
 type StreamingCallbackHttpResponse = record {
   body: blob;
-  token: opt Token;
+  token: opt StreamingCallbackToken;
 };
 
-type Token = record {};
+type StreamingCallbackToken = record {
+  key: Key;
+  content_encoding: text;
+  index: nat;
+  sha256: opt blob;
+};
 
 type StreamingStrategy = variant {
   Callback: record {
-    callback: func (Token) -> (StreamingCallbackHttpResponse) query;
-    token: Token;
+    callback: func (StreamingCallbackToken) -> (opt StreamingCallbackHttpResponse) query;
+    token: StreamingCallbackToken;
   };
 };
 
@@ -98,6 +104,7 @@ service: {
       content_encoding: text;
       sha256: opt blob; // sha256 of entire asset encoding, calculated by dfx and passed in SetAssetContentArguments
       length: nat; // Size of this encoding's blob. Calculated when uploading assets.
+      modified: Time;
     };
   }) query;
 
@@ -127,7 +134,7 @@ service: {
   }) -> ();
 
   http_request: (request: HttpRequest) -> (HttpResponse) query;
-  http_request_stream_callback: (token: opt Token) -> (StreamingCallbackHttpResponse) query;
+  http_request_streaming_callback: (token: StreamingCallbackToken) -> (opt StreamingCallbackHttpResponse) query;
 
   authorize: (principal) -> ();
 }
