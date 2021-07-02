@@ -4,6 +4,7 @@ use ic_cdk::export::candid::{
 };
 use serde::de::Deserializer;
 use serde_bytes::ByteBuf;
+use std::convert::AsRef;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -35,6 +36,12 @@ impl<'de> Deserialize<'de> for RcBytes {
 impl From<ByteBuf> for RcBytes {
     fn from(b: ByteBuf) -> Self {
         Self(Rc::new(b))
+    }
+}
+
+impl AsRef<[u8]> for RcBytes {
+    fn as_ref(&self) -> &[u8] {
+        &*self.0
     }
 }
 
