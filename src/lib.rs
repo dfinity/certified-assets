@@ -11,6 +11,7 @@ use serde_bytes::ByteBuf;
 use sha2::Digest;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::convert::TryInto;
 
 /// The amount of time a batch is kept alive. Modifying the batch
 /// delays the expiry further.
@@ -747,20 +748,24 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
         let mut chunks = s.chunks.borrow_mut();
 
         let mut content_chunks = vec![];
-        let mut hasher = sha2::Sha256::new();
         for chunk_id in arg.chunk_ids.iter() {
             let chunk = chunks.remove(chunk_id).expect("chunk not found");
-            hasher.update(&*chunk.content);
             content_chunks.push(chunk.content);
         }
 
-        let sha256 = hasher.finalize().into();
-
-        if let Some(expected_hash) = arg.sha256 {
-            if expected_hash != sha256 {
-                trap("sha256 mismatch");
+        let sha256: [u8; 32] = match arg.sha256 {
+            Some(bytes) => bytes
+                .into_vec()
+                .try_into()
+                .unwrap_or_else(|_| trap("invalid SHA-256")),
+            None => {
+                let mut hasher = sha2::Sha256::new();
+                for chunk in content_chunks.iter() {
+                    hasher.update(chunk);
+                }
+                hasher.finalize().into()
             }
-        }
+        };
 
         let total_length: usize = content_chunks.iter().map(|c| c.len()).sum();
         let enc = AssetEncoding {
