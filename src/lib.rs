@@ -12,6 +12,7 @@ use sha2::Digest;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::fmt::Write;
 
 /// The amount of time a batch is kept alive. Modifying the batch
 /// delays the expiry further.
@@ -56,6 +57,12 @@ struct AssetEncoding {
     total_length: usize,
     certified: bool,
     sha256: [u8; 32],
+}
+
+impl AssetEncoding {
+    pub fn etag(&self) -> String {
+        encode_hex(&self.sha256)
+    }
 }
 
 #[derive(Default, Clone, Debug, CandidType, Deserialize)]
@@ -502,7 +509,10 @@ fn build_200(
     chunk_index: usize,
     certificate_header: Option<HeaderField>,
 ) -> HttpResponse {
-    let mut headers = vec![("Content-Type".to_string(), asset.content_type.to_string())];
+    let mut headers = vec![
+        ("Content-Type".to_string(), asset.content_type.to_string()),
+        ("ETag".to_string(), enc.etag())
+    ];
     if enc_name != "identity" {
         headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
     }
@@ -520,6 +530,15 @@ fn build_200(
     }
 }
 
+fn build_304() -> HttpResponse {
+    HttpResponse {
+        status_code: 304,
+        headers: vec![],
+        body: RcBytes::from(ByteBuf::default()),
+        streaming_strategy: None,
+    }
+}
+
 fn build_404(certificate_header: HeaderField) -> HttpResponse {
     HttpResponse {
         status_code: 404,
@@ -529,7 +548,24 @@ fn build_404(certificate_header: HeaderField) -> HttpResponse {
     }
 }
 
-fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> HttpResponse {
+fn build_http_response(path: &str, encodings: Vec<String>, index: usize, if_none_match: Option<String>) -> HttpResponse {
+    let sha256_to_match = if_none_match.map(|s| decode_hex_to_sha256(&s)).flatten();
+
+    let build_success_response = |path: &str, asset: &Asset, enc_name: &str, enc: &AssetEncoding, certificate_header: Option<HeaderField>| -> HttpResponse {
+        if sha256_to_match == Some(enc.sha256) {
+            build_304()
+        } else {
+            build_200(
+                asset,
+                enc_name,
+                enc,
+                path,
+                index,
+                certificate_header,
+            )
+        }
+    };
+
     STATE.with(|s| {
         let assets = s.assets.borrow();
 
@@ -550,14 +586,7 @@ fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> Http
                 for enc_name in encodings.iter() {
                     if let Some(enc) = asset.encodings.get(enc_name) {
                         if enc.certified {
-                            return build_200(
-                                asset,
-                                enc_name,
-                                enc,
-                                INDEX_FILE,
-                                index,
-                                Some(certificate_header),
-                            );
+                            return build_success_response(INDEX_FILE, asset, enc_name, enc, Some(certificate_header));
                         }
                     }
                 }
@@ -571,24 +600,22 @@ fn build_http_response(path: &str, encodings: Vec<String>, index: usize) -> Http
             for enc_name in encodings.iter() {
                 if let Some(enc) = asset.encodings.get(enc_name) {
                     if enc.certified {
-                        return build_200(
+                        return build_success_response(
+                            path,
                             asset,
                             enc_name,
                             enc,
-                            path,
-                            index,
-                            Some(certificate_header),
+                            Some(certificate_header)
                         );
                     } else {
                         // Find if identity is certified, if it's not.
                         if let Some(id_enc) = asset.encodings.get("identity") {
                             if id_enc.certified {
-                                return build_200(
+                                return build_success_response(
+                                    path,
                                     asset,
                                     enc_name,
                                     enc,
-                                    path,
-                                    index,
                                     Some(certificate_header),
                                 );
                             }
@@ -659,14 +686,38 @@ fn check_url_decode() {
     assert_eq!(url_decode("/%e6"), "/æ");
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        write!(&mut s, "{:02x}", b).unwrap();
+    }
+    s
+}
+
+fn decode_hex_to_sha256(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut result = [0; 32];
+    for output_index in 0..32 {
+        let input_index = 2 * output_index;
+        let byte = u8::from_str_radix(&s[input_index..input_index + 2], 16).ok()?;
+        result[output_index] = byte;
+    }
+    Some(result)
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     let mut encodings = vec![];
-    for (name, value) in req.headers.iter() {
+    let mut if_none_match = None;
+    for (name, value) in req.headers.into_iter() {
         if name.eq_ignore_ascii_case("Accept-Encoding") {
             for v in value.split(',') {
                 encodings.push(v.trim().to_string());
             }
+        } else if name.eq_ignore_ascii_case("If-None-Match") {
+            if_none_match = Some(value);
         }
     }
     encodings.push("identity".to_string());
@@ -676,7 +727,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         None => &req.url[..],
     };
 
-    build_http_response(&url_decode(&path), encodings, 0)
+    build_http_response(&url_decode(&path), encodings, 0, if_none_match)
 }
 
 #[query]
