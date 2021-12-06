@@ -670,8 +670,7 @@ fn build_206_single(
 
         let mut headers = vec![
             ("Accept-Ranges".to_string(), "bytes".to_string()),
-            // ("Content-Length".to_string(), body.len().to_string()),
-            ("Content-Length".to_string(), total_bytes.to_string()),
+            ("Content-Length".to_string(), body.len().to_string()),
             ("Content-Range".to_string(), format!(
                 "bytes {start_byte}-{end_byte}/{total_bytes}",
                 start_byte = start_byte,
@@ -694,8 +693,7 @@ fn build_206_single(
         // TODO give magic number a name
         if body.len() > 3000000 {
             ic_cdk::println!("going through here");
-            // let body = RcBytes(std::rc::Rc::new(ByteBuf::from(body[..3000000].to_vec())));
-            let body = enc.content_chunks[chunk_index].content.clone();
+            let body = RcBytes(std::rc::Rc::new(ByteBuf::from(body[..3000000].to_vec())));
 
             let streaming_strategy = create_strategy(asset, enc_name, enc, key, chunk_index);
         
@@ -767,7 +765,7 @@ fn get_range_request_body(
                 end_byte <= content_chunk.end_byte;
 
             let virtual_start_byte = start_byte - content_chunk.start_byte;
-            let virtual_end_byte = end_byte - content_chunk.end_byte;
+            let virtual_end_byte = end_byte - content_chunk.start_byte + 1;
 
             if
                 start_byte_before_content_chunk &&
