@@ -673,7 +673,7 @@ fn build_206_single(
             // ("Content-Length".to_string(), body.len().to_string()),
             ("Content-Length".to_string(), total_bytes.to_string()),
             ("Content-Range".to_string(), format!(
-                "{start_byte}-{end_byte}/{total_bytes}",
+                "bytes {start_byte}-{end_byte}/{total_bytes}",
                 start_byte = start_byte,
                 end_byte = end_byte,
                 total_bytes = total_bytes
@@ -684,6 +684,10 @@ fn build_206_single(
         if enc_name != "identity" {
             headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
         }
+
+        // TODO I am thinking 206 should use the streaming strategy just like 200 requests
+        // TODO but the streaming strategy needs to modified to deal with chunks...but should not be too hard I would think
+        // TODO in fact that's probably where most of the complexity should lie
 
         // TODO perhaps a create a shadow asset with the newly-created body
         // TODO and maybe the streaming will just work
@@ -908,7 +912,7 @@ fn build_http_response(
                                 asset,
                                 enc_name,
                                 enc,
-                                INDEX_FILE,
+                                path,
                                 index,
                                 range_request_info
                             );
@@ -918,7 +922,7 @@ fn build_http_response(
                                 asset,
                                 enc_name,
                                 enc,
-                                INDEX_FILE,
+                                path,
                                 index,
                                 Some(certificate_header),
                             );
@@ -932,7 +936,7 @@ fn build_http_response(
                                         asset,
                                         enc_name,
                                         enc,
-                                        INDEX_FILE,
+                                        path,
                                         index,
                                         range_request_info
                                     );
@@ -942,7 +946,7 @@ fn build_http_response(
                                         asset,
                                         enc_name,
                                         enc,
-                                        INDEX_FILE,
+                                        path,
                                         index,
                                         Some(certificate_header),
                                     );
@@ -1098,7 +1102,7 @@ struct Range {
 }
 
 fn get_range_request_info(headers: Vec<(String, String)>) -> Option<RangeRequestInfo> {
-    return None;
+    // return None;
 
     ic_cdk::println!("get_range_request_info");
     ic_cdk::println!("headers: {:#?}", headers);
