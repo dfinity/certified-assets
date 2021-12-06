@@ -524,7 +524,14 @@ fn build_200(
     chunk_index: usize,
     certificate_header: Option<HeaderField>,
 ) -> HttpResponse {
-    let mut headers = vec![("Content-Type".to_string(), asset.content_type.to_string())];
+    ic_cdk::println!("build_200");
+    ic_cdk::println!("key: {}", key);
+
+    let mut headers = vec![
+        // ("Accept-Ranges".to_string(), "bytes".to_string()),
+        // ("Content-Length".to_string(), enc.total_length.to_string()),
+        ("Content-Type".to_string(), asset.content_type.to_string())
+    ];
     if enc_name != "identity" {
         headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
     }
@@ -553,15 +560,15 @@ fn build_206(
     ic_cdk::println!("build_206");
     ic_cdk::println!("range_request_info: {:#?}", range_request_info);
 
-    if range_request_info.ranges.len() > 1 {
-        build_206_multipart(
-            asset,
-            enc_name,
-            enc,
-            range_request_info
-        )
-    }
-    else {
+    // if range_request_info.ranges.len() > 1 {
+        // build_206_multipart(
+            // asset,
+            // enc_name,
+            // enc,
+            // range_request_info
+        // )
+    // }
+    // else {
         build_206_single(
             asset,
             enc_name,
@@ -570,35 +577,35 @@ fn build_206(
             chunk_index,
             range_request_info
         )
-    }
+    // }
 }
 
 // TODO this needs to be implemented
-fn build_206_multipart(
-    asset: &Asset,
-    enc_name: &str,
-    enc: &AssetEncoding,
-    range_request_info: RangeRequestInfo // TODO should this be a reference?
-) -> HttpResponse {
-    ic_cdk::println!("build_206_multipart");
+// fn build_206_multipart(
+//     asset: &Asset,
+//     enc_name: &str,
+//     enc: &AssetEncoding,
+//     range_request_info: RangeRequestInfo // TODO should this be a reference?
+// ) -> HttpResponse {
+//     ic_cdk::println!("build_206_multipart");
 
-    let mut headers = vec![
-        ("Accept-Ranges".to_string(), "bytes".to_string()), // TODO when should accept-ranges be returned?
-        ("Content-Length".to_string(), enc.content_chunks[0].content.len().to_string()),
-        ("Content-Type".to_string(), "multipart/byteranges; boundary=3d6b6a416f9b5".to_string())
-    ];
+//     let mut headers = vec![
+//         ("Accept-Ranges".to_string(), "bytes".to_string()), // TODO when should accept-ranges be returned?
+//         ("Content-Length".to_string(), enc.content_chunks[0].content.len().to_string()),
+//         ("Content-Type".to_string(), "multipart/byteranges; boundary=3d6b6a416f9b5".to_string())
+//     ];
     
-    if enc_name != "identity" {
-        headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
-    }
+//     if enc_name != "identity" {
+//         headers.push(("Content-Encoding".to_string(), enc_name.to_string()));
+//     }
 
-    HttpResponse {
-        status_code: 206,
-        headers,
-        body: enc.content_chunks[0].content.clone(),
-        streaming_strategy: None
-    }
-}
+//     HttpResponse {
+//         status_code: 206,
+//         headers,
+//         body: enc.content_chunks[0].content.clone(),
+//         streaming_strategy: None
+//     }
+// }
 
 fn build_206_single(
     asset: &Asset,
@@ -1039,6 +1046,44 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     )
 }
 
+#[query]
+fn http_request_streaming_callback(
+    StreamingCallbackToken {
+        key,
+        content_encoding,
+        index,
+        sha256,
+    }: StreamingCallbackToken,
+) -> StreamingCallbackHttpResponse {
+    ic_cdk::println!("http_request_streaming_callback");
+    ic_cdk::println!("key: {}", key);
+
+    STATE.with(|s| {
+        let assets = s.assets.borrow();
+        let asset = assets
+            .get(&key)
+            .expect("Invalid token on streaming: key not found.");
+        let enc = asset
+            .encodings
+            .get(&content_encoding)
+            .expect("Invalid token on streaming: encoding not found.");
+
+        if let Some(expected_hash) = sha256 {
+            if expected_hash != enc.sha256 {
+                trap("sha256 mismatch");
+            }
+        }
+
+        // MAX is good enough. This means a chunk would be above 64-bits, which is impossible...
+        let chunk_index = index.0.to_usize().unwrap_or(usize::MAX);
+
+        StreamingCallbackHttpResponse {
+            body: enc.content_chunks[chunk_index].content.clone(),
+            token: create_token(&asset, &content_encoding, enc, &key, chunk_index),
+        }
+    })
+}
+
 // TODO is u64 the appropriate unit to use?
 #[derive(Debug)]
 struct RangeRequestInfo {
@@ -1106,43 +1151,6 @@ fn get_ranges(range_header_value: &str) -> Vec<Range> {
             }
         })
         .collect()
-}
-
-#[query]
-fn http_request_streaming_callback(
-    StreamingCallbackToken {
-        key,
-        content_encoding,
-        index,
-        sha256,
-    }: StreamingCallbackToken,
-) -> StreamingCallbackHttpResponse {
-    ic_cdk::println!("http_request_streaming_callback");
-
-    STATE.with(|s| {
-        let assets = s.assets.borrow();
-        let asset = assets
-            .get(&key)
-            .expect("Invalid token on streaming: key not found.");
-        let enc = asset
-            .encodings
-            .get(&content_encoding)
-            .expect("Invalid token on streaming: encoding not found.");
-
-        if let Some(expected_hash) = sha256 {
-            if expected_hash != enc.sha256 {
-                trap("sha256 mismatch");
-            }
-        }
-
-        // MAX is good enough. This means a chunk would be above 64-bits, which is impossible...
-        let chunk_index = index.0.to_usize().unwrap_or(usize::MAX);
-
-        StreamingCallbackHttpResponse {
-            body: enc.content_chunks[chunk_index].content.clone(),
-            token: create_token(&asset, &content_encoding, enc, &key, chunk_index),
-        }
-    })
 }
 
 fn do_create_asset(arg: CreateAssetArguments) {
