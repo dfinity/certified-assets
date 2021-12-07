@@ -274,7 +274,7 @@ fn store(arg: StoreArg) {
             }
         }
 
-        let encoding = asset.encodings.entry(arg.content_encoding).or_default();
+        let encoding = asset.encodings.entry(arg.content_encoding.trim().to_string()).or_default();
         encoding.total_length = arg.content.len();
         encoding.content_chunks = vec![RcBytes::from(arg.content)];
         encoding.modified = Int::from(time() as u64);
@@ -386,12 +386,12 @@ fn get(arg: GetArg) -> EncodedAsset {
             trap("asset not found");
         });
 
-        for enc in arg.accept_encodings.iter() {
+        for enc in arg.accept_encodings.iter().map(|s| s.trim()) {
             if let Some(asset_enc) = asset.encodings.get(enc) {
                 return EncodedAsset {
                     content: asset_enc.content_chunks[0].clone(),
                     content_type: asset.content_type.clone(),
-                    content_encoding: enc.clone(),
+                    content_encoding: enc.to_string(),
                     total_length: Nat::from(asset_enc.total_length as u64),
                     sha256: Some(ByteBuf::from(asset_enc.sha256)),
                 };
@@ -411,7 +411,7 @@ fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
 
         let enc = asset
             .encodings
-            .get(&arg.content_encoding)
+            .get(&arg.content_encoding.trim().to_string())
             .unwrap_or_else(|| trap("no such encoding"));
 
         if let Some(expected_hash) = arg.sha256 {
@@ -670,6 +670,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         }
     }
     encodings.push("identity".to_string());
+    encodings.push("".to_string());  
 
     let path = match req.url.find('?') {
         Some(i) => &req.url[..i],
@@ -695,7 +696,7 @@ fn http_request_streaming_callback(
             .expect("Invalid token on streaming: key not found.");
         let enc = asset
             .encodings
-            .get(&content_encoding)
+            .get(&content_encoding.trim().to_string())
             .expect("Invalid token on streaming: encoding not found.");
 
         if let Some(expected_hash) = sha256 {
@@ -709,7 +710,7 @@ fn http_request_streaming_callback(
 
         StreamingCallbackHttpResponse {
             body: enc.content_chunks[chunk_index].clone(),
-            token: create_token(&asset, &content_encoding, enc, &key, chunk_index),
+            token: create_token(&asset, &content_encoding.trim().to_string(), enc, &key, chunk_index),
         }
     })
 }
@@ -775,7 +776,7 @@ fn do_set_asset_content(arg: SetAssetContentArguments) {
             total_length,
             sha256,
         };
-        asset.encodings.insert(arg.content_encoding, enc);
+        asset.encodings.insert(arg.content_encoding.trim().to_string(), enc);
 
         on_asset_change(&arg.key, asset);
     })
@@ -788,7 +789,7 @@ fn do_unset_asset_content(arg: UnsetAssetContentArguments) {
             .get_mut(&arg.key)
             .unwrap_or_else(|| trap("asset not found"));
 
-        if asset.encodings.remove(&arg.content_encoding).is_some() {
+        if asset.encodings.remove(&arg.content_encoding.trim().to_string()).is_some() {
             on_asset_change(&arg.key, asset);
         }
     })
