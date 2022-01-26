@@ -269,7 +269,7 @@ fn store(arg: StoreArg) {
 
         let hash = hash_bytes(&arg.content);
         if let Some(provided_hash) = arg.sha256 {
-            if &hash != provided_hash.as_ref() {
+            if hash != provided_hash.as_ref() {
                 trap("sha256 mismatch");
             }
         }
@@ -644,7 +644,7 @@ impl<'a> Iterator for UrlDecode<'a> {
 
 fn url_decode(url: &str) -> String {
     UrlDecode {
-        bytes: url.as_bytes().into_iter(),
+        bytes: url.as_bytes().iter(),
     }
     .collect()
 }
@@ -676,7 +676,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         None => &req.url[..],
     };
 
-    build_http_response(&url_decode(&path), encodings, 0)
+    build_http_response(&url_decode(path), encodings, 0)
 }
 
 #[query]
@@ -709,7 +709,7 @@ fn http_request_streaming_callback(
 
         StreamingCallbackHttpResponse {
             body: enc.content_chunks[chunk_index].clone(),
-            token: create_token(&asset, &content_encoding, enc, &key, chunk_index),
+            token: create_token(asset, &content_encoding, enc, &key, chunk_index),
         }
     })
 }
@@ -818,7 +818,7 @@ pub fn is_authorized() -> Result<(), String> {
             .borrow()
             .contains(&caller())
             .then(|| ())
-            .ok_or("Caller is not authorized".to_string())
+            .ok_or_else(|| "Caller is not authorized".to_string())
     })
 }
 
@@ -886,7 +886,7 @@ fn set_root_hash(tree: &AssetHashes) {
     set_certified_data(&full_tree_hash);
 }
 
-fn witness_to_header<'a>(witness: HashTree<'a>) -> HeaderField {
+fn witness_to_header(witness: HashTree) -> HeaderField {
     use ic_certified_map::labeled;
 
     let hash_tree = labeled(b"http_assets", witness);
