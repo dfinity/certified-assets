@@ -1,3 +1,5 @@
+[![ci](https://github.com/dfinity/certified-assets/actions/workflows/ci.yml/badge.svg)](https://github.com/dfinity/certified-assets/actions/workflows/ci.yml)
+
 # Certified Assets Canister
 
 
