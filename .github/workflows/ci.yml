@@ -27,6 +27,7 @@ jobs:
           rustup update ${{ matrix.rust }} --no-self-update
           rustup default ${{ matrix.rust }}
           rustup component add rustfmt
+          rustup component add clippy
 
       - name: Check Format
         run: cargo fmt --all -- --check
