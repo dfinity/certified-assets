@@ -9,6 +9,6 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-ic-certified-assets = { git = "https://github.com/jplevyak/cdk-rs", rev = "65c0e54f609a0f130bb09807995ebb03313a9a0e" }
+ic-certified-assets = "0.1.0"
 ic-cdk = "0.3.3"
 ic-cdk-macros = "0.3.3"
