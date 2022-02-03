@@ -1,11 +1,14 @@
-[workspace]
+[package]
+name = "certified-assets"
+version = "0.1.0"
+authors = ["DFINITY Stiftung <sdk@dfinity.org>"]
+edition = "2018"
 
-members = [
-  "src",
-  "src/assets",
-]
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
 
-[profile.release]
-lto = true
-opt-level = 'z'
-panic = 'abort'
+[dependencies]
+ic-certified-assets = { git = "https://github.com/jplevyak/cdk-rs", rev = "65c0e54f609a0f130bb09807995ebb03313a9a0e" }
+ic-cdk = "0.3.3"
+ic-cdk-macros = "0.3.3"
