@@ -1214,8 +1214,6 @@ fn handle_range_streaming_callback(
         }
     }
 
-    // TODO I am pretty sure we can optimize this by calculating the start and end bytes first
-    // TODO can we optimize this? We have to build up the entire partial request every time
     let full_body = get_range_request_body(
         enc,
         start_byte as u64,
@@ -1297,14 +1295,16 @@ fn get_ranges(range_header_value: &str) -> Result<Vec<Range>, HttpResponse> {
 
             match (start_byte_string_option, end_byte_string_option) {
                 (Some(start_byte_string), Some(end_byte_string)) => {
-                    let start_byte_result = start_byte_string.parse::<u64>();
-                    let end_byte_result = end_byte_string.parse::<u64>();
-        
+                    let start_byte_result = get_range_start_byte(start_byte_string);
+                    let end_byte_result = get_range_end_byte(end_byte_string);
+
                     match (start_byte_result, end_byte_result) {
-                        (Ok(start_byte), Ok(end_byte)) => Ok(Range {
-                            start_byte: if *start_byte_string == "" { None } else { Some(start_byte) },
-                            end_byte: if *end_byte_string == "" { None } else { Some(end_byte) }
-                        }),
+                        (Ok(start_byte), Ok(end_byte)) => {
+                            Ok(Range {
+                                start_byte,
+                                end_byte
+                            })
+                        },
                         _ => Err(build_416("*"))
                     }
                 },
@@ -1312,6 +1312,34 @@ fn get_ranges(range_header_value: &str) -> Result<Vec<Range>, HttpResponse> {
             }
         })
         .collect::<Result<Vec<Range>, HttpResponse>>()
+}
+
+fn get_range_start_byte(start_byte_string: &str) -> Result<Option<u64>, ()> {
+    if start_byte_string == "" {
+        return Ok(None);
+    }
+    else {
+        let start_byte_result = start_byte_string.parse::<u64>();
+        
+        match start_byte_result {
+            Ok(start_byte) => Ok(Some(start_byte)),
+            Err(_) => Err(())
+        }
+    }
+}
+
+fn get_range_end_byte(end_byte_string: &str) -> Result<Option<u64>, ()> {
+    if end_byte_string == "" {
+        return Ok(None);
+    }
+    else {
+        let end_byte_result = end_byte_string.parse::<u64>();
+        
+        match end_byte_result {
+            Ok(end_byte) => Ok(Some(end_byte)),
+            Err(_) => Err(())
+        }
+    }
 }
 
 fn do_create_asset(arg: CreateAssetArguments) {
