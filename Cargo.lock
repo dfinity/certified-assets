@@ -180,8 +180,8 @@ dependencies = [
 name = "certified-assets"
 version = "0.1.0"
 dependencies = [
- "ic-cdk 0.3.3",
- "ic-cdk-macros 0.3.3",
+ "ic-cdk",
+ "ic-cdk-macros",
  "ic-certified-assets",
 ]
 
@@ -356,17 +356,6 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "ic-cdk"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "606276ed1ce363eb9ccaf492e36fb40425417dcd4598f261d47e0ed6a1309faa"
-dependencies = [
- "candid",
- "cfg-if",
- "serde",
-]
-
-[[package]]
-name = "ic-cdk"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e511d1a019e620d5a3dc43bead7d3c46912bf4f4bfb1d602059046c7a22bb1e"
@@ -378,27 +367,12 @@ dependencies = [
 
 [[package]]
 name = "ic-cdk-macros"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08bac2578a4779c3ae6d24c766ec7127872d73f29a9e7d70b6607a2fdedd0dde"
-dependencies = [
- "candid",
- "ic-cdk 0.3.3",
- "proc-macro2",
- "quote",
- "serde",
- "serde_tokenstream",
- "syn",
-]
-
-[[package]]
-name = "ic-cdk-macros"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a59a186745fd7d96ba2e057f3b3e3038578ae1e82dcb548bd96f48e9e4a39129"
 dependencies = [
  "candid",
- "ic-cdk 0.4.0",
+ "ic-cdk",
  "proc-macro2",
  "quote",
  "serde",
@@ -415,8 +389,8 @@ dependencies = [
  "base64",
  "candid",
  "hex",
- "ic-cdk 0.4.0",
- "ic-cdk-macros 0.4.0",
+ "ic-cdk",
+ "ic-cdk-macros",
  "ic-certified-map",
  "ic-types",
  "num-traits",
