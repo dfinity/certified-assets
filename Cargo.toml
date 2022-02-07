@@ -4,24 +4,11 @@ version = "0.1.0"
 authors = ["DFINITY Stiftung <sdk@dfinity.org>"]
 edition = "2018"
 
-[profile.release]
-lto = true
-opt-level = 'z'
-panic = 'abort'
-
 [lib]
 path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-base64 = "0.13"
-hex = "0.4.3"
-ic-cdk = "0.2.4"
-ic-cdk-macros = "0.2"
-ic-types = "0.1.1"
-ic-certified-map = { git = "https://github.com/dfinity/cdk-rs", rev = "7676e7f"}
-num-traits = "0.2.14"
-serde = "1"
-serde_bytes = "0.11"
-serde_cbor = "0.11"
-sha2 = "0.9.1"
+ic-certified-assets = "0.1.0"
+ic-cdk = "0.4.0"
+ic-cdk-macros = "0.4.0"
