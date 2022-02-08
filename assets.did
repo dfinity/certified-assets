@@ -134,7 +134,7 @@ service: {
   }) -> ();
 
   http_request: (request: HttpRequest) -> (HttpResponse) query;
-  http_request_streaming_callback: (token: StreamingCallbackToken) -> (opt StreamingCallbackHttpResponse) query;
+  http_request_streaming_callback: (token: StreamingCallbackToken) -> (StreamingCallbackHttpResponse) query;
 
   authorize: (principal) -> ();
 }
