@@ -4,6 +4,11 @@ version = "0.1.0"
 authors = ["DFINITY Stiftung <sdk@dfinity.org>"]
 edition = "2018"
 
+[profile.release]
+lto = true
+opt-level = 'z'
+panic = 'abort'
+
 [lib]
 path = "src/lib.rs"
 crate-type = ["cdylib"]
