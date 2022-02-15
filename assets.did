@@ -88,6 +88,17 @@ service: {
     total_length: nat; // all chunks except last have size == content.size()
   }) query;
 
+  get_chunks_info: (record {
+    key: Key;
+    accept_encodings: vec text;
+  }) -> (record {
+    total_length: nat;
+    chunks: vec record {
+      chunk_id: ChunkId;
+      total_length: nat;
+    };
+  }) query;
+
   // if get() returned chunks > 1, call this to retrieve them.
   // chunks may or may not be split up at the same boundaries as presented to create_chunk().
   get_chunk: (record {
