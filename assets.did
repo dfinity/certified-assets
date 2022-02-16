@@ -92,10 +92,10 @@ service: {
     key: Key;
     accept_encodings: vec text;
   }) -> (record {
-    total_length: nat;
+    total_length: nat64;
     chunks: vec record {
       chunk_id: ChunkId;
-      total_length: nat;
+      chunk_length: nat64;
     };
   }) query;
 
