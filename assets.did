@@ -90,7 +90,7 @@ service: {
 
   get_chunks_info: (record {
     key: Key;
-    accept_encodings: vec text;
+    content_encoding: text;
   }) -> (record {
     total_length: nat64;
     chunks: vec record {
