@@ -59,7 +59,7 @@ type HttpResponse = record {
 type StreamingCallbackHttpResponse = record {
   body: blob;
   token: opt StreamingCallbackToken;
-  chunk_tree: opt text;
+  chunk_tree: opt blob;
 };
 
 type StreamingCallbackToken = record {
