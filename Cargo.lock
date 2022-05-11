@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "certified-assets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ic-cdk",
  "ic-cdk-macros",
@@ -356,9 +356,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "ic-cdk"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e511d1a019e620d5a3dc43bead7d3c46912bf4f4bfb1d602059046c7a22bb1e"
+checksum = "8bf92c1ce281995ec4cecca2a0da8f3420af546ed807dceb46441197642f3c1f"
 dependencies = [
  "candid",
  "cfg-if",
@@ -367,9 +367,9 @@ dependencies = [
 
 [[package]]
 name = "ic-cdk-macros"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a59a186745fd7d96ba2e057f3b3e3038578ae1e82dcb548bd96f48e9e4a39129"
+checksum = "0d2d6181f0a29fefb75493822339591b6244098c5ab9eb67790cc6b805d3a42b"
 dependencies = [
  "candid",
  "ic-cdk",
@@ -382,9 +382,9 @@ dependencies = [
 
 [[package]]
 name = "ic-certified-assets"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a5dc86809123e0908c1a388089ef04f0daad605616eda76d3a9f75418f6ccca"
+checksum = "1c1407b05e877dc69f84fe5cc9b482e3087d54bd3cf40fb8cfe027c76cda91b3"
 dependencies = [
  "base64",
  "candid",
