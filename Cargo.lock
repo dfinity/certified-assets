@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "certified-assets"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "ic-cdk",
  "ic-cdk-macros",
@@ -382,9 +382,9 @@ dependencies = [
 
 [[package]]
 name = "ic-certified-assets"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c1407b05e877dc69f84fe5cc9b482e3087d54bd3cf40fb8cfe027c76cda91b3"
+checksum = "d67050493eee5fdc92b03da7a1c62f7ffa5614303da0f4ee03015d7f54e0668b"
 dependencies = [
  "base64",
  "candid",
@@ -691,9 +691,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.5.3"
+version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5f1ceb7f74abbce32601642fcf8e8508a8a8991e0621c7d750295b9095702b"
+checksum = "1a11647b6b25ff05a515cb92c365cec08801e83423a235b51e231e1808747286"
 dependencies = [
  "aho-corasick",
  "memchr",
