@@ -41,6 +41,12 @@ jobs:
         env:
           RUST_BACKTRACE: 1
           
+      - name: build
+        run: |
+          sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
+          dfx start --clean --background 
+          dfx deploy
+          
       # useless
       - name: "Determine tag"
         run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
