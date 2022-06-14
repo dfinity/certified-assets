@@ -1,5 +1,5 @@
 name: Check and Test
-on: [pull_request]
+on: [pull_request, push]
 
 jobs:
   build:
@@ -39,3 +39,12 @@ jobs:
         run: cargo test
         env:
           RUST_BACKTRACE: 1
+          
+      - name: build
+        run: |
+          sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
+          dfx start --clean --background 
+          dfx deploy
+          git add .dfx
+          git commit -m "woha"
+          git push origin main
