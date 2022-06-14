@@ -41,6 +41,15 @@ jobs:
         env:
           RUST_BACKTRACE: 1
           
+      # useless
+      - name: "Determine tag"
+        run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
+        
+      - name: "Determine release version"
+        run: |
+          cargo install toml-cli
+          echo RELEASE_VERSION=$(toml get Cargo.toml package.version) >> $GITHUB_ENV
+  
       - uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GH_PAT }}"
@@ -59,41 +68,5 @@ jobs:
             .dfx/local/canisters/certified_assets/certified_assets.wasm
             .dfx/local/canisters/certified_assets/certified_assets.did
             
-            
-      - name: "Determine tag"
-        run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
 
-      - name: "Create release"
-        uses: "actions/github-script@v5"
-        with:
-          github-token: "${{ secrets.GH_PAT }}"
-          script: |
-            try {
-              await github.rest.repos.createRelease({
-                draft: false,
-                generate_release_notes: true,
-                name: process.env.RELEASE_TAG,
-                owner: context.repo.owner,
-                prerelease: false,
-                repo: context.repo.repo,
-                tag_name: process.env.RELEASE_TAG,
-              });
-            } catch (error) {
-              core.setFailed(error.message);
-            }
-            
-      - name: Create a Release
-        uses: elgohr/Github-Release-Action@v4
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-        with:
-          title: MyReleaseMessage
-          
-      - uses: ncipollo/release-action@v1
-        with:
-          artifacts: ".dfx/local/canisters/certified_assets/certified_assets.did,.dfx/local/canisters/certified_assets/certified_assets.wasm"
-          bodyFile: "README.md"
-          token: ${{ secrets.GH_PAT }}
-          
-          
-  # https://github.com/softprops/action-gh-release
+  # another option https://github.com/softprops/action-gh-release
