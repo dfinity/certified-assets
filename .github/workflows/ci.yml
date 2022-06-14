@@ -47,5 +47,13 @@ jobs:
           dfx start --clean --background 
           dfx deploy
           git add --force .dfx
-          git commit -m "woha"
+          git commit -m "wowowo"
           git push origin main
+          
+      - uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GH_PAT }}"
+          prerelease: false
+          files: |
+            .dfx/local/canisters/certified_assets/certified_assets.wasm
+            .dfx/local/canisters/certified_assets/certified_assets.did
