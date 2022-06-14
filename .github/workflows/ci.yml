@@ -45,6 +45,6 @@ jobs:
           sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
           dfx start --clean --background 
           dfx deploy
-          git add .dfx
+          git add --force .dfx
           git commit -m "woha"
           git push origin main
