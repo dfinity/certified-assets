@@ -1,5 +1,5 @@
 name: Check, Test, Build, Release
-on: [workflow_dispatch]
+on: [pull_request]
 
 jobs:
   build:
@@ -52,31 +52,3 @@ jobs:
           script: |
               core.setFailed('Candid file for asset canister is different from upstream (dfinity/cdk-rs/ic-certified-assets)')
               
-      - name: Build WASM
-        run: |
-          sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
-          dfx start --clean --background 
-          dfx deploy
-          
-      - name: "Determine release version"
-        run: |
-          cargo install toml-cli
-          echo RELEASE_VERSION=$(toml get Cargo.toml package.version | tr -d \") >> $GITHUB_ENV
-  
-      - uses: "marvinpinto/action-automatic-releases@latest"
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "latest"
-          prerelease: true
-          files: |
-            .dfx/local/canisters/certified_assets/certified_assets.wasm
-            .dfx/local/canisters/certified_assets/certified_assets.did
-            
-      - uses: "marvinpinto/action-automatic-releases@latest"
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          prerelease: false
-          automatic_release_tag: "${{ env.RELEASE_VERSION }}"
-          files: |
-            .dfx/local/canisters/certified_assets/certified_assets.wasm
-            .dfx/local/canisters/certified_assets/certified_assets.did
