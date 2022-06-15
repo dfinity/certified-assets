@@ -1,0 +1,75 @@
+name: Check, Test, Build, Release
+on:
+  push:
+    branches:
+      - master
+      
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [ 1.58.1 ]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Cache Cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.build }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.build }}-cargo-
+            
+      - name: Install Rust
+        run: |
+          rustup update ${{ matrix.rust }} --no-self-update
+          rustup default ${{ matrix.rust }}
+          rustup component add rustfmt
+          rustup component add clippy
+          
+      - name: Check Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --tests --benches -- -D clippy::all
+
+      - name: Test
+        run: cargo test
+        env:
+          RUST_BACKTRACE: 1
+  
+      - name: Build WASM
+        run: |
+          sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
+          dfx start --clean --background 
+          dfx deploy
+          
+      - name: Determine release version
+        run: |
+          cargo install toml-cli
+          echo RELEASE_VERSION=$(toml get Cargo.toml package.version | tr -d \") >> $GITHUB_ENV
+  
+      - name: Create latest release
+      - uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "latest"
+          prerelease: true
+          files: |
+            .dfx/local/canisters/certified_assets/certified_assets.wasm
+            .dfx/local/canisters/certified_assets/certified_assets.did
+      
+      - name: Create versioned release
+      - uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: false
+          automatic_release_tag: "${{ env.RELEASE_VERSION }}"
+          files: |
+            .dfx/local/canisters/certified_assets/certified_assets.wasm
+            .dfx/local/canisters/certified_assets/certified_assets.did
