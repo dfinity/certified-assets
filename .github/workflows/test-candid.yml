@@ -19,7 +19,7 @@ jobs:
       - name: ec
         run: echo ${{ env.CANDID_DIFF }} 
       - name: A/B Check
-        if: ${{ env.CANDID_DIFF != 0 }}
+        if: ${{ env.CANDID_DIFF == 0 }}
         uses: actions/github-script@v3
         with:
           script: |
