@@ -1,4 +1,4 @@
-name: Check, Test, Build, Release
+name: Check and Test
 on: [pull_request]
 
 jobs:
