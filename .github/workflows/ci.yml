@@ -10,7 +10,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
-      - uses: fregante/setup-git-user@v1
 
       - name: Cache Cargo
         uses: actions/cache@v2
@@ -41,16 +40,12 @@ jobs:
         env:
           RUST_BACKTRACE: 1
           
-#       - name: build
-#         run: |
-#           sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
-#           dfx start --clean --background 
-#           dfx deploy
+      - name: build
+        run: |
+          sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
+          dfx start --clean --background 
+          dfx deploy
           
-      # useless
-      - name: "Determine tag"
-        run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
-        
       - name: "Determine release version"
         run: |
           cargo install toml-cli
@@ -60,7 +55,7 @@ jobs:
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
           automatic_release_tag: "latest"
-          prerelease: false
+          prerelease: true
           files: |
             .dfx/local/canisters/certified_assets/certified_assets.wasm
             .dfx/local/canisters/certified_assets/certified_assets.did
@@ -68,11 +63,8 @@ jobs:
       - uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          prerelease: true
+          prerelease: false
           automatic_release_tag: "${{ env.RELEASE_VERSION }}"
           files: |
             .dfx/local/canisters/certified_assets/certified_assets.wasm
             .dfx/local/canisters/certified_assets/certified_assets.did
-            
-
-  # another option https://github.com/softprops/action-gh-release
