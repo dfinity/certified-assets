@@ -1,0 +1,26 @@
+name: compare candid
+on: [workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [ 1.58.1 ]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: woha 
+        run: |
+          curl -s https://raw.githubusercontent.com/dfinity/cdk-rs/main/src/ic-certified-assets/assets.did > upstream_assets.did
+          echo CANDID_DIFF=$(diff upstream_assets.did assets.did | wc -l) >> $GITHUB_ENV
+          
+      - name: ec
+        run: echo ${{ env.CANDID_DIFF }} 
+      - name: A/B Check
+        if: ${{ env.CANDID_DIFF != 0 }}
+        uses: actions/github-script@v3
+        with:
+          script: |
+              core.setFailed('envA and envB are not equivalent!')
