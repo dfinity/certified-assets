@@ -2,7 +2,7 @@ name: Check, Test, Build, Release
 on:
   push:
     branches:
-      - master
+      - main
       
 jobs:
   build:
