@@ -42,7 +42,19 @@ jobs:
         run: cargo test
         env:
           RUST_BACKTRACE: 1
-  
+   
+      - name: Compute diff between local and upstream candid files
+        run: |
+          curl -s https://raw.githubusercontent.com/dfinity/cdk-rs/main/src/ic-certified-assets/assets.did > upstream_assets.did
+          echo CANDID_DIFF=$(diff upstream_assets.did assets.did | wc -l) >> $GITHUB_ENV
+          
+      - name: Fail if local candid file different from upstream
+        if: ${{ env.CANDID_DIFF != 0 }}
+        uses: actions/github-script@v3
+        with:
+          script: |
+              core.setFailed('Candid file for asset canister is different from upstream (dfinity/cdk-rs/ic-certified-assets)')
+
       - name: Build WASM
         run: |
           sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
@@ -51,18 +63,7 @@ jobs:
           
       - name: Determine release version
         run: |
-          cargo install toml-cli
-          echo RELEASE_VERSION=$(toml get Cargo.toml package.version | tr -d \") >> $GITHUB_ENV
-  
-#       - name: Create latest release
-#         uses: "marvinpinto/action-automatic-releases@latest"
-#         with:
-#           repo_token: "${{ secrets.GITHUB_TOKEN }}"
-#           automatic_release_tag: "latest"
-#           prerelease: true
-#           files: |
-#             .dfx/local/canisters/certified_assets/certified_assets.wasm
-#             .dfx/local/canisters/certified_assets/certified_assets.did
+          echo RELEASE_VERSION=$(cargo metadata -q | jq '.packages | .[] | .version' | tr -d \") >> $GITHUB_ENV
       
       - name: Create release
         uses: "marvinpinto/action-automatic-releases@latest"
