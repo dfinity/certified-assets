@@ -55,7 +55,7 @@ jobs:
           echo RELEASE_VERSION=$(toml get Cargo.toml package.version | tr -d \") >> $GITHUB_ENV
   
       - name: Create latest release
-      - uses: "marvinpinto/action-automatic-releases@latest"
+        uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
           automatic_release_tag: "latest"
@@ -65,7 +65,7 @@ jobs:
             .dfx/local/canisters/certified_assets/certified_assets.did
       
       - name: Create versioned release
-      - uses: "marvinpinto/action-automatic-releases@latest"
+        uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
           prerelease: false
