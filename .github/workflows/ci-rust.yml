@@ -26,7 +26,7 @@ jobs:
       - name: Install and set Rust version based on rust-toolchain.yml
         # uses: actions-rs/toolchain@v1
         # https://github.com/actions-rs/toolchain/pull/209
-        uses: zephraph/rust-toolchain@v1
+        uses: zephraph/rust-toolchain@support-toolchain-toml
 
       - name: Check Format
         run: cargo fmt --all -- --check
