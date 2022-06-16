@@ -1,0 +1,40 @@
+name: Check and Test
+on: [pull_request]
+
+jobs:
+  build:
+    name: rust:required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install and set Rust version based on rust-toolchain.toml
+        # uses: actions-rs/toolchain@v1
+        # https://github.com/actions-rs/toolchain/pull/209
+        uses: zephraph/toolchain@support-toolchain-toml
+
+      - name: Store toolchain version to query GH actions/cache
+        run: echo RUST_TOOLCHAIN=$(rustup show active-toolchain | awk -F ' ' '{print $1}') | tee -a $GITHUB_ENV
+
+      - name: Cache Cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ env.RUST_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ env.RUST_TOOLCHAIN }}-cargo-
+
+
+      - name: Check Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --tests --benches -- -D clippy::all
+
+      - name: Test
+        run: cargo test
+        env:
+          RUST_BACKTRACE: 1

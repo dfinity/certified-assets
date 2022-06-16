@@ -1,0 +1,55 @@
+name: Build WASM & Release canister code
+on:
+  pull_request:
+    branches:
+      - main
+    types: [closed]
+
+jobs:
+  release:
+    if: ${{ github.event.pull_request.merged }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install and set Rust version based on rust-toolchain.toml
+        # uses: actions-rs/toolchain@v1
+        # https://github.com/actions-rs/toolchain/pull/209
+        uses: zephraph/toolchain@support-toolchain-toml
+
+      - name: Store toolchain version to query GH actions/cache
+        run: echo RUST_TOOLCHAIN=$(rustup show active-toolchain | awk -F ' ' '{print $1}') | tee -a $GITHUB_ENV
+
+      - name: Cache Cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ env.RUST_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ env.RUST_TOOLCHAIN }}-cargo-
+
+      - name: Install DFX
+        run: |
+          sh -ci "$(curl -fsSL https://smartcontracts.org/install.sh)"
+
+      - name: Build WASM
+        run: |
+          dfx start --clean --background
+          dfx deploy
+
+      - name: Determine release version
+        run: |
+          echo RELEASE_VERSION=$(cargo metadata -q | jq '.packages | .[] | .version' | tr -d \") >> $GITHUB_ENV
+      
+      - name: Create release
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: true
+          automatic_release_tag: "${{ env.RELEASE_VERSION }}"
+          files: |
+            .dfx/local/canisters/certified_assets/certified_assets.wasm
+            .dfx/local/canisters/certified_assets/certified_assets.did
