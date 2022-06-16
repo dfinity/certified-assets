@@ -42,7 +42,7 @@ jobs:
 
       - name: Determine release version
         run: |
-          echo RELEASE_VERSION=$(cargo metadata -q | jq '.packages | .[] | .version' | tr -d \") >> $GITHUB_ENV
+          echo RELEASE_VERSION=$(cargo metadata -q --no-deps | jq '.packages | .[] | .version' | tr -d \") | tee -a $GITHUB_ENV
       
       - name: Create release
         uses: "marvinpinto/action-automatic-releases@latest"
