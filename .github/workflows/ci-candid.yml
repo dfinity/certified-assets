@@ -3,6 +3,7 @@ on: [push, pull_request]
 
 jobs:
   compare_candid_spec:
+    name: candid:required
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
