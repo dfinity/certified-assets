@@ -22,12 +22,11 @@ jobs:
           restore-keys: |
             ${{ matrix.build }}-cargo-
 
-      - name: Install Rust
-        run: |
-          rustup update ${{ matrix.rust }} --no-self-update
-          rustup default ${{ matrix.rust }}
-          rustup component add rustfmt
-          rustup component add clippy
+      - name: Install and set Rust version based on rust-toolchain.yml
+        uses: actions-rs/toolchain@v1
+        with:
+          default: true
+          components: clippy, rustfml
 
       - name: Check Format
         run: cargo fmt --all -- --check
