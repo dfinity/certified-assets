@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install and set Rust version based on rust-toolchain.yml
+      - name: Install and set Rust version based on rust-toolchain.toml
         # uses: actions-rs/toolchain@v1
         # https://github.com/actions-rs/toolchain/pull/209
         uses: zephraph/toolchain@support-toolchain-toml
