@@ -1,5 +1,5 @@
 name: Compare candid spec with upstream
-on: [push]
+on: [push, pull_request]
 
 jobs:
   compare_candid_spec:
