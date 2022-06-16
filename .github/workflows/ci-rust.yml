@@ -10,8 +10,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+
+      - name: Install and set Rust version based on rust-toolchain.yml
+        # uses: actions-rs/toolchain@v1
+        # https://github.com/actions-rs/toolchain/pull/209
+        uses: zephraph/toolchain@support-toolchain-toml
+
       - name: rustup
-        run: echo ${{ matrix.build }}
+        run: echo RUST_TOOLCHAIN=$(rustup show active-toolchain | awk -F ' ' '{print $1}') >> $GITHUB_ENV
+
       - name: Cache Cargo
         uses: actions/cache@v2
         with:
@@ -19,14 +26,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ matrix.build }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ env.RUST_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ matrix.build }}-cargo-
+            ${{ env.RUST_TOOLCHAIN }}-cargo-
 
-      - name: Install and set Rust version based on rust-toolchain.yml
-        # uses: actions-rs/toolchain@v1
-        # https://github.com/actions-rs/toolchain/pull/209
-        uses: zephraph/toolchain@support-toolchain-toml
 
       - name: Check Format
         run: cargo fmt --all -- --check
