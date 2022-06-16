@@ -16,8 +16,8 @@ jobs:
         # https://github.com/actions-rs/toolchain/pull/209
         uses: zephraph/toolchain@support-toolchain-toml
 
-      - name: rustup
-        run: echo RUST_TOOLCHAIN=$(rustup show active-toolchain | awk -F ' ' '{print $1}') >> $GITHUB_ENV
+      - name: Store toolchain version to query GH actions/cache
+        run: echo RUST_TOOLCHAIN=$(rustup show active-toolchain | awk -F ' ' '{print $1}') | tee -a $GITHUB_ENV
 
       - name: Cache Cargo
         uses: actions/cache@v2
