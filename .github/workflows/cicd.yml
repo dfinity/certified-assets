@@ -46,7 +46,8 @@ jobs:
       - name: Compute diff between local and upstream candid files
         run: |
           curl -s https://raw.githubusercontent.com/dfinity/cdk-rs/main/src/ic-certified-assets/assets.did > upstream_assets.did
-          echo CANDID_DIFF=$(diff upstream_assets.did assets.did | wc -l) >> $GITHUB_ENV
+          diff upstream_assets.did assets.did
+          echo CANDID_DIFF_RC="$?" >> $GITHUB_ENV
           
       - name: Fail if local candid file different from upstream
         if: ${{ env.CANDID_DIFF != 0 }}
