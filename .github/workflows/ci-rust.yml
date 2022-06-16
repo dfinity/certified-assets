@@ -10,17 +10,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
-
-      - name: Cache Cargo
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ matrix.build }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ matrix.build }}-cargo-
+      - name: rustup
+        run: rustup --version
+      # - name: Cache Cargo
+      #   uses: actions/cache@v2
+      #   with:
+      #     path: |
+      #       ~/.cargo/registry
+      #       ~/.cargo/git
+      #       target
+      #     key: ${{ matrix.build }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      #     restore-keys: |
+      #       ${{ matrix.build }}-cargo-
 
       - name: Install and set Rust version based on rust-toolchain.yml
         uses: actions-rs/toolchain@v1
