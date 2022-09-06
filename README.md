@@ -1,6 +1,1 @@
-[![ci](https://github.com/dfinity/certified-assets/actions/workflows/ci.yml/badge.svg)](https://github.com/dfinity/certified-assets/actions/workflows/ci.yml)
-
-# Certified Assets Canister
-
-
-This is the re-implementation of the DFX assets canister in Rust with support for asset certification.
+The `certified-assets` canister crate has been moved to the [SDK](https://github.com/dfinity/sdk) repo, to [`/src/canisters/frontend/certified-assets` directory](https://github.com/dfinity/sdk/tree/master/src/canisters/frontend/certified-assets).
