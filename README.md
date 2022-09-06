@@ -1,1 +1,1 @@
-The `certified-assets` canister crate has been moved to the [SDK](https://github.com/dfinity/sdk) repo, to [`/src/canisters/frontend/certified-assets` directory](https://github.com/dfinity/sdk/tree/master/src/canisters/frontend/certified-assets).
+The `certified-assets` canister crate has been moved to the [SDK](https://github.com/dfinity/sdk) repository, to [`/src/canisters/frontend/certified-assets` directory](https://github.com/dfinity/sdk/tree/master/src/canisters/frontend/certified-assets).
