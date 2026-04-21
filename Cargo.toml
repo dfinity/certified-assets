@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "canister",
+    "ic-certified-assets",
+]
+resolver = "2"
+
+[workspace.package]
+authors = ["DFINITY Stiftung <sdk@dfinity.org>"]
+edition = "2021"
+repository = "https://github.com/dfinity/certified-assets"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1.0.56"
+base64 = "0.13.0"
+candid = "0.10.18"
+candid_parser = "0.3.0"
+hex = "0.4.3"
+ic-cdk = "0.19.0"
+itertools = "0.10.3"
+num-traits = "0.2.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11.5"
+serde_cbor = "0.11.1"
+sha2 = "0.10.6"
