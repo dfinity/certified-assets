@@ -1315,6 +1315,7 @@ impl State {
         Ok(enc.content_chunks[index].clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_http_response(
         &self,
         certificate: &[u8],
