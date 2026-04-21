@@ -756,7 +756,7 @@ macro_rules! export_canister_methods {
 
 #[test]
 fn candid_interface_compatibility() {
-    use candid_parser::utils::{CandidSource, service_compatible};
+    use candid_parser::utils::{service_compatible, CandidSource};
     use std::path::PathBuf;
 
     export_canister_methods!();

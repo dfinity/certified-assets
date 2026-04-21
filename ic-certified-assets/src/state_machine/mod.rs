@@ -11,20 +11,19 @@ pub use v2::StableStateV2;
 // as formal arguments.  This approach makes it very easy to test the state machine.
 use crate::{
     asset_certification::{
-        CertifiedResponses,
         types::{
             certification::{
                 AssetKey, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
                 RequestHash, ResponseHash, WitnessResult,
             },
             http::{
-                CallbackFunc, FALLBACK_FILE, HttpRequest, HttpResponse,
-                StreamingCallbackHttpResponse, StreamingCallbackToken,
                 build_ic_certificate_expression_from_headers_and_encoding,
-                build_ic_certificate_expression_header, response_hash,
+                build_ic_certificate_expression_header, response_hash, CallbackFunc, HttpRequest,
+                HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken, FALLBACK_FILE,
             },
             rc_bytes::RcBytes,
         },
+        CertifiedResponses,
     },
     cookies::add_ic_env_cookie,
     evidence::EvidenceComputation::{self, Computed},
@@ -148,11 +147,9 @@ impl AssetEncoding {
         response_hashes.insert(200, response_hash_200);
         response_hashes.insert(304, response_hash_304);
 
-        debug_assert!(
-            STATUS_CODES_TO_CERTIFY
-                .iter()
-                .all(|code| response_hashes.contains_key(code))
-        );
+        debug_assert!(STATUS_CODES_TO_CERTIFY
+            .iter()
+            .all(|code| response_hashes.contains_key(code)));
 
         response_hashes
     }

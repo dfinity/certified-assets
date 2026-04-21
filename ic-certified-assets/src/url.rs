@@ -1,6 +1,6 @@
 use std::fmt;
 
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UrlDecodeError {
