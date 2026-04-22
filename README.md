@@ -1,1 +1,3 @@
 The source code of `certified-assets` canister crate is moved to the [SDK](https://github.com/dfinity/sdk) repository to [`/src/canisters/frontend/ic-frontend-canister` directory](https://github.com/dfinity/sdk/tree/master/src/canisters/frontend/ic-frontend-canister).
+
+Test a change
