@@ -1,5 +1,8 @@
 //! Sync plugin for the certified-assets canister, invoked by `icp deploy`.
 
+// wit_bindgen generates code that triggers clippy warnings, so we allow them here.
+#![allow(clippy::too_many_arguments)]
+
 wit_bindgen::generate!({
     world: "sync-plugin",
     path: "wit/sync-plugin.wit",
