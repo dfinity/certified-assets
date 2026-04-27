@@ -19,7 +19,11 @@ impl Guest for Plugin {
             "sync plugin: starting for canister {} (environment: {})",
             input.canister_id, input.environment
         );
-        let summary = upload::run(&input.dirs)?;
+        let summary = upload::run(
+            &input.dirs,
+            &input.identity_principal,
+            input.proxy_canister_id.as_deref(),
+        )?;
         Ok(Some(summary))
     }
 }

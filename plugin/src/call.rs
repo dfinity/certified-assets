@@ -1,15 +1,17 @@
 //! Wrappers around the host's `canister-call` import.
 //!
-//! All calls go through `direct: true` (no proxy). Update vs. query is
-//! chosen per method to match the assets canister's spec.
+//! Most calls use `direct: true` (bypass proxy). Permission bootstrap calls
+//! in proxy mode use `direct: false` so the proxy canister, which is the
+//! controller, can authorise them.
 
-use candid::{CandidType, Decode, Encode, Nat};
+use candid::{CandidType, Decode, Encode, Nat, Principal};
 use serde::de::DeserializeOwned;
 
 use crate::icp::sync_plugin::types as ty;
 use crate::types::{
     AssetDetails, CommitBatchArguments, CreateBatchRequest, CreateBatchResponse,
-    CreateChunkRequest, CreateChunkResponse, ListAssetsRequest,
+    CreateChunkRequest, CreateChunkResponse, GrantPermissionArguments, ListAssetsRequest,
+    ListPermittedArguments, Permission,
 };
 use crate::{canister_call, CanisterCallRequest};
 
@@ -97,4 +99,33 @@ pub fn create_chunk(batch_id: &Nat, content: &[u8]) -> Result<Nat, String> {
 
 pub fn commit_batch(args: CommitBatchArguments) -> Result<(), String> {
     call_void("commit_batch", args, ty::CallType::Update)
+}
+
+pub fn list_permitted(permission: Permission) -> Result<Vec<Principal>, String> {
+    call::<_, Vec<Principal>>(
+        "list_permitted",
+        ListPermittedArguments { permission },
+        ty::CallType::Update,
+    )
+}
+
+// Routes through the proxy (direct: false) so the proxy canister — the
+// controller — can authorise the call on the assets canister.
+pub fn grant_permission_via_proxy(
+    to_principal: Principal,
+    permission: Permission,
+) -> Result<(), String> {
+    let arg_bytes = Encode!(&GrantPermissionArguments {
+        to_principal,
+        permission
+    })
+    .map_err(|e| format!("encode arg for grant_permission: {e}"))?;
+    let req = CanisterCallRequest {
+        method: "grant_permission".to_string(),
+        arg: arg_bytes,
+        call_type: Some(ty::CallType::Update),
+        direct: false,
+    };
+    let bytes = canister_call(&req).map_err(|e| format!("grant_permission: {e}"))?;
+    Decode!(&bytes).map_err(|e| format!("decode reply from grant_permission: {e}"))
 }

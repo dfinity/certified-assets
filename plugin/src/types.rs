@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use candid::{CandidType, Nat};
+use candid::{CandidType, Nat, Principal};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -103,4 +103,22 @@ pub enum BatchOperationKind {
 pub struct CommitBatchArguments {
     pub batch_id: Nat,
     pub operations: Vec<BatchOperationKind>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub enum Permission {
+    Commit,
+    ManagePermissions,
+    Prepare,
+}
+
+#[derive(CandidType, Debug)]
+pub struct ListPermittedArguments {
+    pub permission: Permission,
+}
+
+#[derive(CandidType, Debug)]
+pub struct GrantPermissionArguments {
+    pub to_principal: Principal,
+    pub permission: Permission,
 }

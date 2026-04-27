@@ -46,7 +46,6 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
 
 - `.ic-assets.json5` parsing — per-directory config for `headers`, `max_age`, `allow_raw_access`, `enable_aliasing`, encoding overrides, ignore globs.
 - Security policy — adopt `ic-asset`'s `security_policy.rs` (CSP / standard headers).
-- Proxy support — route controller-gated calls through `--proxy` (`direct: false`) so a non-controller identity can still drive a sync.
 - Batched chunk upload via `create_chunks` — fewer round-trips for projects with many small files.
 - Asset properties update — emit `SetAssetProperties` ops for assets whose properties drifted.
 - Brotli encoding — wired into the encoder enum but not selected by the default encoder policy.

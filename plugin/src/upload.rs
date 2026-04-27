@@ -6,7 +6,7 @@
 //! - no `.ic-assets.json5` configs; new assets created with default properties
 //! - no proposal mode; no security policy
 
-use candid::Nat;
+use candid::{Nat, Principal};
 use mime::Mime;
 use std::collections::HashMap;
 
@@ -15,7 +15,7 @@ use crate::content::{default_encoders, Content, ContentEncoder};
 use crate::gather::AssetDescriptor;
 use crate::types::{
     AssetDetails, BatchOperationKind, CommitBatchArguments, CreateAssetArguments,
-    DeleteAssetArguments, SetAssetContentArguments, UnsetAssetContentArguments,
+    DeleteAssetArguments, Permission, SetAssetContentArguments, UnsetAssetContentArguments,
 };
 
 // Stay safely under the canister's ingress message limit (~2 MB).
@@ -33,7 +33,37 @@ struct ProjectAsset {
     encodings: HashMap<String, ProjectAssetEncoding>,
 }
 
-pub fn run(dirs: &[String]) -> Result<String, String> {
+/// Ensures the signing identity has `Commit` permission on the assets canister.
+///
+/// Called only in proxy mode. Queries the current `Commit` permission list and,
+/// if the identity is absent, routes a `grant_permission` call through the proxy
+/// canister. The proxy is the controller of the assets canister and can therefore
+/// authorise the grant even without holding `ManagePermissions` explicitly.
+fn ensure_commit_permission(identity_principal: &str) -> Result<(), String> {
+    let principal = Principal::from_text(identity_principal)
+        .map_err(|e| format!("invalid identity principal '{identity_principal}': {e}"))?;
+
+    let permitted = call::list_permitted(Permission::Commit)?;
+    if permitted.contains(&principal) {
+        println!("proxy mode: identity already has Commit permission");
+        return Ok(());
+    }
+
+    println!("proxy mode: granting Commit permission to {identity_principal} via proxy");
+    call::grant_permission_via_proxy(principal, Permission::Commit)?;
+    println!("proxy mode: Commit permission granted");
+    Ok(())
+}
+
+pub fn run(
+    dirs: &[String],
+    identity_principal: &str,
+    proxy_canister_id: Option<&str>,
+) -> Result<String, String> {
+    if let Some(_proxy) = proxy_canister_id {
+        ensure_commit_permission(identity_principal)?;
+    }
+
     let version = call::api_version()?;
     if version < 2 {
         return Err(format!(
