@@ -10,13 +10,13 @@ use candid::{Nat, Principal};
 use mime::Mime;
 use std::collections::HashMap;
 
-use crate::call;
-use crate::content::{default_encoders, Content, ContentEncoder};
-use crate::gather::AssetDescriptor;
-use crate::types::{
+use crate::canister;
+use crate::canister::{
     AssetDetails, BatchOperationKind, CommitBatchArguments, CreateAssetArguments,
     DeleteAssetArguments, Permission, SetAssetContentArguments, UnsetAssetContentArguments,
 };
+use crate::content::{encoders_for, Content, Encoder};
+use crate::scan::AssetSource;
 
 // Stay safely under the canister's ingress message limit (~2 MB).
 const MAX_CHUNK_SIZE: usize = 1_900_000;
@@ -28,7 +28,7 @@ struct ProjectAssetEncoding {
 }
 
 struct ProjectAsset {
-    descriptor: AssetDescriptor,
+    source: AssetSource,
     media_type: Mime,
     encodings: HashMap<String, ProjectAssetEncoding>,
 }
@@ -43,19 +43,19 @@ fn ensure_commit_permission(identity_principal: &str) -> Result<(), String> {
     let principal = Principal::from_text(identity_principal)
         .map_err(|e| format!("invalid identity principal '{identity_principal}': {e}"))?;
 
-    let permitted = call::list_permitted(Permission::Commit)?;
+    let permitted = canister::list_permitted(Permission::Commit)?;
     if permitted.contains(&principal) {
         println!("proxy mode: identity already has Commit permission");
         return Ok(());
     }
 
     println!("proxy mode: granting Commit permission to {identity_principal} via proxy");
-    call::grant_permission_via_proxy(principal, Permission::Commit)?;
+    canister::grant_permission_via_proxy(principal, Permission::Commit)?;
     println!("proxy mode: Commit permission granted");
     Ok(())
 }
 
-pub fn run(
+pub fn sync(
     dirs: &[String],
     identity_principal: &str,
     proxy_canister_id: Option<&str>,
@@ -64,7 +64,7 @@ pub fn run(
         ensure_commit_permission(identity_principal)?;
     }
 
-    let version = call::api_version()?;
+    let version = canister::api_version()?;
     if version < 2 {
         return Err(format!(
             "assets canister api_version is {version}; this plugin requires V2"
@@ -72,28 +72,28 @@ pub fn run(
     }
     println!("api_version: {version}");
 
-    let descriptors = crate::gather::gather(dirs)?;
-    println!("gathered {} file(s) from {:?}", descriptors.len(), dirs);
+    let sources = crate::scan::scan(dirs)?;
+    println!("found {} file(s) from {:?}", sources.len(), dirs);
 
-    let canister_assets: HashMap<String, AssetDetails> = call::list_assets()?
+    let canister_assets: HashMap<String, AssetDetails> = canister::list_assets()?
         .into_iter()
         .map(|d| (d.key.clone(), d))
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
 
-    let batch_id = call::create_batch()?;
+    let batch_id = canister::create_batch()?;
     println!("created batch {batch_id}");
 
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
-    for descriptor in descriptors {
-        let asset = make_project_asset(descriptor, &canister_assets, &batch_id)?;
-        project_assets.insert(asset.descriptor.key.clone(), asset);
+    for source in sources {
+        let asset = prepare_asset(source, &canister_assets, &batch_id)?;
+        project_assets.insert(asset.source.key.clone(), asset);
     }
 
-    let operations = assemble_operations(&project_assets, &canister_assets);
+    let operations = build_operations(&project_assets, &canister_assets);
     println!("committing {} operation(s)", operations.len());
 
-    call::commit_batch(CommitBatchArguments {
+    canister::commit_batch(CommitBatchArguments {
         batch_id,
         operations,
     })?;
@@ -104,22 +104,22 @@ pub fn run(
     ))
 }
 
-fn make_project_asset(
-    descriptor: AssetDescriptor,
+fn prepare_asset(
+    source: AssetSource,
     canister_assets: &HashMap<String, AssetDetails>,
     batch_id: &Nat,
 ) -> Result<ProjectAsset, String> {
-    let content = Content::load(&descriptor.source)?;
-    let encoders = default_encoders(&content.media_type);
+    let content = Content::load(&source.path)?;
+    let encoders = encoders_for(&content.media_type);
     // The identity encoding is always uploaded if it's in the encoders list.
     // Other encodings are only uploaded if they save bytes vs. identity.
     // If identity is absent, force the alternate encoding through.
-    let force_encoding = !encoders.contains(&ContentEncoder::Identity);
+    let force_encoding = !encoders.contains(&Encoder::Identity);
 
     let mut encodings: HashMap<String, ProjectAssetEncoding> = HashMap::new();
     for encoder in encoders {
         let encoded = content.encode(encoder)?;
-        if encoder != ContentEncoder::Identity
+        if encoder != Encoder::Identity
             && !force_encoding
             && encoded.data.len() >= content.data.len()
         {
@@ -128,7 +128,7 @@ fn make_project_asset(
         let name = encoder.name().to_string();
         let sha256 = encoded.sha256();
         let already_in_place = is_already_in_place(
-            &descriptor.key,
+            &source.key,
             &content.media_type,
             &name,
             &sha256,
@@ -138,14 +138,14 @@ fn make_project_asset(
         let chunk_ids = if already_in_place {
             println!(
                 "  {}{} ({} bytes) sha {} already in place",
-                descriptor.key,
+                source.key,
                 encoding_suffix(&name),
                 encoded.data.len(),
                 hex::encode(&sha256)
             );
             Vec::new()
         } else {
-            upload_chunks(batch_id, &descriptor.key, &name, &encoded.data)?
+            upload_chunks(batch_id, &source.key, &name, &encoded.data)?
         };
 
         encodings.insert(
@@ -160,7 +160,7 @@ fn make_project_asset(
 
     Ok(ProjectAsset {
         media_type: content.media_type,
-        descriptor,
+        source,
         encodings,
     })
 }
@@ -193,14 +193,14 @@ fn upload_chunks(
     data: &[u8],
 ) -> Result<Vec<Nat>, String> {
     if data.is_empty() {
-        let id = call::create_chunk(batch_id, &[])?;
+        let id = canister::create_chunk(batch_id, &[])?;
         println!("  {key}{} 1/1 (0 bytes)", encoding_suffix(encoding));
         return Ok(vec![id]);
     }
     let total = data.len().div_ceil(MAX_CHUNK_SIZE);
     let mut ids = Vec::with_capacity(total);
     for (i, chunk) in data.chunks(MAX_CHUNK_SIZE).enumerate() {
-        let id = call::create_chunk(batch_id, chunk)?;
+        let id = canister::create_chunk(batch_id, chunk)?;
         println!(
             "  {key}{} {}/{} ({} bytes)",
             encoding_suffix(encoding),
@@ -221,7 +221,7 @@ fn encoding_suffix(encoding: &str) -> String {
     }
 }
 
-fn assemble_operations(
+fn build_operations(
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
 ) -> Vec<BatchOperationKind> {

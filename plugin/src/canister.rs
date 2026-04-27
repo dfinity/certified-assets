@@ -1,19 +1,138 @@
-//! Wrappers around the host's `canister-call` import.
+//! Assets canister API: Candid wire types and call wrappers.
 //!
-//! Most calls use `direct: true` (bypass proxy). Permission bootstrap calls
-//! in proxy mode use `direct: false` so the proxy canister, which is the
-//! controller, can authorise them.
+//! Types are ported from `ic-asset` (`src/canisters/frontend/ic-asset/src/canister_api/`).
+//! Only the subset needed for the V2 batch-upload flow is included.
+//!
+//! Calls wrap the host's `canister-call` import. Most calls use `direct: true`
+//! (bypass proxy). Permission bootstrap calls in proxy mode use `direct: false`
+//! so the proxy canister, which is the controller, can authorise them.
+
+#![allow(dead_code)]
 
 use candid::{CandidType, Decode, Encode, Nat, Principal};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize};
+use std::collections::HashMap;
 
 use crate::icp::sync_plugin::types as ty;
-use crate::types::{
-    AssetDetails, CommitBatchArguments, CreateBatchRequest, CreateBatchResponse,
-    CreateChunkRequest, CreateChunkResponse, GrantPermissionArguments, ListAssetsRequest,
-    ListPermittedArguments, Permission,
-};
 use crate::{canister_call, CanisterCallRequest};
+
+// --- Candid wire types ---
+
+#[derive(CandidType, Debug)]
+pub struct ListAssetsRequest {
+    pub start: Option<Nat>,
+    pub length: Option<Nat>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AssetEncodingDetails {
+    pub content_encoding: String,
+    pub sha256: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AssetDetails {
+    pub key: String,
+    pub encodings: Vec<AssetEncodingDetails>,
+    pub content_type: String,
+}
+
+#[derive(CandidType, Debug)]
+pub struct CreateBatchRequest {}
+
+#[derive(CandidType, Debug, Deserialize)]
+pub struct CreateBatchResponse {
+    pub batch_id: Nat,
+}
+
+#[derive(CandidType, Debug)]
+pub struct CreateChunkRequest<'a> {
+    pub batch_id: Nat,
+    pub content: &'a [u8],
+}
+
+#[derive(CandidType, Debug, Deserialize)]
+pub struct CreateChunkResponse {
+    pub chunk_id: Nat,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct CreateAssetArguments {
+    pub key: String,
+    pub content_type: String,
+    pub max_age: Option<u64>,
+    pub headers: Option<HashMap<String, String>>,
+    pub enable_aliasing: Option<bool>,
+    pub allow_raw_access: Option<bool>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct SetAssetContentArguments {
+    pub key: String,
+    pub content_encoding: String,
+    pub chunk_ids: Vec<Nat>,
+    pub last_chunk: Option<Vec<u8>>,
+    pub sha256: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct UnsetAssetContentArguments {
+    pub key: String,
+    pub content_encoding: String,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct DeleteAssetArguments {
+    pub key: String,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct ClearArguments {}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct SetAssetPropertiesArguments {
+    pub key: String,
+    pub max_age: Option<Option<u64>>,
+    pub headers: Option<Option<Vec<(String, String)>>>,
+    pub allow_raw_access: Option<Option<bool>>,
+    pub is_aliased: Option<Option<bool>>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub enum BatchOperationKind {
+    Clear(ClearArguments),
+    DeleteAsset(DeleteAssetArguments),
+    CreateAsset(CreateAssetArguments),
+    UnsetAssetContent(UnsetAssetContentArguments),
+    SetAssetContent(SetAssetContentArguments),
+    SetAssetProperties(SetAssetPropertiesArguments),
+}
+
+#[derive(CandidType, Debug)]
+pub struct CommitBatchArguments {
+    pub batch_id: Nat,
+    pub operations: Vec<BatchOperationKind>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub enum Permission {
+    Commit,
+    ManagePermissions,
+    Prepare,
+}
+
+#[derive(CandidType, Debug)]
+pub struct ListPermittedArguments {
+    pub permission: Permission,
+}
+
+#[derive(CandidType, Debug)]
+pub struct GrantPermissionArguments {
+    pub to_principal: Principal,
+    pub permission: Permission,
+}
+
+// --- Canister call wrappers ---
 
 fn call<A, R>(method: &str, arg: A, call_type: ty::CallType) -> Result<R, String>
 where

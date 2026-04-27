@@ -1,16 +1,16 @@
-//! Walk preopened dirs to produce asset descriptors.
+//! Scan preopened dirs for asset files.
 //!
 //! Skips dotfiles (matching `ic-asset`'s `include_entry` heuristic, minus
 //! the `.well-known` exception which we don't need for the basic case).
 
 use std::path::{Path, PathBuf};
 
-pub struct AssetDescriptor {
-    pub source: PathBuf,
+pub struct AssetSource {
+    pub path: PathBuf,
     pub key: String,
 }
 
-pub fn gather(dirs: &[String]) -> Result<Vec<AssetDescriptor>, String> {
+pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
     let mut out = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
     for dir in dirs {
@@ -23,7 +23,7 @@ pub fn gather(dirs: &[String]) -> Result<Vec<AssetDescriptor>, String> {
 fn walk(
     root: &Path,
     current: &Path,
-    out: &mut Vec<AssetDescriptor>,
+    out: &mut Vec<AssetSource>,
     seen_keys: &mut std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let entries =
@@ -49,7 +49,7 @@ fn walk(
             if !seen_keys.insert(key.clone()) {
                 return Err(format!("duplicate asset key {key}"));
             }
-            out.push(AssetDescriptor { source: path, key });
+            out.push(AssetSource { path, key });
         }
     }
     Ok(())

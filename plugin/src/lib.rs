@@ -8,11 +8,10 @@ wit_bindgen::generate!({
     path: "wit/sync-plugin.wit",
 });
 
-mod call;
+mod canister;
 mod content;
-mod gather;
-mod types;
-mod upload;
+mod scan;
+mod sync;
 
 struct Plugin;
 
@@ -22,7 +21,7 @@ impl Guest for Plugin {
             "sync plugin: starting for canister {} (environment: {})",
             input.canister_id, input.environment
         );
-        let summary = upload::run(
+        let summary = sync::sync(
             &input.dirs,
             &input.identity_principal,
             input.proxy_canister_id.as_deref(),

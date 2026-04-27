@@ -8,19 +8,19 @@ use std::io::Write;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ContentEncoder {
+pub enum Encoder {
     Identity,
     Gzip,
     #[allow(dead_code)]
     Brotli,
 }
 
-impl ContentEncoder {
+impl Encoder {
     pub fn name(&self) -> &'static str {
         match self {
-            ContentEncoder::Identity => "identity",
-            ContentEncoder::Gzip => "gzip",
-            ContentEncoder::Brotli => "br",
+            Encoder::Identity => "identity",
+            Encoder::Gzip => "gzip",
+            Encoder::Brotli => "br",
         }
     }
 }
@@ -40,10 +40,10 @@ impl Content {
         Ok(Content { data, media_type })
     }
 
-    pub fn encode(&self, encoder: ContentEncoder) -> Result<Content, String> {
+    pub fn encode(&self, encoder: Encoder) -> Result<Content, String> {
         match encoder {
-            ContentEncoder::Identity => Ok(self.clone()),
-            ContentEncoder::Gzip => {
+            Encoder::Identity => Ok(self.clone()),
+            Encoder::Gzip => {
                 let mut e =
                     flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 e.write_all(&self.data).map_err(|e| format!("gzip: {e}"))?;
@@ -53,7 +53,7 @@ impl Content {
                     media_type: self.media_type.clone(),
                 })
             }
-            ContentEncoder::Brotli => {
+            Encoder::Brotli => {
                 let mut compressed = Vec::new();
                 {
                     let mut w = brotli::CompressorWriter::new(&mut compressed, 4096, 11, 22);
@@ -74,12 +74,12 @@ impl Content {
     }
 }
 
-/// Default encoders for a media type. Matches `ic-asset`'s policy.
-pub fn default_encoders(media_type: &Mime) -> Vec<ContentEncoder> {
+/// Returns the encoders to apply for a given media type, matching `ic-asset`'s policy.
+pub fn encoders_for(media_type: &Mime) -> Vec<Encoder> {
     match (media_type.type_(), media_type.subtype()) {
         (mime::TEXT, _) | (_, mime::JAVASCRIPT) | (_, mime::HTML) => {
-            vec![ContentEncoder::Identity, ContentEncoder::Gzip]
+            vec![Encoder::Identity, Encoder::Gzip]
         }
-        _ => vec![ContentEncoder::Identity],
+        _ => vec![Encoder::Identity],
     }
 }
