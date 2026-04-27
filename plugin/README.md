@@ -16,12 +16,11 @@ It exports an `exec()` function which executes operations similar to the `sync()
 
 ## How
 
-The `icp-cli` project is at: `/Users/linwei.shang/dfinity/icp-cli`.
-Its current `lwshang/sync_plugin` branch contains the runtime side of the plugin system:
+The runtime side of the plugin system lives in [`github.com/dfinity/icp-cli`](https://github.com/dfinity/icp-cli):
 - The runtime crate: `crates/icp-sync-plugin`
 - An example: `examples/icp-sync-plugin`
 
-The `ic-asset` crate (business logic) is at `/Users/linwei.shang/dfinity/sdk/src/canisters/frontend/ic-asset`. The protocol-level pieces (Candid types, batch/chunk upload flow, content encoding) were ported from there; the transport layer was rewritten on top of the host's `canister-call` import.
+The protocol-level pieces (Candid types, batch/chunk upload flow, content encoding) were ported from the `ic-asset` crate in [`github.com/dfinity/sdk`](https://github.com/dfinity/sdk) (`src/canisters/frontend/ic-asset`). The transport layer was rewritten on top of the host's `canister-call` import.
 
 ## Build
 
@@ -38,7 +37,7 @@ The current implementation supports the V2 batch-upload protocol of the assets c
 - Hashes every file, computes `gzip` for text/HTML/JS, identity for everything else.
 - Diffs against `list_assets()` and skips encodings that are already in place (matched by content_type + sha256).
 - Creates a batch, uploads chunks via `create_chunk` (one chunk per call, 1.9 MB max), and commits the batch atomically.
-- All canister calls are made `direct: true` (no proxy). The signing identity must therefore be a controller of the canister (or otherwise authorized by the canister's permission rules).
+- In normal mode all canister calls are made `direct: true`. In proxy mode (`--proxy`) the plugin first ensures the signing identity has `Commit` permission, routing a `grant_permission` call through the proxy (which is the canister's controller) if needed, then proceeds with direct calls.
 
 The plugin calls `api_version` first and aborts if the canister advertises anything below 2.
 
