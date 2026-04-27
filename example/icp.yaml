@@ -1,0 +1,17 @@
+canisters:
+  - name: my-canister
+    build:
+      steps:
+        - type: pre-built
+          # Path to the compiled canister wasm, relative to this directory.
+          # Build it first in project root: cargo build -p canister --target wasm32-unknown-unknown --release
+          path: ../target/wasm32-unknown-unknown/release/canister.wasm
+
+    sync:
+      steps:
+        - type: plugin
+          # Path to the compiled plugin wasm, relative to this directory.
+          # Build it first in project root: cargo build -p plugin --target wasm32-wasip2 --release
+          path: ../target/wasm32-wasip2/release/plugin.wasm
+          dirs:
+            - dist

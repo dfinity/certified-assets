@@ -2,6 +2,7 @@
 members = [
     "canister",
     "ic-certified-assets",
+    "plugin",
 ]
 resolver = "2"
 
