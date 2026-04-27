@@ -8,13 +8,13 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-brotli = "6.0.0"
-candid = { workspace = true }
-flate2 = "1.0"
-hex = { workspace = true }
-mime = "0.3"
-mime_guess = "2.0"
-serde = { workspace = true }
-serde_bytes = { workspace = true }
-sha2 = { workspace = true }
-wit-bindgen = { version = "0.56", features = ["realloc"] }
+brotli.workspace = true
+candid.workspace = true
+flate2.workspace = true
+hex.workspace = true
+mime.workspace = true
+mime_guess.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+sha2.workspace = true
+wit-bindgen = { workspace = true, features = ["realloc"] }
