@@ -1,5 +1,5 @@
 canisters:
-  - name: my-canister
+  - name: frontend
     build:
       steps:
         - type: script

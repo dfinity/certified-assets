@@ -1,22 +1,15 @@
-## Build and run the example
+# Certified Assets
 
-The [`example/`](example/) directory contains a minimal `icp.yaml` that builds the [`canister/`](canister/) and uses the [`plugin/`](plugin/) to sync assets from `example/dist/` after deploy.
+This workspace contains three crates:
 
-Prerequisites:
-- The Rust targets `wasm32-unknown-unknown` and `wasm32-wasip2` (declared in [`rust-toolchain.toml`](rust-toolchain.toml)).
-- [`ic-wasm`](https://github.com/dfinity/ic-wasm) on `PATH`.
-- A local build of `icp-cli` from the `lwshang/sync_plugin` branch (the runtime side of the sync plugin system is not yet released).
+## [`canister/`](canister/)
 
-Steps from the project root:
+The ICP assets canister — a deployable WebAssembly canister that serves certified static assets over HTTP. It wraps `ic-certified-assets` and exposes the canister interface.
 
-```sh
-# 1. Build the sync plugin. (The canister is built automatically by `icp deploy`
-#    via icp.yaml, but the plugin path in icp.yaml points at a prebuilt artifact.)
-cargo build -p plugin --target wasm32-wasip2 --release
+## [`ic-certified-assets/`](ic-certified-assets/)
 
-# 2. Deploy from the example directory.
-cd example
-icp deploy
-```
+The core business logic library. Handles asset storage, certification (response verification), streaming, and access control. `canister` depends on this crate; it can also be embedded in other canisters.
 
-`icp deploy` runs the build steps declared in [`example/icp.yaml`](example/icp.yaml) (which builds and installs the canister), then invokes the plugin to upload everything in `example/dist/` to the canister.
+## [`plugin/`](plugin/)
+
+An `icp-cli` sync plugin. After a deploy, it uploads assets from a local directory to the assets canister using the canister's batch upload API.
