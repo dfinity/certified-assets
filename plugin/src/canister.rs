@@ -143,8 +143,9 @@ where
     let req = CanisterCallRequest {
         method: method.to_string(),
         arg: arg_bytes,
-        call_type: Some(call_type),
+        call_type,
         direct: true,
+        cycles: 0,
     };
     let bytes = canister_call(&req).map_err(|e| format!("{method}: {e}"))?;
     Decode!(&bytes, R).map_err(|e| format!("decode reply from {method}: {e}"))
@@ -158,8 +159,9 @@ where
     let req = CanisterCallRequest {
         method: method.to_string(),
         arg: arg_bytes,
-        call_type: Some(call_type),
+        call_type,
         direct: true,
+        cycles: 0,
     };
     let bytes = canister_call(&req).map_err(|e| format!("{method}: {e}"))?;
     Decode!(&bytes).map_err(|e| format!("decode reply from {method}: {e}"))
@@ -242,8 +244,9 @@ pub fn grant_permission_via_proxy(
     let req = CanisterCallRequest {
         method: "grant_permission".to_string(),
         arg: arg_bytes,
-        call_type: Some(ty::CallType::Update),
+        call_type: ty::CallType::Update,
         direct: false,
+        cycles: 0,
     };
     let bytes = canister_call(&req).map_err(|e| format!("grant_permission: {e}"))?;
     Decode!(&bytes).map_err(|e| format!("decode reply from grant_permission: {e}"))
