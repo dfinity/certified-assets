@@ -91,6 +91,13 @@ pub fn sync(
     }
 
     let operations = build_operations(&project_assets, &canister_assets);
+    if operations.is_empty() {
+        println!("canister is up to date, nothing to commit");
+        return Ok(format!(
+            "{} asset(s) already up to date",
+            project_assets.len()
+        ));
+    }
     println!("committing {} operation(s)", operations.len());
 
     canister::commit_batch(CommitBatchArguments {
