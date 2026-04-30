@@ -24,13 +24,13 @@ pub struct ListAssetsRequest {
     pub length: Option<Nat>,
 }
 
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(CandidType, Clone, Debug, Deserialize)]
 pub struct AssetEncodingDetails {
     pub content_encoding: String,
     pub sha256: Option<Vec<u8>>,
 }
 
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(CandidType, Clone, Debug, Deserialize)]
 pub struct AssetDetails {
     pub key: String,
     pub encodings: Vec<AssetEncodingDetails>,
@@ -171,6 +171,8 @@ pub fn api_version() -> Result<u16, String> {
     call::<(), u16>("api_version", (), ty::CallType::Query)
 }
 
+// Ported from ic-asset. Unlike ic-asset, which must handle older canister versions that ignore
+// `start`, this plugin targets only the canister in this repo, which always honours pagination.
 pub fn list_assets() -> Result<Vec<AssetDetails>, String> {
     let mut all: Vec<AssetDetails> = Vec::new();
     let mut start: u64 = 0;
@@ -185,9 +187,6 @@ pub fn list_assets() -> Result<Vec<AssetDetails>, String> {
 
         let n = entries.len();
         if n == 0 {
-            break;
-        }
-        if start > 0 && entries == all {
             break;
         }
         start += n as u64;
