@@ -48,3 +48,4 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
 - Multi-chunk upload via `create_chunks` — send multiple chunks per canister call instead of one, reducing round-trips for projects with many small files.
 - Asset properties update — emit `SetAssetProperties` ops for assets whose properties drifted.
 - Brotli encoding — wired into the encoder enum but not selected by the default encoder policy.
+- `commit_batch` chunking — split operations across multiple `commit_batch` calls to stay within the ~2 MB ICP ingress message limit, matching `ic-asset` behaviour.
