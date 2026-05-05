@@ -7,6 +7,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [dependencies]
 brotli.workspace = true
 candid.workspace = true
