@@ -10,9 +10,8 @@ use candid::{Nat, Principal};
 use mime::Mime;
 use std::collections::HashMap;
 
-use crate::canister;
 use crate::canister::{
-    AssetDetails, BatchOperationKind, CommitBatchArguments, CreateAssetArguments,
+    AssetDetails, BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
     DeleteAssetArguments, Permission, SetAssetContentArguments, UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
@@ -39,32 +38,36 @@ struct ProjectAsset {
 /// if the identity is absent, routes a `grant_permission` call through the proxy
 /// canister. The proxy is the controller of the assets canister and can therefore
 /// authorise the grant even without holding `ManagePermissions` explicitly.
-fn ensure_commit_permission(identity_principal: &str) -> Result<(), String> {
+fn ensure_commit_permission<C: CanisterCall>(
+    canister: &C,
+    identity_principal: &str,
+) -> Result<(), String> {
     let principal = Principal::from_text(identity_principal)
         .map_err(|e| format!("invalid identity principal '{identity_principal}': {e}"))?;
 
-    let permitted = canister::list_permitted(Permission::Commit)?;
+    let permitted = canister.list_permitted(Permission::Commit)?;
     if permitted.contains(&principal) {
         println!("proxy mode: identity already has Commit permission");
         return Ok(());
     }
 
     println!("proxy mode: granting Commit permission to {identity_principal} via proxy");
-    canister::grant_permission_via_proxy(principal, Permission::Commit)?;
+    canister.grant_permission_via_proxy(principal, Permission::Commit)?;
     println!("proxy mode: Commit permission granted");
     Ok(())
 }
 
-pub fn sync(
+pub fn sync<C: CanisterCall>(
+    canister: &C,
     dirs: &[String],
     identity_principal: &str,
     proxy_canister_id: Option<&str>,
 ) -> Result<String, String> {
     if let Some(_proxy) = proxy_canister_id {
-        ensure_commit_permission(identity_principal)?;
+        ensure_commit_permission(canister, identity_principal)?;
     }
 
-    let version = canister::api_version()?;
+    let version = canister.api_version()?;
     if version < 2 {
         return Err(format!(
             "assets canister api_version is {version}; this plugin requires V2"
@@ -75,18 +78,19 @@ pub fn sync(
     let sources = crate::scan::scan(dirs)?;
     println!("found {} file(s) from {:?}", sources.len(), dirs);
 
-    let canister_assets: HashMap<String, AssetDetails> = canister::list_assets()?
+    let canister_assets: HashMap<String, AssetDetails> = canister
+        .list_assets()?
         .into_iter()
         .map(|d| (d.key.clone(), d))
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
 
-    let batch_id = canister::create_batch()?;
+    let batch_id = canister.create_batch()?;
     println!("created batch {batch_id}");
 
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
     for source in sources {
-        let asset = prepare_asset(source, &canister_assets, &batch_id)?;
+        let asset = prepare_asset(canister, source, &canister_assets, &batch_id)?;
         project_assets.insert(asset.source.key.clone(), asset);
     }
 
@@ -100,7 +104,7 @@ pub fn sync(
     }
     println!("committing {} operation(s)", operations.len());
 
-    canister::commit_batch(CommitBatchArguments {
+    canister.commit_batch(CommitBatchArguments {
         batch_id,
         operations,
     })?;
@@ -111,7 +115,8 @@ pub fn sync(
     ))
 }
 
-fn prepare_asset(
+fn prepare_asset<C: CanisterCall>(
+    canister: &C,
     source: AssetSource,
     canister_assets: &HashMap<String, AssetDetails>,
     batch_id: &Nat,
@@ -152,7 +157,7 @@ fn prepare_asset(
             );
             Vec::new()
         } else {
-            upload_chunks(batch_id, &source.key, &name, &encoded.data)?
+            upload_chunks(canister, batch_id, &source.key, &name, &encoded.data)?
         };
 
         encodings.insert(
@@ -193,21 +198,22 @@ fn is_already_in_place(
         .is_some_and(|s| s == sha256)
 }
 
-fn upload_chunks(
+fn upload_chunks<C: CanisterCall>(
+    canister: &C,
     batch_id: &Nat,
     key: &str,
     encoding: &str,
     data: &[u8],
 ) -> Result<Vec<Nat>, String> {
     if data.is_empty() {
-        let id = canister::create_chunk(batch_id, &[])?;
+        let id = canister.create_chunk(batch_id, &[])?;
         println!("  {key}{} 1/1 (0 bytes)", encoding_suffix(encoding));
         return Ok(vec![id]);
     }
     let total = data.len().div_ceil(MAX_CHUNK_SIZE);
     let mut ids = Vec::with_capacity(total);
     for (i, chunk) in data.chunks(MAX_CHUNK_SIZE).enumerate() {
-        let id = canister::create_chunk(batch_id, chunk)?;
+        let id = canister.create_chunk(batch_id, chunk)?;
         println!(
             "  {key}{} {}/{} ({} bytes)",
             encoding_suffix(encoding),
@@ -303,4 +309,263 @@ fn build_operations(
     }
 
     ops
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canister::{AssetDetails, AssetEncodingDetails, BatchOperationKind};
+    use candid::Nat;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    // --- helpers ---
+
+    fn mk_project_asset(
+        key: &str,
+        media_type: &str,
+        encodings: &[(&str, Vec<u8>, bool)],
+    ) -> (String, ProjectAsset) {
+        let mime: mime::Mime = media_type.parse().expect("valid MIME");
+        let mut enc_map = HashMap::new();
+        for (name, sha, already_in_place) in encodings {
+            let chunk_ids = if *already_in_place {
+                vec![]
+            } else {
+                vec![Nat::from(1u32)]
+            };
+            enc_map.insert(
+                name.to_string(),
+                ProjectAssetEncoding {
+                    chunk_ids,
+                    sha256: sha.clone(),
+                    already_in_place: *already_in_place,
+                },
+            );
+        }
+        (
+            key.to_string(),
+            ProjectAsset {
+                source: AssetSource {
+                    path: PathBuf::from(key.trim_start_matches('/')),
+                    key: key.to_string(),
+                },
+                media_type: mime,
+                encodings: enc_map,
+            },
+        )
+    }
+
+    fn mk_canister_asset(
+        key: &str,
+        content_type: &str,
+        encodings: &[(&str, Option<Vec<u8>>)],
+    ) -> (String, AssetDetails) {
+        let encs = encodings
+            .iter()
+            .map(|(enc, sha)| AssetEncodingDetails {
+                content_encoding: enc.to_string(),
+                sha256: sha.clone(),
+            })
+            .collect();
+        (
+            key.to_string(),
+            AssetDetails {
+                key: key.to_string(),
+                encodings: encs,
+                content_type: content_type.to_string(),
+            },
+        )
+    }
+
+    fn count_op(ops: &[BatchOperationKind], kind: &str) -> usize {
+        ops.iter()
+            .filter(|op| {
+                matches!(
+                    (op, kind),
+                    (BatchOperationKind::DeleteAsset(_), "DeleteAsset")
+                        | (BatchOperationKind::CreateAsset(_), "CreateAsset")
+                        | (BatchOperationKind::SetAssetContent(_), "SetAssetContent")
+                        | (
+                            BatchOperationKind::UnsetAssetContent(_),
+                            "UnsetAssetContent"
+                        )
+                )
+            })
+            .count()
+    }
+
+    // --- tests ---
+
+    #[test]
+    fn new_asset_emits_create_and_set() {
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+        )]);
+        let ops = build_operations(&project, &HashMap::new());
+        assert_eq!(count_op(&ops, "CreateAsset"), 1);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
+        assert_eq!(ops.len(), 2);
+    }
+
+    #[test]
+    fn unchanged_asset_emits_no_ops() {
+        let sha = vec![1u8, 2, 3];
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", sha.clone(), true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(sha))],
+        )]);
+        assert!(build_operations(&project, &canister).is_empty());
+    }
+
+    #[test]
+    fn updated_asset_emits_set_no_create() {
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![4, 5, 6], false)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let ops = build_operations(&project, &canister);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
+        assert_eq!(count_op(&ops, "CreateAsset"), 0);
+        assert_eq!(count_op(&ops, "DeleteAsset"), 0);
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn deleted_asset_emits_delete() {
+        let canister = HashMap::from([mk_canister_asset(
+            "/old.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let ops = build_operations(&HashMap::new(), &canister);
+        assert_eq!(count_op(&ops, "DeleteAsset"), 1);
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn content_type_mismatch_emits_delete_create_set() {
+        let project = HashMap::from([mk_project_asset(
+            "/file",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/file",
+            "application/octet-stream",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let ops = build_operations(&project, &canister);
+        assert_eq!(count_op(&ops, "DeleteAsset"), 1);
+        assert_eq!(count_op(&ops, "CreateAsset"), 1);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
+        assert_eq!(ops.len(), 3);
+    }
+
+    #[test]
+    fn stale_encoding_emits_unset() {
+        let sha = vec![1u8, 2, 3];
+        // Project has only identity (already in place); gzip is stale on canister.
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", sha.clone(), true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(sha)), ("gzip", Some(vec![9, 8, 7]))],
+        )]);
+        let ops = build_operations(&project, &canister);
+        assert_eq!(count_op(&ops, "UnsetAssetContent"), 1);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 0);
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn new_encoding_emits_set_content() {
+        let identity_sha = vec![1u8, 2, 3];
+        // Project gains a gzip encoding; identity is already in place.
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[
+                ("identity", identity_sha.clone(), true),
+                ("gzip", vec![9, 8, 7], false),
+            ],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(identity_sha))],
+        )]);
+        let ops = build_operations(&project, &canister);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
+        assert_eq!(count_op(&ops, "CreateAsset"), 0);
+        assert_eq!(count_op(&ops, "UnsetAssetContent"), 0);
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn empty_project_deletes_all_canister_assets() {
+        let canister = HashMap::from([
+            mk_canister_asset("/a.html", "text/html", &[("identity", Some(vec![1]))]),
+            mk_canister_asset(
+                "/b.js",
+                "application/javascript",
+                &[("identity", Some(vec![2]))],
+            ),
+        ]);
+        let ops = build_operations(&HashMap::new(), &canister);
+        assert_eq!(count_op(&ops, "DeleteAsset"), 2);
+        assert_eq!(ops.len(), 2);
+    }
+
+    #[test]
+    fn everything_in_sync_returns_empty() {
+        let sha = vec![1u8, 2, 3];
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", sha.clone(), true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(sha))],
+        )]);
+        assert!(build_operations(&project, &canister).is_empty());
+    }
+
+    // When gzip output is not smaller than identity, prepare_asset skips it, so
+    // build_operations sees only the identity encoding and emits no gzip op.
+    #[test]
+    fn gzip_absent_from_project_emits_no_gzip_op() {
+        let project = HashMap::from([mk_project_asset(
+            "/tiny.txt",
+            "text/plain",
+            &[("identity", vec![1, 2, 3], false)],
+        )]);
+        let ops = build_operations(&project, &HashMap::new());
+        assert_eq!(count_op(&ops, "CreateAsset"), 1);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
+        assert!(!ops.iter().any(|op| matches!(
+            op,
+            BatchOperationKind::SetAssetContent(a) if a.content_encoding == "gzip"
+        )));
+    }
 }

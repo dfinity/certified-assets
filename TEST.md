@@ -191,9 +191,9 @@ The `e2e/` crate uses:
   Add inline `#[cfg(test)]` module to `plugin/src/content.rs`.  
   Covers: `encoders_for` by MIME type, gzip/brotli round-trips, SHA256 determinism, identity passthrough.
 
-- [ ] **`sync.rs::build_operations` unit tests**  
-  Resolve the WIT compilation constraint (stub imports or sub-module extraction), then add tests.  
-  Covers: create, no-op, update, delete, type-mismatch recreate, stale encoding unset, new encoding set, gzip-not-smaller skip.
+- [x] **`sync.rs::build_operations` unit tests**  
+  Resolved WIT constraint by guarding WIT-dependent imports and canister call functions in `canister.rs` with `#[cfg(not(test))]` / stub pairs. Tests live in an inline `#[cfg(test)]` module in `sync.rs`.  
+  Covers: create, no-op, update, delete, type-mismatch recreate, stale encoding unset, new encoding set, gzip-not-smaller skip, empty-project delete-all, everything-in-sync.
 
 ### Layer 3: E2E Tests
 
