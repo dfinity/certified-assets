@@ -54,7 +54,7 @@ Tests for `scan()` and the private `walk()` function using `tempfile` fixtures:
 | Empty directory | Returns empty `Vec` |
 | Duplicate key across two source dirs | Returns `Err` with the offending key named |
 | Multiple source dirs | Files from both dirs merged into one result |
-| Symlink to file | Included (symlinks to directories may be skipped — document the behavior) |
+| Symlink skipped | All symlinks (to files or directories) are excluded from results |
 
 ### 2b. `content.rs` — MIME Detection and Encoding
 
@@ -183,7 +183,7 @@ The `e2e/` crate uses:
 
 ### Layer 2: Plugin Unit Tests
 
-- [ ] **`scan.rs` unit tests**  
+- [x] **`scan.rs` unit tests**  
   Add inline `#[cfg(test)]` module to `plugin/src/scan.rs`. Use `tempfile` for fixtures.  
   Covers: single file, nested dirs, dotfile skip, empty dir, duplicate key error, multiple source dirs.
 
