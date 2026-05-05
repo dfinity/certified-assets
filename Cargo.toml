@@ -1,5 +1,5 @@
 [workspace]
-members = ["canister", "ic-certified-assets", "plugin"]
+members = ["assets-sync", "canister", "ic-certified-assets", "plugin"]
 resolver = "2"
 
 [workspace.package]
