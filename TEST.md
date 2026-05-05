@@ -187,7 +187,7 @@ The `e2e/` crate uses:
   Add inline `#[cfg(test)]` module to `plugin/src/scan.rs`. Use `tempfile` for fixtures.  
   Covers: single file, nested dirs, dotfile skip, empty dir, duplicate key error, multiple source dirs.
 
-- [ ] **`content.rs` unit tests**  
+- [x] **`content.rs` unit tests**  
   Add inline `#[cfg(test)]` module to `plugin/src/content.rs`.  
   Covers: `encoders_for` by MIME type, gzip/brotli round-trips, SHA256 determinism, identity passthrough.
 

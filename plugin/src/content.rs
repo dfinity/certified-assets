@@ -83,3 +83,136 @@ pub fn encoders_for(media_type: &Mime) -> Vec<Encoder> {
         _ => vec![Encoder::Identity],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    fn content(data: &[u8]) -> Content {
+        Content {
+            data: data.to_vec(),
+            media_type: mime::TEXT_PLAIN,
+        }
+    }
+
+    // --- encoders_for ---
+
+    #[test]
+    fn encoders_for_text_html() {
+        let mime: Mime = "text/html".parse().unwrap();
+        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
+    }
+
+    #[test]
+    fn encoders_for_text_css() {
+        let mime: Mime = "text/css".parse().unwrap();
+        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
+    }
+
+    #[test]
+    fn encoders_for_application_javascript() {
+        let mime: Mime = "application/javascript".parse().unwrap();
+        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
+    }
+
+    #[test]
+    fn encoders_for_text_javascript() {
+        let mime: Mime = "text/javascript".parse().unwrap();
+        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
+    }
+
+    #[test]
+    fn encoders_for_image_png() {
+        let mime: Mime = "image/png".parse().unwrap();
+        assert_eq!(encoders_for(&mime), vec![Encoder::Identity]);
+    }
+
+    #[test]
+    fn encoders_for_application_wasm() {
+        let mime: Mime = "application/wasm".parse().unwrap();
+        assert_eq!(encoders_for(&mime), vec![Encoder::Identity]);
+    }
+
+    #[test]
+    fn encoders_for_unknown_uses_octet_stream() {
+        assert_eq!(
+            encoders_for(&mime::APPLICATION_OCTET_STREAM),
+            vec![Encoder::Identity]
+        );
+    }
+
+    // --- encode ---
+
+    #[test]
+    fn encode_identity_passthrough() {
+        let c = content(b"hello world");
+        let out = c.encode(Encoder::Identity).unwrap();
+        assert_eq!(out.data, b"hello world");
+    }
+
+    #[test]
+    fn encode_gzip_round_trip() {
+        use flate2::read::GzDecoder;
+
+        let original = b"hello gzip world, hello gzip world";
+        let c = content(original);
+        let compressed = c.encode(Encoder::Gzip).unwrap();
+
+        let mut decoder = GzDecoder::new(compressed.data.as_slice());
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn encode_brotli_round_trip() {
+        let original = b"hello brotli world, hello brotli world";
+        let c = content(original);
+        let compressed = c.encode(Encoder::Brotli).unwrap();
+
+        let mut decompressed = Vec::new();
+        brotli::Decompressor::new(compressed.data.as_slice(), 4096)
+            .read_to_end(&mut decompressed)
+            .unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    // --- sha256 ---
+
+    #[test]
+    fn sha256_deterministic() {
+        let c = content(b"same input");
+        assert_eq!(c.sha256(), c.sha256());
+    }
+
+    #[test]
+    fn sha256_differs_for_different_content() {
+        assert_ne!(content(b"aaa").sha256(), content(b"bbb").sha256());
+    }
+
+    // --- Content::load ---
+
+    #[test]
+    fn load_reads_bytes_and_infers_html_mime() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".html").tempfile().unwrap();
+        f.write_all(b"<html></html>").unwrap();
+        let c = Content::load(f.path()).unwrap();
+        assert_eq!(c.data, b"<html></html>");
+        assert_eq!(c.media_type.type_(), mime::TEXT);
+        assert_eq!(c.media_type.subtype(), mime::HTML);
+    }
+
+    #[test]
+    fn load_unknown_extension_falls_back_to_octet_stream() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new()
+            .suffix(".xyz123unknown")
+            .tempfile()
+            .unwrap();
+        f.write_all(b"binary data").unwrap();
+        let c = Content::load(f.path()).unwrap();
+        assert_eq!(c.media_type, mime::APPLICATION_OCTET_STREAM);
+    }
+}
