@@ -1,5 +1,5 @@
 [workspace]
-members = ["assets-sync", "canister", "ic-certified-assets", "plugin"]
+members = ["assets-sync", "canister", "e2e", "ic-certified-assets", "plugin"]
 resolver = "2"
 
 [workspace.package]
@@ -10,6 +10,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1.0.56"
+assert_cmd = "2"
 base64 = "0.13.0"
 brotli = "8.0.2"
 candid = "0.10.18"
