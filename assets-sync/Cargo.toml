@@ -1,0 +1,19 @@
+[package]
+name = "assets-sync"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+brotli.workspace = true
+candid.workspace = true
+flate2.workspace = true
+hex.workspace = true
+mime.workspace = true
+mime_guess.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
