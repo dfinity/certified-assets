@@ -48,6 +48,8 @@ jobs:
         run: | # https://github.com/rust-lang/cargo/issues/6669 we have to run ALL tests with two commands
           cargo test --all-targets --no-fail-fast
           cargo test --doc
+        env:
+          ICP_CLI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   fmt:
     name: cargo fmt
