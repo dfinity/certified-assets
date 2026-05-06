@@ -185,7 +185,7 @@ The `e2e/` crate uses:
   Inline `#[cfg(test)]` module in `assets-sync/src/scan.rs`. Uses `tempfile` for fixtures.  
   Covers: single file, nested dirs, dotfile skip, empty dir, duplicate key error, multiple source dirs.
 
-- [ ] **`content.rs` unit tests**  
+- [x] **`content.rs` unit tests**  
   Add inline `#[cfg(test)]` module to `assets-sync/src/content.rs`.  
   Covers: `encoders_for` by MIME type, gzip/brotli round-trips, SHA256 determinism, identity passthrough.
 
