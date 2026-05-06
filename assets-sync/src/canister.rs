@@ -6,10 +6,8 @@
 #![allow(dead_code)]
 
 use candid::{CandidType, Nat, Principal};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use std::collections::HashMap;
-
-// --- Candid wire types ---
 
 #[derive(CandidType, Clone, Debug, Deserialize)]
 pub struct AssetEncodingDetails {
@@ -89,18 +87,143 @@ pub enum Permission {
     Prepare,
 }
 
-// --- Canister call trait ---
+#[derive(CandidType, Debug)]
+struct ListAssetsRequest {
+    start: Option<Nat>,
+    length: Option<Nat>,
+}
+
+#[derive(CandidType, Debug)]
+struct CreateBatchRequest {}
+
+#[derive(CandidType, Debug, Deserialize)]
+struct CreateBatchResponse {
+    batch_id: Nat,
+}
+
+#[derive(CandidType, Debug)]
+struct CreateChunkRequest<'a> {
+    batch_id: Nat,
+    content: &'a [u8],
+}
+
+#[derive(CandidType, Debug, Deserialize)]
+struct CreateChunkResponse {
+    chunk_id: Nat,
+}
+
+#[derive(CandidType, Debug)]
+struct ListPermittedArguments {
+    permission: Permission,
+}
+
+#[derive(CandidType, Debug)]
+struct GrantPermissionArguments {
+    to_principal: Principal,
+    permission: Permission,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CallType {
+    Update,
+    Query,
+}
 
 pub trait CanisterCall {
-    fn api_version(&self) -> Result<u16, String>;
-    fn list_assets(&self) -> Result<Vec<AssetDetails>, String>;
-    fn create_batch(&self) -> Result<Nat, String>;
-    fn create_chunk(&self, batch_id: &Nat, content: &[u8]) -> Result<Nat, String>;
-    fn commit_batch(&self, args: CommitBatchArguments) -> Result<(), String>;
-    fn list_permitted(&self, permission: Permission) -> Result<Vec<Principal>, String>;
-    fn grant_permission_via_proxy(
+    fn call<A, R>(
         &self,
-        to_principal: Principal,
-        permission: Permission,
-    ) -> Result<(), String>;
+        method: &str,
+        arg: A,
+        call_type: CallType,
+        direct: bool,
+    ) -> Result<R, String>
+    where
+        A: CandidType,
+        R: CandidType + DeserializeOwned;
+}
+
+pub fn api_version(c: &impl CanisterCall) -> Result<u16, String> {
+    c.call("api_version", (), CallType::Query, true)
+}
+
+// Ported from ic-asset. Unlike ic-asset, which must handle older canister versions
+// that ignore `start`, this plugin targets only the canister in this repo, which
+// always honours pagination.
+pub fn list_assets(c: &impl CanisterCall) -> Result<Vec<AssetDetails>, String> {
+    let mut all: Vec<AssetDetails> = Vec::new();
+    let mut start: u64 = 0;
+    let mut prev_page_size: Option<usize> = None;
+    loop {
+        let req = ListAssetsRequest {
+            start: Some(Nat::from(start)),
+            length: None,
+        };
+        let entries: Vec<AssetDetails> = c.call("list", req, CallType::Query, true)?;
+        let n = entries.len();
+        if n == 0 {
+            break;
+        }
+        start += n as u64;
+        all.extend(entries);
+        if let Some(prev) = prev_page_size {
+            if n < prev {
+                break;
+            }
+        }
+        prev_page_size = Some(n);
+    }
+    Ok(all)
+}
+
+pub fn create_batch(c: &impl CanisterCall) -> Result<Nat, String> {
+    let resp: CreateBatchResponse = c.call(
+        "create_batch",
+        CreateBatchRequest {},
+        CallType::Update,
+        true,
+    )?;
+    Ok(resp.batch_id)
+}
+
+pub fn create_chunk(c: &impl CanisterCall, batch_id: &Nat, content: &[u8]) -> Result<Nat, String> {
+    let req = CreateChunkRequest {
+        batch_id: batch_id.clone(),
+        content,
+    };
+    let resp: CreateChunkResponse = c.call("create_chunk", req, CallType::Update, true)?;
+    Ok(resp.chunk_id)
+}
+
+pub fn commit_batch(c: &impl CanisterCall, args: CommitBatchArguments) -> Result<(), String> {
+    c.call("commit_batch", args, CallType::Update, true)
+}
+
+pub fn list_permitted(
+    c: &impl CanisterCall,
+    permission: Permission,
+) -> Result<Vec<Principal>, String> {
+    c.call(
+        "list_permitted",
+        ListPermittedArguments { permission },
+        CallType::Update,
+        true,
+    )
+}
+
+// Routes through the proxy (direct: false) so the proxy canister — the
+// controller — can authorise the call on the assets canister.
+pub fn grant_permission_via_proxy(
+    c: &impl CanisterCall,
+    to_principal: Principal,
+    permission: Permission,
+) -> Result<(), String> {
+    c.call(
+        "grant_permission",
+        GrantPermissionArguments {
+            to_principal,
+            permission,
+        },
+        CallType::Update,
+        false,
+    )
 }

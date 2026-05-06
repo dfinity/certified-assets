@@ -11,8 +11,10 @@ use mime::Mime;
 use std::collections::HashMap;
 
 use crate::canister::{
-    AssetDetails, BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
-    DeleteAssetArguments, Permission, SetAssetContentArguments, UnsetAssetContentArguments,
+    api_version, commit_batch, create_batch, create_chunk, grant_permission_via_proxy, list_assets,
+    list_permitted, AssetDetails, BatchOperationKind, CanisterCall, CommitBatchArguments,
+    CreateAssetArguments, DeleteAssetArguments, Permission, SetAssetContentArguments,
+    UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
 use crate::scan::AssetSource;
@@ -45,14 +47,14 @@ fn ensure_commit_permission<C: CanisterCall>(
     let principal = Principal::from_text(identity_principal)
         .map_err(|e| format!("invalid identity principal '{identity_principal}': {e}"))?;
 
-    let permitted = canister.list_permitted(Permission::Commit)?;
+    let permitted = list_permitted(canister, Permission::Commit)?;
     if permitted.contains(&principal) {
         println!("proxy mode: identity already has Commit permission");
         return Ok(());
     }
 
     println!("proxy mode: granting Commit permission to {identity_principal} via proxy");
-    canister.grant_permission_via_proxy(principal, Permission::Commit)?;
+    grant_permission_via_proxy(canister, principal, Permission::Commit)?;
     println!("proxy mode: Commit permission granted");
     Ok(())
 }
@@ -67,7 +69,7 @@ pub fn sync<C: CanisterCall>(
         ensure_commit_permission(canister, identity_principal)?;
     }
 
-    let version = canister.api_version()?;
+    let version = api_version(canister)?;
     if version < 2 {
         return Err(format!(
             "assets canister api_version is {version}; this plugin requires V2"
@@ -78,14 +80,13 @@ pub fn sync<C: CanisterCall>(
     let sources = crate::scan::scan(dirs)?;
     println!("found {} file(s) from {:?}", sources.len(), dirs);
 
-    let canister_assets: HashMap<String, AssetDetails> = canister
-        .list_assets()?
+    let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
         .into_iter()
         .map(|d| (d.key.clone(), d))
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
 
-    let batch_id = canister.create_batch()?;
+    let batch_id = create_batch(canister)?;
     println!("created batch {batch_id}");
 
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
@@ -104,10 +105,13 @@ pub fn sync<C: CanisterCall>(
     }
     println!("committing {} operation(s)", operations.len());
 
-    canister.commit_batch(CommitBatchArguments {
-        batch_id,
-        operations,
-    })?;
+    commit_batch(
+        canister,
+        CommitBatchArguments {
+            batch_id,
+            operations,
+        },
+    )?;
 
     Ok(format!(
         "synced {} asset(s) to canister",
@@ -206,14 +210,14 @@ fn upload_chunks<C: CanisterCall>(
     data: &[u8],
 ) -> Result<Vec<Nat>, String> {
     if data.is_empty() {
-        let id = canister.create_chunk(batch_id, &[])?;
+        let id = create_chunk(canister, batch_id, &[])?;
         println!("  {key}{} 1/1 (0 bytes)", encoding_suffix(encoding));
         return Ok(vec![id]);
     }
     let total = data.len().div_ceil(MAX_CHUNK_SIZE);
     let mut ids = Vec::with_capacity(total);
     for (i, chunk) in data.chunks(MAX_CHUNK_SIZE).enumerate() {
-        let id = canister.create_chunk(batch_id, chunk)?;
+        let id = create_chunk(canister, batch_id, chunk)?;
         println!(
             "  {key}{} {}/{} ({} bytes)",
             encoding_suffix(encoding),
@@ -319,8 +323,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    // --- helpers ---
-
     fn mk_project_asset(
         key: &str,
         media_type: &str,
@@ -394,8 +396,6 @@ mod tests {
             })
             .count()
     }
-
-    // --- tests ---
 
     #[test]
     fn new_asset_emits_create_and_set() {
