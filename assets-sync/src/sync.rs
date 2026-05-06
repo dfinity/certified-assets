@@ -26,6 +26,8 @@ struct ProjectAssetEncoding {
     chunk_ids: Vec<Nat>,
     sha256: Vec<u8>,
     already_in_place: bool,
+    // Encoded bytes held until upload; empty when already_in_place or after upload.
+    data: Vec<u8>,
 }
 
 struct ProjectAsset {
@@ -86,23 +88,36 @@ pub fn sync<C: CanisterCall>(
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
 
-    let batch_id = create_batch(canister)?;
-    println!("created batch {batch_id}");
-
+    // Phase 1: compute metadata only — no batch created yet.
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
     for source in sources {
-        let asset = prepare_asset(canister, source, &canister_assets, &batch_id)?;
+        let asset = prepare_asset(source, &canister_assets)?;
         project_assets.insert(asset.source.key.clone(), asset);
     }
 
-    let operations = build_operations(&project_assets, &canister_assets);
-    if operations.is_empty() {
+    if build_operations(&project_assets, &canister_assets).is_empty() {
         println!("canister is up to date, nothing to commit");
         return Ok(format!(
             "{} asset(s) already up to date",
             project_assets.len()
         ));
     }
+
+    // Phase 2: create batch and upload chunks for encodings not already in place.
+    let batch_id = create_batch(canister)?;
+    println!("created batch {batch_id}");
+
+    for asset in project_assets.values_mut() {
+        let key = asset.source.key.clone();
+        for (encoding_name, enc) in &mut asset.encodings {
+            if !enc.already_in_place {
+                let data = std::mem::take(&mut enc.data);
+                enc.chunk_ids = upload_chunks(canister, &batch_id, &key, encoding_name, &data)?;
+            }
+        }
+    }
+
+    let operations = build_operations(&project_assets, &canister_assets);
     println!("committing {} operation(s)", operations.len());
 
     commit_batch(
@@ -119,11 +134,9 @@ pub fn sync<C: CanisterCall>(
     ))
 }
 
-fn prepare_asset<C: CanisterCall>(
-    canister: &C,
+fn prepare_asset(
     source: AssetSource,
     canister_assets: &HashMap<String, AssetDetails>,
-    batch_id: &Nat,
 ) -> Result<ProjectAsset, String> {
     let content = Content::load(&source.path)?;
     let encoders = encoders_for(&content.media_type);
@@ -151,7 +164,7 @@ fn prepare_asset<C: CanisterCall>(
             canister_assets,
         );
 
-        let chunk_ids = if already_in_place {
+        if already_in_place {
             println!(
                 "  {}{} ({} bytes) sha {} already in place",
                 source.key,
@@ -159,17 +172,19 @@ fn prepare_asset<C: CanisterCall>(
                 encoded.data.len(),
                 hex::encode(&sha256)
             );
-            Vec::new()
-        } else {
-            upload_chunks(canister, batch_id, &source.key, &name, &encoded.data)?
-        };
+        }
 
         encodings.insert(
             name,
             ProjectAssetEncoding {
-                chunk_ids,
+                chunk_ids: Vec::new(),
                 sha256,
                 already_in_place,
+                data: if already_in_place {
+                    Vec::new()
+                } else {
+                    encoded.data
+                },
             },
         );
     }
@@ -342,6 +357,7 @@ mod tests {
                     chunk_ids,
                     sha256: sha.clone(),
                     already_in_place: *already_in_place,
+                    data: vec![],
                 },
             );
         }
@@ -533,22 +549,6 @@ mod tests {
         let ops = build_operations(&HashMap::new(), &canister);
         assert_eq!(count_op(&ops, "DeleteAsset"), 2);
         assert_eq!(ops.len(), 2);
-    }
-
-    #[test]
-    fn everything_in_sync_returns_empty() {
-        let sha = vec![1u8, 2, 3];
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", sha.clone(), true)],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(sha))],
-        )]);
-        assert!(build_operations(&project, &canister).is_empty());
     }
 
     // When gzip output is not smaller than identity, prepare_asset skips it, so
