@@ -35,12 +35,12 @@ This test suite covers all canister behaviors using a mock system context (no li
 
 ---
 
-## Layer 2 — Plugin Unit Tests (`plugin/`)
+## Layer 2 — Library Unit Tests (`assets-sync/`)
 
-**Location**: Inline `#[cfg(test)]` modules in each source file (or a `plugin/tests/` directory once the compilation constraint below is resolved).  
-**Run**: `cargo test -p plugin`
+**Location**: Inline `#[cfg(test)]` modules in each source file.  
+**Run**: `cargo test -p assets-sync`
 
-The plugin crate is a `cdylib` compiled to `wasm32-wasip2`. Its pure business-logic functions have no WIT import dependencies and can be compiled and tested on the host. The WIT-generated `canister_call` extern only appears in `canister.rs`; the other three modules are fully self-contained.
+All sync business logic lives in the `assets-sync` library crate, which has no WIT or WASI dependencies and compiles natively. The plugin crate itself contains only the `WasiCall` transport wrapper and has no testable logic of its own.
 
 ### 2a. `scan.rs` — Directory Scanning
 
@@ -77,9 +77,7 @@ Tests for `encoders_for()`, `Content::load()`, `Content::encode()`, `Content::sh
 
 ### 2c. `sync.rs` — Operation Diffing (`build_operations`)
 
-`build_operations` is a pure function: it takes `project_assets` and `canister_assets` maps and returns a `Vec<BatchOperationKind>`. It can be tested inline via `#[cfg(test)]` without any canister calls.
-
-> **Note on compilation**: The `sync` module imports from `canister.rs`, which references WIT-generated extern symbols. When `cargo test` compiles for the host these symbols are unresolved. The cleanest fix is to add stub implementations under `#[cfg(test)]` in `canister.rs`, or to extract the pure diff logic into a small private sub-module that does not import `canister`. This tradeoff should be settled in the PR that adds these tests.
+`build_operations` is a pure function: it takes `project_assets` and `canister_assets` maps and returns a `Vec<BatchOperationKind>`. It is tested inline via `#[cfg(test)]` without any canister calls. Because `assets-sync` has no WIT dependency, these tests compile and run natively with no extra stubs needed.
 
 | Test | Asserts |
 |---|---|
@@ -167,8 +165,8 @@ The `e2e/` crate uses:
 | Old SDK test | Replaced by |
 |---|---|
 | `ic-certified-assets/src/tests.rs` | `ic-certified-assets/src/tests.rs` (already ported and expanded) |
-| `ic-asset/src/sync.rs` unit tests | Plugin unit tests — `scan.rs` (Layer 2a) |
-| `ic-asset/src/batch_upload/operations.rs` unit tests | Plugin unit tests — `sync.rs::build_operations` (Layer 2c) |
+| `ic-asset/src/sync.rs` unit tests | `assets-sync` unit tests — `scan.rs` (Layer 2a) |
+| `ic-asset/src/batch_upload/operations.rs` unit tests | `assets-sync` unit tests — `sync.rs::build_operations` (Layer 2c) |
 | `ic-asset/src/asset/config.rs` unit tests | Not yet in scope (plugin has no `.ic-assets.json5` support yet) |
 | `icx-asset.bash` (BATS) | E2E Layer 3 — basic sync, encoding, chunking, pagination |
 | `assetscanister.bash` (BATS) — canister API behaviors | Covered by existing Layer 1 unit tests |
@@ -184,15 +182,15 @@ The `e2e/` crate uses:
 ### Layer 2: Plugin Unit Tests
 
 - [x] **`scan.rs` unit tests**  
-  Add inline `#[cfg(test)]` module to `plugin/src/scan.rs`. Use `tempfile` for fixtures.  
+  Inline `#[cfg(test)]` module in `assets-sync/src/scan.rs`. Uses `tempfile` for fixtures.  
   Covers: single file, nested dirs, dotfile skip, empty dir, duplicate key error, multiple source dirs.
 
 - [ ] **`content.rs` unit tests**  
-  Add inline `#[cfg(test)]` module to `plugin/src/content.rs`.  
+  Add inline `#[cfg(test)]` module to `assets-sync/src/content.rs`.  
   Covers: `encoders_for` by MIME type, gzip/brotli round-trips, SHA256 determinism, identity passthrough.
 
 - [x] **`sync.rs::build_operations` unit tests**  
-  Resolved WIT constraint by guarding WIT-dependent imports and canister call functions in `canister.rs` with `#[cfg(not(test))]` / stub pairs. Tests live in an inline `#[cfg(test)]` module in `sync.rs`.  
+  Inline `#[cfg(test)]` module in `assets-sync/src/sync.rs`. No WIT constraint applies since `assets-sync` has no WASI dependency.  
   Covers: create, no-op, update, delete, type-mismatch recreate, stale encoding unset, new encoding set, gzip-not-smaller skip, empty-project delete-all, everything-in-sync.
 
 ### Layer 3: E2E Tests
