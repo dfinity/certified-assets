@@ -29,3 +29,47 @@ fn initial_sync() {
         .expect("/logo.png missing from canister after initial sync");
     assert_eq!(png.content_type, "image/png");
 }
+
+/// Run sync twice without modifying any files.
+/// The second deploy must report "up to date" and must not change canister state.
+#[test]
+fn no_op_sync() {
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let keys_before: Vec<String> = list_assets(project)
+        .into_iter()
+        .map(|a| a.key)
+        .collect();
+
+    let output = icp_cmd(project)
+        .arg("deploy")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        combined.contains("up to date"),
+        "expected 'up to date' in deploy output on second run; got:\n{combined}",
+    );
+
+    let mut keys_after: Vec<String> = list_assets(project)
+        .into_iter()
+        .map(|a| a.key)
+        .collect();
+    let mut keys_before = keys_before;
+    keys_before.sort();
+    keys_after.sort();
+    assert_eq!(
+        keys_before, keys_after,
+        "canister asset list should be unchanged after no-op sync",
+    );
+}
