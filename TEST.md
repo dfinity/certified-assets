@@ -226,7 +226,7 @@ Pass `-o hex` to `icp canister call` to receive the raw binary Candid response a
 - [x] **E2E infrastructure**  
   `e2e/` crate wired up with `build.rs`, fixture directory, `LocalNetwork` helper, and two smoke tests (`basic_deploy`, `basic_deploy_with_proxy`). New CI job added.
 
-- [ ] **Basic sync E2E tests**  
+- [x] **Basic sync E2E tests**  
   Covers: initial sync, no-op sync, content update, asset deletion, multi-directory sync.
 
 - [ ] **Encoding policy E2E tests**  

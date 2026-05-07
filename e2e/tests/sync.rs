@@ -157,3 +157,26 @@ fn asset_deletion() {
         "/style.css should be removed from the canister after local deletion",
     );
 }
+
+/// Configure two source directories with non-overlapping files and sync.
+/// All files from both directories must appear in the canister with the
+/// correct leading-slash keys.
+#[test]
+fn multi_directory_sync() {
+    let tmp = setup_project("tests/fixture/multi-dir");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let assets = list_assets(project);
+
+    assert!(
+        assets.iter().any(|a| a.key == "/page.html"),
+        "/page.html from dist-a should be present; got: {assets:#?}",
+    );
+    assert!(
+        assets.iter().any(|a| a.key == "/app.js"),
+        "/app.js from dist-b should be present; got: {assets:#?}",
+    );
+}
