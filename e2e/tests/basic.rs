@@ -30,7 +30,7 @@ fn example_deploys_successfully() {
 
     icp_cmd(&project).arg("deploy").assert().success();
 
-    let output = icp_cmd(&project)
+    let stdout = icp_cmd(&project)
         .args([
             "canister",
             "call",
@@ -40,10 +40,13 @@ fn example_deploys_successfully() {
             "-o",
             "hex",
         ])
-        .output()
-        .expect("icp canister call failed");
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
 
-    let hex_str = String::from_utf8_lossy(&output.stdout);
+    let hex_str = String::from_utf8_lossy(&stdout);
     let bytes = hex::decode(hex_str.trim()).expect("failed to decode hex response");
     let (assets,) = candid::decode_args::<(Vec<AssetDetails>,)>(&bytes)
         .expect("failed to decode candid response");
