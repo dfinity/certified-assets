@@ -122,3 +122,38 @@ fn content_update() {
         "/style.css sha256 should not change when file was not modified",
     );
 }
+
+/// Remove one file from the local directory and re-sync.
+/// The deleted key must disappear from the canister; the remaining key must survive.
+#[test]
+fn asset_deletion() {
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let assets_before = list_assets(project);
+    assert!(
+        assets_before.iter().any(|a| a.key == "/index.html"),
+        "/index.html should be present before deletion",
+    );
+    assert!(
+        assets_before.iter().any(|a| a.key == "/style.css"),
+        "/style.css should be present before deletion",
+    );
+
+    fs::remove_file(project.join("dist/style.css")).expect("failed to remove style.css");
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let assets_after = list_assets(project);
+    assert!(
+        assets_after.iter().any(|a| a.key == "/index.html"),
+        "/index.html should still be present after deleting style.css",
+    );
+    assert!(
+        !assets_after.iter().any(|a| a.key == "/style.css"),
+        "/style.css should be removed from the canister after local deletion",
+    );
+}
