@@ -7,13 +7,13 @@ use std::{
     process::Command,
 };
 
-#[derive(CandidType, Clone, Debug, Deserialize)]
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
 pub struct AssetEncodingDetails {
     pub content_encoding: String,
     pub sha256: Option<Vec<u8>>,
 }
 
-#[derive(CandidType, Clone, Debug, Deserialize)]
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
 pub struct AssetDetails {
     pub key: String,
     pub encodings: Vec<AssetEncodingDetails>,

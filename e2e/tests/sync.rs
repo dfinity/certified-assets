@@ -62,7 +62,12 @@ fn no_op_sync() {
 
     icp_cmd(project).arg("deploy").assert().success();
 
-    let keys_before: Vec<String> = list_assets(project).into_iter().map(|a| a.key).collect();
+    let mut assets_before = list_assets(project);
+    assets_before.sort_by(|a, b| a.key.cmp(&b.key));
+    for a in assets_before.iter_mut() {
+        a.encodings
+            .sort_by(|x, y| x.content_encoding.cmp(&y.content_encoding));
+    }
 
     let output = icp_cmd(project)
         .args(["--debug", "deploy"])
@@ -80,12 +85,14 @@ fn no_op_sync() {
         "expected 'up to date' in deploy output on second run; got:\n{combined}",
     );
 
-    let mut keys_after: Vec<String> = list_assets(project).into_iter().map(|a| a.key).collect();
-    let mut keys_before = keys_before;
-    keys_before.sort();
-    keys_after.sort();
+    let mut assets_after = list_assets(project);
+    assets_after.sort_by(|a, b| a.key.cmp(&b.key));
+    for a in assets_after.iter_mut() {
+        a.encodings
+            .sort_by(|x, y| x.content_encoding.cmp(&y.content_encoding));
+    }
     assert_eq!(
-        keys_before, keys_after,
+        assets_before, assets_after,
         "canister asset list should be unchanged after no-op sync",
     );
 }
