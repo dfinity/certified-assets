@@ -1,4 +1,4 @@
-use e2e::{generate_minimal_png, icp_cmd, list_assets, setup_project, LocalNetwork};
+use e2e::{generate_minimal_png, icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
 use std::fs;
 
 /// Deploy to an empty canister with one HTML file and one runtime-generated PNG.
@@ -71,5 +71,54 @@ fn no_op_sync() {
     assert_eq!(
         keys_before, keys_after,
         "canister asset list should be unchanged after no-op sync",
+    );
+}
+
+fn identity_sha(assets: &[AssetDetails], key: &str) -> Option<Vec<u8>> {
+    assets
+        .iter()
+        .find(|a| a.key == key)
+        .and_then(|a| a.encodings.iter().find(|e| e.content_encoding == "identity"))
+        .and_then(|e| e.sha256.clone())
+}
+
+/// Modify one file's content and re-sync.
+/// The updated file's identity SHA256 must change; the untouched file's must not.
+#[test]
+fn content_update() {
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let assets_before = list_assets(project);
+    let html_sha_before = identity_sha(&assets_before, "/index.html")
+        .expect("/index.html identity sha256 missing before update");
+    let css_sha_before = identity_sha(&assets_before, "/style.css")
+        .expect("/style.css identity sha256 missing before update");
+
+    // Overwrite index.html with clearly different content.
+    fs::write(
+        project.join("dist/index.html"),
+        b"<html><body><h1>Updated content</h1></body></html>",
+    )
+    .expect("failed to overwrite index.html");
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let assets_after = list_assets(project);
+    let html_sha_after = identity_sha(&assets_after, "/index.html")
+        .expect("/index.html identity sha256 missing after update");
+    let css_sha_after = identity_sha(&assets_after, "/style.css")
+        .expect("/style.css identity sha256 missing after update");
+
+    assert_ne!(
+        html_sha_before, html_sha_after,
+        "/index.html sha256 should change after content update",
+    );
+    assert_eq!(
+        css_sha_before, css_sha_after,
+        "/style.css sha256 should not change when file was not modified",
     );
 }
