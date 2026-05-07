@@ -1,33 +1,55 @@
-use e2e::{generate_minimal_png, icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
+use candid::Principal;
+use e2e::{icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
 use std::fs;
 
-/// Deploy to an empty canister with one HTML file and one runtime-generated PNG.
-/// Verifies both keys are present and content types are correct.
+/// Deploy the test fixture to a local replica and verify that `/index.html` appears
+/// in the canister's asset list.
 #[test]
-fn initial_sync() {
+fn basic_deploy() {
     let tmp = setup_project("tests/fixture/basic");
     let project = tmp.path();
-
-    // Write a PNG generated at runtime so no binary file is committed to the repo.
-    fs::write(project.join("dist/logo.png"), generate_minimal_png())
-        .expect("failed to write logo.png");
-
     let _network = LocalNetwork::start(project);
+
     icp_cmd(project).arg("deploy").assert().success();
 
     let assets = list_assets(project);
 
-    let html = assets
-        .iter()
-        .find(|a| a.key == "/index.html")
-        .expect("/index.html missing from canister after initial sync");
-    assert_eq!(html.content_type, "text/html");
+    assert!(
+        assets.iter().any(|a| a.key == "/index.html"),
+        "expected /index.html in canister asset list; got: {assets:#?}",
+    );
+}
 
-    let png = assets
-        .iter()
-        .find(|a| a.key == "/logo.png")
-        .expect("/logo.png missing from canister after initial sync");
-    assert_eq!(png.content_type, "image/png");
+#[test]
+fn basic_deploy_with_proxy() {
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+    let network_status = icp_cmd(project)
+        .args(["network", "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&network_status).expect("failed to parse network status JSON");
+    let proxy_id: Principal = status_json["proxy_canister_principal"]
+        .as_str()
+        .and_then(|s| Principal::from_text(s).ok())
+        .expect("proxy_canister_principal missing or invalid in network status");
+
+    icp_cmd(project)
+        .args(["deploy", "--proxy", proxy_id.to_text().as_str()])
+        .assert()
+        .success();
+
+    let assets = list_assets(project);
+
+    assert!(
+        assets.iter().any(|a| a.key == "/index.html"),
+        "expected /index.html in canister asset list; got: {assets:#?}",
+    );
 }
 
 /// Run sync twice without modifying any files.

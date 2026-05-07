@@ -205,6 +205,16 @@ mod tests {
     }
 
     #[test]
+    fn load_infers_png_mime() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        f.write_all(b"\x00").unwrap();
+        let c = Content::load(f.path()).unwrap();
+        assert_eq!(c.media_type.type_(), mime::IMAGE);
+        assert_eq!(c.media_type.subtype(), mime::PNG);
+    }
+
+    #[test]
     fn load_unknown_extension_falls_back_to_octet_stream() {
         use std::io::Write;
         let mut f = tempfile::Builder::new()

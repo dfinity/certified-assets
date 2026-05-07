@@ -73,7 +73,9 @@ Tests for `encoders_for()`, `Content::load()`, `Content::encode()`, `Content::sh
 | `encode(Gzip)` | Output is valid gzip; decompressed equals input |
 | `encode(Brotli)` | Output is valid brotli; decompressed equals input |
 | `sha256()` | Same content produces same digest; different content produces different digest |
-| `Content::load()` | Reads file bytes; infers MIME from extension |
+| `Content::load()` — HTML | Reads file bytes; infers `text/html` from `.html` extension |
+| `Content::load()` — PNG | Infers `image/png` from `.png` extension |
+| `Content::load()` — unknown | Falls back to `application/octet-stream` for unrecognised extensions |
 
 ### 2c. `sync.rs` — Operation Diffing (`build_operations`)
 
@@ -152,7 +154,8 @@ Pass `-o hex` to `icp canister call` to receive the raw binary Candid response a
 
 | Test | Scenario | Asserts |
 |---|---|---|
-| Initial sync | Empty canister, one HTML + one PNG file | Both keys present; content types correct |
+| Basic deploy | Empty canister, one HTML file | `/index.html` present in canister asset list |
+| Basic deploy with proxy | Deploy via proxy canister | `/index.html` present after proxy-mode deploy |
 | No-op sync | Run sync a second time without changes | Plugin logs "already up to date"; canister state unchanged |
 | Content update | Modify HTML file content; re-sync | SHA256 on canister updated; other assets unchanged |
 | Asset deletion | Remove a file from the local directory; re-sync | Key deleted from canister; remaining assets intact |
@@ -227,7 +230,7 @@ Pass `-o hex` to `icp canister call` to receive the raw binary Candid response a
   `e2e/` crate wired up with `build.rs`, fixture directory, `LocalNetwork` helper, and two smoke tests (`basic_deploy`, `basic_deploy_with_proxy`). New CI job added.
 
 - [x] **Basic sync E2E tests**  
-  Covers: initial sync, no-op sync, content update, asset deletion, multi-directory sync.
+  Covers: basic deploy, basic deploy with proxy, no-op sync, content update, asset deletion, multi-directory sync.
 
 - [ ] **Encoding policy E2E tests**  
   Covers: text gets gzip, binary identity-only, gzip skipped when not smaller.
