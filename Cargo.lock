@@ -723,6 +723,7 @@ dependencies = [
  "candid",
  "hex",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 
