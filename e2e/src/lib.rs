@@ -140,7 +140,11 @@ pub fn generate_minimal_png() -> Vec<u8> {
         for &b in data {
             let mut v = (crc ^ b as u32) & 0xFF;
             for _ in 0..8 {
-                v = if v & 1 != 0 { 0xEDB88320 ^ (v >> 1) } else { v >> 1 };
+                v = if v & 1 != 0 {
+                    0xEDB88320 ^ (v >> 1)
+                } else {
+                    v >> 1
+                };
             }
             crc = (crc >> 8) ^ v;
         }

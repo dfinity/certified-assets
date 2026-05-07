@@ -40,13 +40,10 @@ fn no_op_sync() {
 
     icp_cmd(project).arg("deploy").assert().success();
 
-    let keys_before: Vec<String> = list_assets(project)
-        .into_iter()
-        .map(|a| a.key)
-        .collect();
+    let keys_before: Vec<String> = list_assets(project).into_iter().map(|a| a.key).collect();
 
     let output = icp_cmd(project)
-        .arg("deploy")
+        .args(["--debug", "deploy"])
         .assert()
         .success()
         .get_output()
@@ -61,10 +58,7 @@ fn no_op_sync() {
         "expected 'up to date' in deploy output on second run; got:\n{combined}",
     );
 
-    let mut keys_after: Vec<String> = list_assets(project)
-        .into_iter()
-        .map(|a| a.key)
-        .collect();
+    let mut keys_after: Vec<String> = list_assets(project).into_iter().map(|a| a.key).collect();
     let mut keys_before = keys_before;
     keys_before.sort();
     keys_after.sort();
@@ -78,7 +72,11 @@ fn identity_sha(assets: &[AssetDetails], key: &str) -> Option<Vec<u8>> {
     assets
         .iter()
         .find(|a| a.key == key)
-        .and_then(|a| a.encodings.iter().find(|e| e.content_encoding == "identity"))
+        .and_then(|a| {
+            a.encodings
+                .iter()
+                .find(|e| e.content_encoding == "identity")
+        })
         .and_then(|e| e.sha256.clone())
 }
 

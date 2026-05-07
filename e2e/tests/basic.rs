@@ -1,5 +1,5 @@
 use candid::Principal;
-use e2e::{icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
+use e2e::{icp_cmd, list_assets, setup_project, LocalNetwork};
 
 /// Deploy the test fixture to a local replica and verify that `/index.html` appears
 /// in the canister's asset list.
