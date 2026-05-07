@@ -109,6 +109,8 @@ The `e2e/` crate uses:
 |---|---|
 | `assert_cmd` | Invokes `icp` as a subprocess and asserts exit code / stdout |
 | `tempfile` | Provides throwaway asset directories and `icp.yaml` configs |
+| `candid` | Decodes binary Candid responses into typed structs |
+| `hex` | Decodes hex output from `icp canister call -o hex` |
 
 **Setup per test**:
 1. Create a temporary project directory containing:
@@ -116,7 +118,50 @@ The `e2e/` crate uses:
    - An asset directory populated either programmatically by the test or from committed test fixtures.
 2. Start a local network with `icp network start -d`; shut it down with `icp network stop` in test cleanup.
 3. Run `icp deploy` to install the canister WASM and execute the plugin sync step.
-4. Verify the resulting canister state with `icp canister call` (Candid text for both arguments and return values).
+4. Verify the resulting canister state with `icp canister call` using `-o hex` to obtain binary Candid, decoded into typed structs.
+
+#### Network lifecycle and teardown pattern
+
+`LocalNetwork::start(project_dir)` in `e2e/src/lib.rs` encapsulates the start/stop lifecycle:
+
+```rust
+let _network = LocalNetwork::start(&project); // runs `icp network start -d`
+// … test body …
+// _network is dropped here → runs `icp network stop`
+```
+
+Key points:
+- **Daemon mode** (`-d`): `icp network start -d` blocks until the replica is ready, then returns.
+  The replica process continues running in the background.
+- **State directory**: the replica writes its state to `.icp/` inside the project directory.
+  Each test that uses a `tempfile::TempDir` as its project root therefore gets an isolated network state.
+- **Teardown on panic**: `LocalNetwork` implements `Drop`, so `icp network stop` is called even when the test panics or the assertion fails.
+- **Silent cleanup**: `Drop` ignores errors from `icp network stop` because the replica may have already exited.
+- **`$PWD` vs `getcwd`**: on Unix, `icp` reads `$PWD` (not `getcwd(2)`) to locate the project root.
+  `Command::current_dir()` updates the kernel CWD via `chdir(2)` but does **not** update `$PWD`.
+  A test binary inherits `$PWD` from the `cargo test` runner (the workspace root), so every `icp`
+  invocation must also set `.env("PWD", project_dir)`.  The `icp_cmd(dir)` helper in `e2e/src/lib.rs`
+  does this automatically; always use it instead of `Command::new("icp")` directly.
+
+#### Parsing `icp canister call` output
+
+Pass `-o hex` to `icp canister call` to receive the raw binary Candid response as a hex string instead of pretty-printed text.  Decode it with `hex::decode` and then `candid::decode_args` into the typed structs defined in `e2e/src/lib.rs` (`AssetDetails`, `AssetEncodingDetails`):
+
+```rust
+let output = icp_cmd(&project)
+    .args(["canister", "call", "frontend", "list", "(record {})", "-o", "hex"])
+    .output()
+    .expect("icp canister call failed");
+
+let hex_str = String::from_utf8_lossy(&output.stdout);
+let bytes = hex::decode(hex_str.trim()).expect("failed to decode hex response");
+let (assets,) = candid::decode_args::<(Vec<AssetDetails>,)>(&bytes)
+    .expect("failed to decode candid response");
+
+assert!(assets.iter().any(|a| a.key == "/index.html"));
+```
+
+The types in `e2e/src/lib.rs` are copied from `assets-sync::canister` — the subset needed to decode canister responses.  This avoids `candid_parser` and dynamic `IDLValue` traversal.
 
 ### Test Scenarios
 
@@ -195,8 +240,8 @@ The `e2e/` crate uses:
 
 ### Layer 3: E2E Tests
 
-- [ ] **E2E infrastructure**  
-  Add `e2e/` crate to workspace. Wire up `assert_cmd` and `tempfile`. Add a skeleton test and a new CI job (`cargo test -p e2e`). Document the `icp network start -d` lifecycle and teardown pattern, and the convention for parsing `icp canister call` output in assertions.
+- [x] **E2E infrastructure**  
+  Add `e2e/` crate to workspace. Wire up `assert_cmd` and `tempfile`. Add a skeleton test and a new CI job (`cargo test -p e2e`). Document the `icp network start -d` lifecycle and teardown pattern, and the convention for parsing `icp canister call -o hex` output into typed structs (`AssetDetails`, `AssetEncodingDetails`) via `candid::decode_args`.
 
 - [ ] **Basic sync E2E tests**  
   Covers: initial sync, no-op sync, content update, asset deletion, multi-directory sync.
