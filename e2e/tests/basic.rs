@@ -1,36 +1,57 @@
 use e2e::{icp_cmd, AssetDetails, LocalNetwork};
-use std::path::PathBuf;
+use std::{fs, path::Path};
+use tempfile::TempDir;
 
-/// Absolute path to the committed `example/` project at the workspace root.
-///
-/// The `icp.yaml` inside that directory knows how to build the canister WASM
-/// and plugin WASM with paths relative to the workspace `target/`, so the
-/// test can run `icp deploy` directly from that directory without any fixture
-/// copying.
-fn example_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("e2e/ must have a parent (the workspace root)")
-        .join("example")
+fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            fs::create_dir_all(&dst_path)?;
+            copy_dir_contents(&entry.path(), &dst_path)?;
+        } else {
+            fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
 }
 
-/// Deploy `example/` to a local replica and verify that `/index.html` appears
+/// Set up an isolated copy of a fixture in a temporary directory, with
+/// pre-built WASM modules placed at `wasms/canister.wasm` and
+/// `wasms/plugin.wasm` (paths supplied by the build script).
+///
+/// `fixture_path` is relative to the e2e crate root (e.g. `"tests/fixture"`).
+/// The returned `TempDir` must be kept alive for the duration of the test.
+fn setup_project(fixture_path: &str) -> TempDir {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tmp = tempfile::TempDir::new().expect("failed to create tempdir");
+
+    copy_dir_contents(&crate_root.join(fixture_path), tmp.path())
+        .expect("failed to copy fixture into tempdir");
+
+    let wasms_dir = tmp.path().join("wasms");
+    fs::create_dir_all(&wasms_dir).expect("failed to create wasms/ dir");
+
+    fs::copy(env!("CANISTER_WASM"), wasms_dir.join("canister.wasm"))
+        .expect("failed to copy canister.wasm");
+    fs::copy(env!("PLUGIN_WASM"), wasms_dir.join("plugin.wasm"))
+        .expect("failed to copy plugin.wasm");
+
+    tmp
+}
+
+/// Deploy the test fixture to a local replica and verify that `/index.html` appears
 /// in the canister's asset list.
-///
-/// # Prerequisites
-///
-/// - `icp` binary on `$PATH` (install from the icp-cli GitHub releases).
-/// - `ic-wasm` binary on `$PATH` (used by the `icp deploy` build step).
-/// - `wasm32-unknown-unknown` and `wasm32-wasip2` Rust targets installed
-///   (handled automatically via `rust-toolchain.toml`).
 #[test]
-fn example_deploys_successfully() {
-    let project = example_dir();
-    let _network = LocalNetwork::start(&project);
+fn basic_deploy() {
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
 
-    icp_cmd(&project).arg("deploy").assert().success();
+    icp_cmd(project).arg("deploy").assert().success();
 
-    let stdout = icp_cmd(&project)
+    let stdout = icp_cmd(project)
         .args([
             "canister",
             "call",

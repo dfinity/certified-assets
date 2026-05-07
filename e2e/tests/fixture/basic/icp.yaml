@@ -1,0 +1,13 @@
+canisters:
+  - name: frontend
+    build:
+      steps:
+        - type: pre-built
+          path: wasms/canister.wasm
+
+    sync:
+      steps:
+        - type: plugin
+          path: wasms/plugin.wasm
+          dirs:
+            - dist
