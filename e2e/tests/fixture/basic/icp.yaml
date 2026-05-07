@@ -1,3 +1,9 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
 canisters:
   - name: frontend
     build:
