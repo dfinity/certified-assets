@@ -741,8 +741,10 @@ mod tests {
     }
 
     // General-purpose scripted mock: pre-programs per-method response queues.
+    type MockQueue = RefCell<HashMap<String, VecDeque<Result<Vec<u8>, String>>>>;
+
     struct SyncMock {
-        queue: RefCell<HashMap<String, VecDeque<Result<Vec<u8>, String>>>>,
+        queue: MockQueue,
     }
 
     impl SyncMock {
