@@ -232,8 +232,8 @@ Pass `-o hex` to `icp canister call` to receive the raw binary Candid response a
 - [x] **Basic sync E2E tests**  
   Covers: basic deploy, basic deploy with proxy, no-op sync, content update, asset deletion, multi-directory sync.
 
-- [ ] **Encoding policy E2E tests**  
-  Covers: text gets gzip, binary identity-only, gzip skipped when not smaller.
+- [x] **Encoding policy unit tests**  
+  Covered by unit tests instead of E2E: `encoders_for` MIME tests in `content.rs` (text gets gzip, binary identity-only); `prepare_asset_skips_gzip_when_not_smaller` in `sync.rs` (gzip skipped when not smaller).
 
 - [ ] **Chunking and pagination E2E tests**  
   Covers: multi-chunk upload for files > 1.9 MB, and list pagination with > 100 assets.

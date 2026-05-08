@@ -551,6 +551,29 @@ mod tests {
         assert_eq!(ops.len(), 2);
     }
 
+    // prepare_asset itself skips gzip when the compressed output is not smaller
+    // than the identity bytes. All 256 distinct byte values are maximally
+    // incompressible: gzip's ~18-byte header alone exceeds the savings.
+    #[test]
+    fn prepare_asset_skips_gzip_when_not_smaller() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+        f.write_all(&(0u8..=255u8).collect::<Vec<u8>>()).unwrap();
+        let source = AssetSource {
+            path: f.path().to_path_buf(),
+            key: "/test.txt".to_string(),
+        };
+        let asset = prepare_asset(source, &HashMap::new()).unwrap();
+        assert!(
+            asset.encodings.contains_key("identity"),
+            "identity must be present"
+        );
+        assert!(
+            !asset.encodings.contains_key("gzip"),
+            "gzip must be absent when not smaller"
+        );
+    }
+
     // When gzip output is not smaller than identity, prepare_asset skips it, so
     // build_operations sees only the identity encoding and emits no gzip op.
     #[test]
