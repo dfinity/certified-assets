@@ -8,9 +8,7 @@ publish = false
 [dependencies]
 assert_cmd.workspace = true
 candid.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-hex.workspace = true
 tempfile.workspace = true
