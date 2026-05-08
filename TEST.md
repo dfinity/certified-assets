@@ -235,8 +235,8 @@ Pass `-o hex` to `icp canister call` to receive the raw binary Candid response a
 - [x] **Encoding policy unit tests**  
   Covered by unit tests instead of E2E: `encoders_for` MIME tests in `content.rs` (text gets gzip, binary identity-only); `prepare_asset_skips_gzip_when_not_smaller` in `sync.rs` (gzip skipped when not smaller).
 
-- [ ] **Chunking and pagination E2E tests**  
-  Covers: multi-chunk upload for files > 1.9 MB, and list pagination with > 100 assets.
+- [x] **Chunking and pagination unit tests**  
+  Covered by unit tests instead of E2E: `upload_chunks` boundary tests in `sync.rs` (empty, small, at MAX\_CHUNK\_SIZE, one-over, double, sequential IDs); `list_assets` pagination-loop tests in `canister.rs` (empty canister, single partial page, partial last page terminates early, full pages then empty, multiple full pages then partial). Canister-side chunking and pagination already covered by `ic-certified-assets` unit tests.
 
 - [ ] **Authorization E2E tests**  
   Covers: unauthorized sync rejects, proxy mode grants permission, proxy mode skips redundant grant.

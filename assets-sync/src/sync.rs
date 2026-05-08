@@ -333,10 +333,118 @@ fn build_operations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canister::{AssetDetails, AssetEncodingDetails, BatchOperationKind};
-    use candid::Nat;
+    use crate::canister::{
+        AssetDetails, AssetEncodingDetails, BatchOperationKind, CallType, CanisterCall,
+    };
+    use candid::{CandidType, Nat};
+    use serde::de::DeserializeOwned;
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    // Mirrors the private CreateChunkResponse — same field name produces the same Candid encoding.
+    #[derive(CandidType)]
+    struct MockChunkResponse {
+        chunk_id: Nat,
+    }
+
+    struct ChunkCounter(Cell<u32>);
+
+    impl CanisterCall for ChunkCounter {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            assert_eq!(method, "create_chunk");
+            let id = self.0.get();
+            self.0.set(id + 1);
+            let bytes = candid::encode_one(MockChunkResponse {
+                chunk_id: Nat::from(id),
+            })
+            .map_err(|e| e.to_string())?;
+            candid::decode_one(&bytes).map_err(|e| e.to_string())
+        }
+    }
+
+    #[test]
+    fn upload_chunks_empty_data_creates_one_chunk() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(&mock, &Nat::from(1u32), "/f", "identity", &[]).unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn upload_chunks_small_data_creates_one_chunk() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(&mock, &Nat::from(1u32), "/f", "identity", &[0u8; 100]).unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn upload_chunks_at_boundary_creates_one_chunk() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE],
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn upload_chunks_one_over_boundary_creates_two_chunks() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE + 1],
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn upload_chunks_double_boundary_creates_two_chunks() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE * 2],
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn upload_chunks_returns_sequential_ids() {
+        let mock = ChunkCounter(Cell::new(7));
+        // MAX_CHUNK_SIZE * 3 + 1 → div_ceil = 4 chunks.
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE * 3 + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                Nat::from(7u32),
+                Nat::from(8u32),
+                Nat::from(9u32),
+                Nat::from(10u32),
+            ]
+        );
+    }
 
     fn mk_project_asset(
         key: &str,
