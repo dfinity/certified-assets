@@ -238,5 +238,5 @@ Pass `-o hex` to `icp canister call` to receive the raw binary Candid response a
 - [x] **Chunking and pagination unit tests**  
   Covered by unit tests instead of E2E: `upload_chunks` boundary tests in `sync.rs` (empty, small, at MAX\_CHUNK\_SIZE, one-over, double, sequential IDs); `list_assets` pagination-loop tests in `canister.rs` (empty canister, single partial page, partial last page terminates early, full pages then empty, multiple full pages then partial). Canister-side chunking and pagination already covered by `ic-certified-assets` unit tests.
 
-- [ ] **Authorization E2E tests**  
-  Covers: unauthorized sync rejects, proxy mode grants permission, proxy mode skips redundant grant.
+- [x] **Authorization unit tests**  
+  Covered by unit tests instead of E2E: `ensure_commit_permission_grants_via_proxy_when_absent` and `ensure_commit_permission_skips_grant_when_already_permitted` in `sync.rs` (proxy-mode logic); `sync_propagates_permission_error_from_create_batch` in `sync.rs` (direct-mode error propagation). Canister-side permission enforcement already covered by `ic-certified-assets` Layer 1 tests.

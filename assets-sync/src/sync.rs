@@ -336,10 +336,10 @@ mod tests {
     use crate::canister::{
         AssetDetails, AssetEncodingDetails, BatchOperationKind, CallType, CanisterCall,
     };
-    use candid::{CandidType, Nat};
+    use candid::{CandidType, Nat, Principal};
     use serde::de::DeserializeOwned;
-    use std::cell::Cell;
-    use std::collections::HashMap;
+    use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
 
     // Mirrors the private CreateChunkResponse — same field name produces the same Candid encoding.
@@ -698,5 +698,139 @@ mod tests {
             op,
             BatchOperationKind::SetAssetContent(a) if a.content_encoding == "gzip"
         )));
+    }
+
+    // ---- Authorization tests ----
+
+    // Mock for ensure_commit_permission: handles list_permitted and grant_permission only.
+    struct PermissionMock {
+        permitted: Vec<Principal>,
+        // Tracks the `direct` flag for each grant_permission call.
+        grant_calls: RefCell<Vec<bool>>,
+    }
+
+    impl PermissionMock {
+        fn new(permitted: Vec<Principal>) -> Self {
+            Self {
+                permitted,
+                grant_calls: RefCell::new(vec![]),
+            }
+        }
+    }
+
+    impl CanisterCall for PermissionMock {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, direct: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            match method {
+                "list_permitted" => {
+                    let bytes =
+                        candid::encode_one(self.permitted.clone()).map_err(|e| e.to_string())?;
+                    candid::decode_one(&bytes).map_err(|e| e.to_string())
+                }
+                "grant_permission" => {
+                    self.grant_calls.borrow_mut().push(direct);
+                    let bytes = candid::encode_one(()).map_err(|e| e.to_string())?;
+                    candid::decode_one(&bytes).map_err(|e| e.to_string())
+                }
+                _ => panic!("unexpected method: {method}"),
+            }
+        }
+    }
+
+    // General-purpose scripted mock: pre-programs per-method response queues.
+    struct SyncMock {
+        queue: RefCell<HashMap<String, VecDeque<Result<Vec<u8>, String>>>>,
+    }
+
+    impl SyncMock {
+        fn new() -> Self {
+            Self {
+                queue: RefCell::new(HashMap::new()),
+            }
+        }
+
+        fn push_ok<R: CandidType>(&self, method: &str, value: R) {
+            self.queue
+                .borrow_mut()
+                .entry(method.to_string())
+                .or_default()
+                .push_back(Ok(candid::encode_one(value).unwrap()));
+        }
+
+        fn push_err(&self, method: &str, err: &str) {
+            self.queue
+                .borrow_mut()
+                .entry(method.to_string())
+                .or_default()
+                .push_back(Err(err.to_string()));
+        }
+    }
+
+    impl CanisterCall for SyncMock {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            let response = self
+                .queue
+                .borrow_mut()
+                .entry(method.to_string())
+                .or_default()
+                .pop_front()
+                .unwrap_or_else(|| panic!("no programmed response for '{method}'"));
+            match response {
+                Ok(bytes) => candid::decode_one(&bytes).map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    // Proxy mode: identity absent from Commit list → grant_permission called via proxy.
+    #[test]
+    fn ensure_commit_permission_grants_via_proxy_when_absent() {
+        let identity = Principal::anonymous();
+        let mock = PermissionMock::new(vec![]);
+        ensure_commit_permission(&mock, &identity.to_text()).unwrap();
+        // grant_permission must be called exactly once with direct=false (routed via proxy).
+        assert_eq!(*mock.grant_calls.borrow(), vec![false]);
+    }
+
+    // Proxy mode: identity already in Commit list → grant_permission not called.
+    #[test]
+    fn ensure_commit_permission_skips_grant_when_already_permitted() {
+        let identity = Principal::anonymous();
+        let mock = PermissionMock::new(vec![identity]);
+        ensure_commit_permission(&mock, &identity.to_text()).unwrap();
+        assert!(mock.grant_calls.borrow().is_empty());
+    }
+
+    // Direct mode: canister rejects create_batch with a permission error → sync propagates it.
+    #[test]
+    fn sync_propagates_permission_error_from_create_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+
+        let mock = SyncMock::new();
+        mock.push_ok("api_version", 2u16);
+        // Empty canister → build_operations will produce work → create_batch is called.
+        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_err("create_batch", "Caller does not have Commit permission");
+
+        let result = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Commit permission"),
+            "expected permission error, got: {err}"
+        );
     }
 }
