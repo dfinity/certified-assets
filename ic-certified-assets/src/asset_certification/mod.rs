@@ -8,6 +8,7 @@ use self::{
     },
 };
 use crate::asset_certification::types::http::build_ic_certificate_expression_header;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use ic_certification::merge_hash_trees;
 use ic_representation_independent_hash::Value;
 use serde::Serialize;
@@ -280,9 +281,9 @@ impl CertifiedResponses {
                 "IC-Certificate".to_string(),
                 String::from("version=2, ")
                     + "certificate=:"
-                    + &base64::encode(certificate)
+                    + &BASE64.encode(certificate)
                     + ":, tree=:"
-                    + &base64::encode(serializer.into_inner())
+                    + &BASE64.encode(serializer.into_inner())
                     + ":, expr_path=:"
                     + &expr_path
                     + ":",
@@ -305,9 +306,9 @@ impl CertifiedResponses {
             (
                 "IC-Certificate".to_string(),
                 String::from("certificate=:")
-                    + &base64::encode(certificate)
+                    + &BASE64.encode(certificate)
                     + ":, tree=:"
-                    + &base64::encode(serializer.into_inner())
+                    + &BASE64.encode(serializer.into_inner())
                     + ":",
             ),
             witness_result,

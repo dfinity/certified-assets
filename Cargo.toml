@@ -11,7 +11,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = "1.0.56"
 assert_cmd = "2"
-base64 = "0.13.0"
+base64 = "0.22.1"
 brotli = "8.0.2"
 candid = "0.10.18"
 candid_parser = "0.3.0"

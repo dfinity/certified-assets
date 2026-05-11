@@ -1227,7 +1227,7 @@ name = "ic-certified-assets"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "base64 0.13.1",
+ "base64 0.22.1",
  "candid",
  "candid_parser",
  "hex",

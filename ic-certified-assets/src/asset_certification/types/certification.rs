@@ -2,6 +2,7 @@ use super::{
     http::{build_ic_certificate_expression_from_headers, FALLBACK_FILE},
     rc_bytes::RcBytes,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::CandidType;
 use ic_representation_independent_hash::Value;
 use serde::{Deserialize, Serialize};
@@ -143,7 +144,7 @@ impl HashTreePath {
             })
             .collect::<Vec<String>>();
         let cbor = serialize_cbor_self_describing(&strings);
-        base64::encode(cbor)
+        BASE64.encode(cbor)
     }
 
     /// Produces all `HashTreePath`s required to prove
