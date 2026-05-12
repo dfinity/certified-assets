@@ -333,10 +333,118 @@ fn build_operations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canister::{AssetDetails, AssetEncodingDetails, BatchOperationKind};
-    use candid::Nat;
-    use std::collections::HashMap;
+    use crate::canister::{
+        AssetDetails, AssetEncodingDetails, BatchOperationKind, CallType, CanisterCall,
+    };
+    use candid::{CandidType, Nat, Principal};
+    use serde::de::DeserializeOwned;
+    use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
+
+    // Mirrors the private CreateChunkResponse — same field name produces the same Candid encoding.
+    #[derive(CandidType)]
+    struct MockChunkResponse {
+        chunk_id: Nat,
+    }
+
+    struct ChunkCounter(Cell<u32>);
+
+    impl CanisterCall for ChunkCounter {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            assert_eq!(method, "create_chunk");
+            let id = self.0.get();
+            self.0.set(id + 1);
+            let bytes = candid::encode_one(MockChunkResponse {
+                chunk_id: Nat::from(id),
+            })
+            .map_err(|e| e.to_string())?;
+            candid::decode_one(&bytes).map_err(|e| e.to_string())
+        }
+    }
+
+    #[test]
+    fn upload_chunks_empty_data_creates_one_chunk() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(&mock, &Nat::from(1u32), "/f", "identity", &[]).unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn upload_chunks_small_data_creates_one_chunk() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(&mock, &Nat::from(1u32), "/f", "identity", &[0u8; 100]).unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn upload_chunks_at_boundary_creates_one_chunk() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE],
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn upload_chunks_one_over_boundary_creates_two_chunks() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE + 1],
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn upload_chunks_double_boundary_creates_two_chunks() {
+        let mock = ChunkCounter(Cell::new(0));
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE * 2],
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn upload_chunks_returns_sequential_ids() {
+        let mock = ChunkCounter(Cell::new(7));
+        // MAX_CHUNK_SIZE * 3 + 1 → div_ceil = 4 chunks.
+        let ids = upload_chunks(
+            &mock,
+            &Nat::from(1u32),
+            "/f",
+            "identity",
+            &[0u8; MAX_CHUNK_SIZE * 3 + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                Nat::from(7u32),
+                Nat::from(8u32),
+                Nat::from(9u32),
+                Nat::from(10u32),
+            ]
+        );
+    }
 
     fn mk_project_asset(
         key: &str,
@@ -551,6 +659,29 @@ mod tests {
         assert_eq!(ops.len(), 2);
     }
 
+    // prepare_asset itself skips gzip when the compressed output is not smaller
+    // than the identity bytes. All 256 distinct byte values are maximally
+    // incompressible: gzip's ~18-byte header alone exceeds the savings.
+    #[test]
+    fn prepare_asset_skips_gzip_when_not_smaller() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+        f.write_all(&(0u8..=255u8).collect::<Vec<u8>>()).unwrap();
+        let source = AssetSource {
+            path: f.path().to_path_buf(),
+            key: "/test.txt".to_string(),
+        };
+        let asset = prepare_asset(source, &HashMap::new()).unwrap();
+        assert!(
+            asset.encodings.contains_key("identity"),
+            "identity must be present"
+        );
+        assert!(
+            !asset.encodings.contains_key("gzip"),
+            "gzip must be absent when not smaller"
+        );
+    }
+
     // When gzip output is not smaller than identity, prepare_asset skips it, so
     // build_operations sees only the identity encoding and emits no gzip op.
     #[test]
@@ -567,5 +698,141 @@ mod tests {
             op,
             BatchOperationKind::SetAssetContent(a) if a.content_encoding == "gzip"
         )));
+    }
+
+    // ---- Authorization tests ----
+
+    // Mock for ensure_commit_permission: handles list_permitted and grant_permission only.
+    struct PermissionMock {
+        permitted: Vec<Principal>,
+        // Tracks the `direct` flag for each grant_permission call.
+        grant_calls: RefCell<Vec<bool>>,
+    }
+
+    impl PermissionMock {
+        fn new(permitted: Vec<Principal>) -> Self {
+            Self {
+                permitted,
+                grant_calls: RefCell::new(vec![]),
+            }
+        }
+    }
+
+    impl CanisterCall for PermissionMock {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, direct: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            match method {
+                "list_permitted" => {
+                    let bytes =
+                        candid::encode_one(self.permitted.clone()).map_err(|e| e.to_string())?;
+                    candid::decode_one(&bytes).map_err(|e| e.to_string())
+                }
+                "grant_permission" => {
+                    self.grant_calls.borrow_mut().push(direct);
+                    let bytes = candid::encode_one(()).map_err(|e| e.to_string())?;
+                    candid::decode_one(&bytes).map_err(|e| e.to_string())
+                }
+                _ => panic!("unexpected method: {method}"),
+            }
+        }
+    }
+
+    // General-purpose scripted mock: pre-programs per-method response queues.
+    type MockQueue = RefCell<HashMap<String, VecDeque<Result<Vec<u8>, String>>>>;
+
+    struct SyncMock {
+        queue: MockQueue,
+    }
+
+    impl SyncMock {
+        fn new() -> Self {
+            Self {
+                queue: RefCell::new(HashMap::new()),
+            }
+        }
+
+        fn push_ok<R: CandidType>(&self, method: &str, value: R) {
+            self.queue
+                .borrow_mut()
+                .entry(method.to_string())
+                .or_default()
+                .push_back(Ok(candid::encode_one(value).unwrap()));
+        }
+
+        fn push_err(&self, method: &str, err: &str) {
+            self.queue
+                .borrow_mut()
+                .entry(method.to_string())
+                .or_default()
+                .push_back(Err(err.to_string()));
+        }
+    }
+
+    impl CanisterCall for SyncMock {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            let response = self
+                .queue
+                .borrow_mut()
+                .entry(method.to_string())
+                .or_default()
+                .pop_front()
+                .unwrap_or_else(|| panic!("no programmed response for '{method}'"));
+            match response {
+                Ok(bytes) => candid::decode_one(&bytes).map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    // Proxy mode: identity absent from Commit list → grant_permission called via proxy.
+    #[test]
+    fn ensure_commit_permission_grants_via_proxy_when_absent() {
+        let identity = Principal::anonymous();
+        let mock = PermissionMock::new(vec![]);
+        ensure_commit_permission(&mock, &identity.to_text()).unwrap();
+        // grant_permission must be called exactly once with direct=false (routed via proxy).
+        assert_eq!(*mock.grant_calls.borrow(), vec![false]);
+    }
+
+    // Proxy mode: identity already in Commit list → grant_permission not called.
+    #[test]
+    fn ensure_commit_permission_skips_grant_when_already_permitted() {
+        let identity = Principal::anonymous();
+        let mock = PermissionMock::new(vec![identity]);
+        ensure_commit_permission(&mock, &identity.to_text()).unwrap();
+        assert!(mock.grant_calls.borrow().is_empty());
+    }
+
+    // Direct mode: canister rejects create_batch with a permission error → sync propagates it.
+    #[test]
+    fn sync_propagates_permission_error_from_create_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+
+        let mock = SyncMock::new();
+        mock.push_ok("api_version", 2u16);
+        // Empty canister → build_operations will produce work → create_batch is called.
+        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_err("create_batch", "Caller does not have Commit permission");
+
+        let result = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Commit permission"),
+            "expected permission error, got: {err}"
+        );
     }
 }
