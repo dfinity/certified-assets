@@ -4,7 +4,12 @@
 //! dotfiles and all symlinks (to files or directories) are skipped.
 //! Exception: `.well-known/` is traversed even though it starts with `.`,
 //! mirroring `ic-asset`'s `KNOWN_DIRECTORIES` list.
+//!
+//! Each returned `AssetSource` carries the `AssetConfig` resolved from any
+//! `.ic-assets.json` / `.ic-assets.json5` files found in the directory tree.
+//! Files whose config has `ignore: true` are excluded from the output.
 
+use crate::config::{AssetConfig, AssetSourceDirectoryConfiguration};
 use std::path::{Path, PathBuf};
 
 const KNOWN_DIRECTORIES: &[&str] = &[".well-known"];
@@ -13,6 +18,7 @@ const KNOWN_DIRECTORIES: &[&str] = &[".well-known"];
 pub struct AssetSource {
     pub path: PathBuf,
     pub key: String,
+    pub config: AssetConfig,
 }
 
 pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
@@ -20,7 +26,19 @@ pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
     let mut seen_keys = std::collections::HashSet::new();
     for dir in dirs {
         let root = Path::new(dir);
-        walk(root, root, &mut out, &mut seen_keys)?;
+        // Config loading requires an absolute path.  Canonicalize so that the
+        // paths used in the walk match those stored in the config map.
+        let root_abs = root
+            .canonicalize()
+            .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+        let mut dir_config = AssetSourceDirectoryConfiguration::load(&root_abs)?;
+        walk(
+            &root_abs,
+            &root_abs,
+            &mut out,
+            &mut seen_keys,
+            &mut dir_config,
+        )?;
     }
     Ok(out)
 }
@@ -30,6 +48,7 @@ fn walk(
     current: &Path,
     out: &mut Vec<AssetSource>,
     seen_keys: &mut std::collections::HashSet<String>,
+    dir_config: &mut AssetSourceDirectoryConfiguration,
 ) -> Result<(), String> {
     let entries =
         std::fs::read_dir(current).map_err(|e| format!("read_dir {}: {e}", current.display()))?;
@@ -41,20 +60,31 @@ fn walk(
         let ft = entry
             .file_type()
             .map_err(|e| format!("file_type {}: {e}", path.display()))?;
+
+        // Skip dotfiles / dotdirs (except known dirs like .well-known).
         if name_str.starts_with('.') && !(ft.is_dir() && KNOWN_DIRECTORIES.contains(&&*name_str)) {
             continue;
         }
+
         if ft.is_dir() {
-            walk(root, &path, out, seen_keys)?;
+            walk(root, &path, out, seen_keys, dir_config)?;
         } else if ft.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .map_err(|e| format!("strip_prefix {}: {e}", path.display()))?;
             let key = format!("/{}", relative.to_string_lossy());
+
+            let config = dir_config.get_asset_config(&path);
+
+            // Respect the `ignore` flag from .ic-assets.json[5].
+            if config.ignore == Some(true) {
+                continue;
+            }
+
             if !seen_keys.insert(key.clone()) {
                 return Err(format!("duplicate asset key {key}"));
             }
-            out.push(AssetSource { path, key });
+            out.push(AssetSource { path, key, config });
         }
         // Symlinks (to files or directories) are skipped, matching ic-asset::sync.
     }
@@ -64,6 +94,7 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ASSETS_CONFIG_FILENAME_JSON, ASSETS_CONFIG_FILENAME_JSON5};
     use std::fs;
     use tempfile::TempDir;
 
@@ -109,6 +140,24 @@ mod tests {
     }
 
     #[test]
+    fn ic_assets_config_file_skipped() {
+        let dir = tmp();
+        fs::write(dir.path().join(ASSETS_CONFIG_FILENAME_JSON), b"[]").unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        assert_eq!(keys, vec!["/index.html"]);
+    }
+
+    #[test]
+    fn ic_assets_json5_config_file_skipped() {
+        let dir = tmp();
+        fs::write(dir.path().join(ASSETS_CONFIG_FILENAME_JSON5), b"[]").unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        assert_eq!(keys, vec!["/index.html"]);
+    }
+
+    #[test]
     fn empty_directory() {
         let dir = tmp();
         assert!(scan(&[dir_str(&dir)]).unwrap().is_empty());
@@ -145,6 +194,50 @@ mod tests {
         fs::write(dir.path().join("index.html"), b"hello").unwrap();
         let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/.well-known/ic-domains", "/index.html"]);
+    }
+
+    #[test]
+    fn ignored_file_excluded() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(ASSETS_CONFIG_FILENAME_JSON),
+            br#"[{"match": "*.secret", "ignore": true}]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("data.secret"), b"secret").unwrap();
+        fs::write(dir.path().join("index.html"), b"public").unwrap();
+        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        assert_eq!(keys, vec!["/index.html"]);
+    }
+
+    #[test]
+    fn config_fields_attached_to_source() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(ASSETS_CONFIG_FILENAME_JSON),
+            br#"[{"match": "*.html", "cache": {"max_age": 3600}, "allow_raw_access": false}]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+
+        let sources = scan(&[dir_str(&dir)]).unwrap();
+        assert_eq!(sources.len(), 1);
+        let config = &sources[0].config;
+        assert_eq!(
+            config.cache,
+            Some(crate::config::CacheConfig {
+                max_age: Some(3600)
+            })
+        );
+        assert_eq!(config.allow_raw_access, Some(false));
+    }
+
+    #[test]
+    fn default_allow_raw_access_is_true() {
+        let dir = tmp();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+        let sources = scan(&[dir_str(&dir)]).unwrap();
+        assert_eq!(sources[0].config.allow_raw_access, Some(true));
     }
 
     // Symlinks are skipped regardless of target type, matching ic-asset::sync.

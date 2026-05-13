@@ -45,7 +45,7 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
 
 ## TODO
 
-- [ ] **`.ic-assets.json5` parsing** — per-directory config for `headers`, `max_age`, `allow_raw_access`, `enable_aliasing`, encoding overrides, and ignore globs.
+- [x] **`.ic-assets.json5` parsing** — per-directory config for `headers`, `max_age`, `allow_raw_access`, `enable_aliasing`, encoding overrides, and ignore globs.
   - Port `AssetSourceDirectoryConfiguration` and `AssetConfigRule` from `ic-asset/src/asset/config.rs` into `assets-sync`. The struct supports both `.ic-assets.json` and `.ic-assets.json5` via the `json5` crate.
   - Extend `AssetSource` (currently just `path` + `key`) to carry an `AssetConfig` resolved at scan time.
   - In `scan.rs`, load the config tree with `AssetSourceDirectoryConfiguration::load(root)` and call `get_asset_config(path)` for each file. Respect the `ignore` field to skip files, and skip the config files themselves (`.ic-assets.json`/`.ic-assets.json5`).

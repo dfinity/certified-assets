@@ -3,15 +3,18 @@
 //! Mirrors `ic-asset`'s `asset/content.rs` and `asset/content_encoder.rs`.
 
 use mime::Mime;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Encoder {
     Identity,
     Gzip,
-    #[allow(dead_code)]
+    /// Serialized as `"brotli"`; also accepted as `"br"` for compatibility.
+    #[serde(alias = "br")]
     Brotli,
 }
 

@@ -3,7 +3,6 @@
 //! V2-only port of `ic-asset`'s `sync` flow, simplified:
 //! - synchronous (drives the host's sync `canister-call` import)
 //! - uses `create_chunk` (one-chunk-per-call) — no batched `create_chunks`
-//! - no `.ic-assets.json5` configs; new assets created with default properties
 //! - no proposal mode; no security policy
 
 use candid::{Nat, Principal};
@@ -139,7 +138,12 @@ fn prepare_asset(
     canister_assets: &HashMap<String, AssetDetails>,
 ) -> Result<ProjectAsset, String> {
     let content = Content::load(&source.path)?;
-    let encoders = encoders_for(&content.media_type);
+    // Use encoding list from config if specified; otherwise fall back to the
+    // default policy (gzip for text/* and js/html, identity for everything else).
+    let encoders: Vec<Encoder> = match source.config.encodings.as_deref() {
+        Some(cfg_encs) => cfg_encs.to_vec(),
+        None => encoders_for(&content.media_type),
+    };
     // The identity encoding is always uploaded if it's in the encoders list.
     // Other encodings are only uploaded if they save bytes vs. identity.
     // If identity is absent, force the alternate encoding through.
@@ -285,10 +289,14 @@ fn build_operations(
             ops.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: key.clone(),
                 content_type: pa.media_type.to_string(),
-                max_age: None,
-                headers: None,
-                enable_aliasing: None,
-                allow_raw_access: None,
+                max_age: pa.source.config.cache.as_ref().and_then(|c| c.max_age),
+                headers: pa
+                    .source
+                    .config
+                    .combined_headers()
+                    .map(|h| h.into_iter().collect()),
+                enable_aliasing: pa.source.config.enable_aliasing,
+                allow_raw_access: pa.source.config.allow_raw_access,
             }));
         }
     }
@@ -334,6 +342,7 @@ fn build_operations(
 mod tests {
     use super::*;
     use crate::canister::{AssetDetails, AssetEncodingDetails, BatchOperationKind};
+    use crate::config::AssetConfig;
     use candid::Nat;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -342,6 +351,15 @@ mod tests {
         key: &str,
         media_type: &str,
         encodings: &[(&str, Vec<u8>, bool)],
+    ) -> (String, ProjectAsset) {
+        mk_project_asset_with_config(key, media_type, encodings, AssetConfig::default())
+    }
+
+    fn mk_project_asset_with_config(
+        key: &str,
+        media_type: &str,
+        encodings: &[(&str, Vec<u8>, bool)],
+        config: AssetConfig,
     ) -> (String, ProjectAsset) {
         let mime: mime::Mime = media_type.parse().expect("valid MIME");
         let mut enc_map = HashMap::new();
@@ -367,6 +385,7 @@ mod tests {
                 source: AssetSource {
                     path: PathBuf::from(key.trim_start_matches('/')),
                     key: key.to_string(),
+                    config,
                 },
                 media_type: mime,
                 encodings: enc_map,
@@ -567,5 +586,74 @@ mod tests {
             op,
             BatchOperationKind::SetAssetContent(a) if a.content_encoding == "gzip"
         )));
+    }
+
+    #[test]
+    fn config_fields_flow_into_create_asset_args() {
+        use crate::config::{AssetConfig, CacheConfig};
+        use std::collections::BTreeMap;
+
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Frame-Options".to_string(), "DENY".to_string());
+        let config = AssetConfig {
+            cache: Some(CacheConfig {
+                max_age: Some(86400),
+            }),
+            headers: Some(headers),
+            enable_aliasing: Some(true),
+            allow_raw_access: Some(false),
+            ..Default::default()
+        };
+        let project = HashMap::from([mk_project_asset_with_config(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+            config,
+        )]);
+        let ops = build_operations(&project, &HashMap::new());
+        let create_op = ops
+            .iter()
+            .find_map(|op| {
+                if let BatchOperationKind::CreateAsset(a) = op {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .expect("CreateAsset op");
+
+        assert_eq!(create_op.max_age, Some(86400));
+        assert_eq!(
+            create_op.headers.as_ref().unwrap()["X-Frame-Options"],
+            "DENY"
+        );
+        assert_eq!(create_op.enable_aliasing, Some(true));
+        assert_eq!(create_op.allow_raw_access, Some(false));
+    }
+
+    #[test]
+    fn prepare_asset_encoding_override() {
+        use crate::content::Encoder;
+        use std::io::Write as _;
+        use tempfile::NamedTempFile;
+
+        // text/html would normally get gzip + identity; the config override should
+        // suppress gzip and produce identity only.
+        let mut f = NamedTempFile::with_suffix(".html").unwrap();
+        f.write_all(b"<html><body>hello world</body></html>")
+            .unwrap();
+
+        let source = AssetSource {
+            path: f.path().to_path_buf(),
+            key: "/index.html".to_string(),
+            config: AssetConfig {
+                encodings: Some(vec![Encoder::Identity]),
+                ..AssetConfig::default()
+            },
+        };
+
+        let result = prepare_asset(source, &HashMap::new()).unwrap();
+        assert!(result.encodings.contains_key("identity"));
+        assert!(!result.encodings.contains_key("gzip"));
     }
 }

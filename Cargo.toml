@@ -24,6 +24,8 @@ mime_guess = "2.0"
 num-traits = "0.2.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11.5"
+globset = "0.4.9"
+json5 = "0.4.1"
 serde_json = "1.0"
 serde_cbor = "0.11.1"
 sha2 = "0.11.0"
