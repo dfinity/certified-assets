@@ -1,15 +1,17 @@
 //! Per-directory `.ic-assets.json` / `.ic-assets.json5` configuration.
 //!
-//! Ported from `ic-asset/src/asset/config.rs`.  Parses the config tree once
-//! for a root directory, then lets callers look up the resolved `AssetConfig`
-//! for any file inside that tree.
+//! Ported from `ic-asset/src/asset/config.rs`.  Parses the config for one
+//! directory on demand, then lets callers look up the resolved `AssetConfig`
+//! for any file inside that directory.  Use `for_subdir` to descend the tree
+//! lazily (one directory at a time), which avoids a separate pre-walk.
 
 use crate::content::Encoder;
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 
 pub const ASSETS_CONFIG_FILENAME_JSON: &str = ".ic-assets.json";
 pub const ASSETS_CONFIG_FILENAME_JSON5: &str = ".ic-assets.json5";
@@ -100,12 +102,16 @@ impl AssetConfigRule {
 
 // ── Config tree ──────────────────────────────────────────────────────────────
 
-type ConfigNode = Arc<Mutex<AssetConfigTreeNode>>;
-type ConfigMap = HashMap<PathBuf, ConfigNode>;
+type ConfigNode = Rc<RefCell<AssetConfigTreeNode>>;
 
-/// Aggregates `.ic-assets.json[5]` files nested under a root directory.
+/// Holds the parsed `.ic-assets.json[5]` rules for a **single** directory,
+/// with a link to the parent directory's node for inheritance.
+///
+/// Obtain one via `AssetSourceDirectoryConfiguration::load` for the root, then
+/// use `for_subdir` to descend lazily — one directory at a time — without a
+/// separate pre-walk of the full directory tree.
 pub struct AssetSourceDirectoryConfiguration {
-    config_map: ConfigMap,
+    node: ConfigNode,
 }
 
 struct AssetConfigTreeNode {
@@ -117,7 +123,8 @@ struct AssetConfigTreeNode {
 }
 
 impl AssetSourceDirectoryConfiguration {
-    /// Builds the config tree for `root_dir`, which must be an absolute path.
+    /// Builds the config node for `root_dir` with no parent.
+    /// `root_dir` must be an absolute path.
     pub fn load(root_dir: &Path) -> Result<Self, String> {
         if !root_dir.is_absolute() {
             return Err(format!(
@@ -125,27 +132,29 @@ impl AssetSourceDirectoryConfiguration {
                 root_dir.display()
             ));
         }
-        let mut config_map = HashMap::new();
-        AssetConfigTreeNode::load(None, root_dir, &mut config_map)?;
-        Ok(Self { config_map })
+        let node = AssetConfigTreeNode::load_single(None, root_dir)?;
+        Ok(Self { node })
     }
 
-    /// Returns the resolved `AssetConfig` for the given file path.
-    /// Falls back to `AssetConfig::default()` if the path is outside the tree.
-    pub fn get_asset_config(&mut self, path: &Path) -> AssetConfig {
-        let parent_dir = match path.parent() {
-            Some(p) => p.to_path_buf(),
-            None => return AssetConfig::default(),
-        };
-        match self.config_map.get(&parent_dir) {
-            Some(node) => node.clone().lock().unwrap().get_config(path),
-            None => AssetConfig::default(),
-        }
+    /// Returns the config node for an immediate subdirectory, inheriting from
+    /// this directory's rules.  Call this as `walk` descends into each subdir
+    /// so that configs are loaded on demand rather than in a separate pre-pass.
+    pub fn for_subdir(&self, dir: &Path) -> Result<Self, String> {
+        let node = AssetConfigTreeNode::load_single(Some(self.node.clone()), dir)?;
+        Ok(Self { node })
+    }
+
+    /// Returns the resolved `AssetConfig` for `path`, which must be a file
+    /// directly inside the directory this config was loaded for.
+    pub fn get_asset_config(&self, path: &Path) -> AssetConfig {
+        self.node.borrow_mut().get_config(path)
     }
 }
 
 impl AssetConfigTreeNode {
-    fn load(parent: Option<ConfigNode>, dir: &Path, configs: &mut ConfigMap) -> Result<(), String> {
+    /// Loads the config file (if any) for a single directory and returns a
+    /// node linked to `parent`.  Does **not** recurse into subdirectories.
+    fn load_single(parent: Option<ConfigNode>, dir: &Path) -> Result<ConfigNode, String> {
         let json_path = dir.join(ASSETS_CONFIG_FILENAME_JSON);
         let json5_path = dir.join(ASSETS_CONFIG_FILENAME_JSON5);
         let config_path = match (json_path.exists(), json5_path.exists()) {
@@ -181,28 +190,19 @@ impl AssetConfigTreeNode {
         // rather than creating a new one with an empty rule list.
         let node = match parent {
             Some(p) if rules.is_empty() => p,
-            p => Arc::new(Mutex::new(Self {
+            p => Rc::new(RefCell::new(Self {
                 parent: p,
                 rules,
                 origin: dir.to_path_buf(),
             })),
         };
 
-        configs.insert(dir.to_path_buf(), node.clone());
-
-        let entries =
-            std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-        for entry in entries.filter_map(|e| e.ok()) {
-            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                Self::load(Some(node.clone()), &entry.path(), configs)?;
-            }
-        }
-        Ok(())
+        Ok(node)
     }
 
     fn get_config(&mut self, path: &Path) -> AssetConfig {
         let base = match &self.parent {
-            Some(parent) => parent.clone().lock().unwrap().get_config(path),
+            Some(parent) => parent.clone().borrow_mut().get_config(path),
             None => AssetConfig::default(),
         };
         self.rules
@@ -334,6 +334,7 @@ impl AssetConfigRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io::Write;
     use std::{fs, fs::File};
     use tempfile::TempDir;
@@ -368,7 +369,7 @@ mod tests {
         AssetSourceDirectoryConfiguration::load(&dir.path().canonicalize().unwrap()).unwrap()
     }
 
-    fn cfg(ac: &mut AssetSourceDirectoryConfiguration, dir: &TempDir, path: &str) -> AssetConfig {
+    fn cfg(ac: &AssetSourceDirectoryConfiguration, dir: &TempDir, path: &str) -> AssetConfig {
         ac.get_asset_config(&dir.path().canonicalize().unwrap().join(path))
     }
 
@@ -379,13 +380,17 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("nested", r#"[{"match": "*", "cache": {"max_age": 333}}]"#);
         let d = make_assets_dir(files, &["index.html", "nested/thing.txt"]);
-        let mut ac = load(&d);
+        let root_ac = load(&d);
+        let nested_path = d.path().canonicalize().unwrap().join("nested");
+        let nested_ac = root_ac.for_subdir(&nested_path).unwrap();
 
         assert_eq!(
-            cfg(&mut ac, &d, "nested/thing.txt").cache,
+            nested_ac
+                .get_asset_config(&d.path().canonicalize().unwrap().join("nested/thing.txt"))
+                .cache,
             Some(CacheConfig { max_age: Some(333) })
         );
-        assert_eq!(cfg(&mut ac, &d, "index.html").cache, None);
+        assert_eq!(cfg(&root_ac, &d, "index.html").cache, None);
     }
 
     #[test]
@@ -394,14 +399,18 @@ mod tests {
         files.insert("", r#"[{"match": "*", "cache": {"max_age": 999}}]"#);
         files.insert("nested", r#"[{"match": "*", "cache": {"max_age": 111}}]"#);
         let d = make_assets_dir(files, &["index.html", "nested/thing.txt"]);
-        let mut ac = load(&d);
+        let root_ac = load(&d);
+        let nested_path = d.path().canonicalize().unwrap().join("nested");
+        let nested_ac = root_ac.for_subdir(&nested_path).unwrap();
 
         assert_eq!(
-            cfg(&mut ac, &d, "nested/thing.txt").cache,
+            nested_ac
+                .get_asset_config(&d.path().canonicalize().unwrap().join("nested/thing.txt"))
+                .cache,
             Some(CacheConfig { max_age: Some(111) })
         );
         assert_eq!(
-            cfg(&mut ac, &d, "index.html").cache,
+            cfg(&root_ac, &d, "index.html").cache,
             Some(CacheConfig { max_age: Some(999) })
         );
     }
@@ -415,9 +424,9 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("", content);
         let d = make_assets_dir(files, &["index.html"]);
-        let mut ac = load(&d);
+        let ac = load(&d);
 
-        let headers = cfg(&mut ac, &d, "index.html").headers.unwrap();
+        let headers = cfg(&ac, &d, "index.html").headers.unwrap();
         assert_eq!(headers["X-A"], "a");
         assert_eq!(headers["X-B"], "new"); // overridden by later rule
         assert_eq!(headers["X-C"], "c");
@@ -432,10 +441,10 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("", content);
         let d = make_assets_dir(files, &["index.html", "app.js"]);
-        let mut ac = load(&d);
+        let ac = load(&d);
 
-        assert!(cfg(&mut ac, &d, "index.html").headers.is_none());
-        assert!(cfg(&mut ac, &d, "app.js").headers.is_some());
+        assert!(cfg(&ac, &d, "index.html").headers.is_none());
+        assert!(cfg(&ac, &d, "app.js").headers.is_some());
     }
 
     #[test]
@@ -444,10 +453,10 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("", content);
         let d = make_assets_dir(files, &["data.secret", "index.html"]);
-        let mut ac = load(&d);
+        let ac = load(&d);
 
-        assert_eq!(cfg(&mut ac, &d, "data.secret").ignore, Some(true));
-        assert_eq!(cfg(&mut ac, &d, "index.html").ignore, None);
+        assert_eq!(cfg(&ac, &d, "data.secret").ignore, Some(true));
+        assert_eq!(cfg(&ac, &d, "index.html").ignore, None);
     }
 
     #[test]
@@ -455,9 +464,9 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("", "[]");
         let d = make_assets_dir(files, &[]);
-        let mut ac = load(&d);
+        let ac = load(&d);
 
-        assert_eq!(cfg(&mut ac, &d, "index.html").allow_raw_access, Some(true));
+        assert_eq!(cfg(&ac, &d, "index.html").allow_raw_access, Some(true));
     }
 
     #[test]
@@ -466,9 +475,9 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("", content);
         let d = make_assets_dir(files, &[]);
-        let mut ac = load(&d);
+        let ac = load(&d);
 
-        assert_eq!(cfg(&mut ac, &d, "index.html").allow_raw_access, Some(false));
+        assert_eq!(cfg(&ac, &d, "index.html").allow_raw_access, Some(false));
     }
 
     #[test]
@@ -477,11 +486,11 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("", content);
         let d = make_assets_dir(files, &[]);
-        let mut ac = load(&d);
+        let ac = load(&d);
 
-        assert_eq!(cfg(&mut ac, &d, "data.txt").encodings, Some(vec![]));
+        assert_eq!(cfg(&ac, &d, "data.txt").encodings, Some(vec![]));
         assert_eq!(
-            cfg(&mut ac, &d, "file.unknown").encodings,
+            cfg(&ac, &d, "file.unknown").encodings,
             Some(vec![Encoder::Gzip])
         );
     }
@@ -494,7 +503,7 @@ mod tests {
             r#"[{{ "match": "*", cache: {{ max_age: 77 }} }}]"#,
         )
         .unwrap();
-        let mut ac =
+        let ac =
             AssetSourceDirectoryConfiguration::load(&d.path().canonicalize().unwrap()).unwrap();
         assert_eq!(
             ac.get_asset_config(&d.path().canonicalize().unwrap().join("any.html"))
@@ -512,10 +521,10 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("", content);
         let d = make_assets_dir(files, &[]);
-        let mut ac = load(&d);
+        let ac = load(&d);
 
         assert_eq!(
-            cfg(&mut ac, &d, "any.html").cache,
+            cfg(&ac, &d, "any.html").cache,
             Some(CacheConfig { max_age: Some(42) })
         );
     }
@@ -552,10 +561,10 @@ mod tests {
     #[test]
     fn path_outside_tree_returns_default() {
         let d = make_assets_dir(HashMap::new(), &[]);
-        let mut ac = load(&d);
-        // Path whose parent was never loaded into the config map.
+        let ac = load(&d);
+        // Path whose parent dir was never loaded — falls back to the root node's
+        // get_config, which returns AssetConfig::default() (no matching rules).
         let outside = d.path().join("../outside/file.txt");
-        // canonicalize may fail for non-existent paths; just check fallback works:
         let result = ac.get_asset_config(&outside);
         assert_eq!(result, AssetConfig::default());
     }

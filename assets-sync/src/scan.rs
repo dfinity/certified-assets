@@ -31,14 +31,8 @@ pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
         let root_abs = root
             .canonicalize()
             .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-        let mut dir_config = AssetSourceDirectoryConfiguration::load(&root_abs)?;
-        walk(
-            &root_abs,
-            &root_abs,
-            &mut out,
-            &mut seen_keys,
-            &mut dir_config,
-        )?;
+        let root_config = AssetSourceDirectoryConfiguration::load(&root_abs)?;
+        walk(&root_abs, &root_abs, &mut out, &mut seen_keys, &root_config)?;
     }
     Ok(out)
 }
@@ -48,7 +42,7 @@ fn walk(
     current: &Path,
     out: &mut Vec<AssetSource>,
     seen_keys: &mut std::collections::HashSet<String>,
-    dir_config: &mut AssetSourceDirectoryConfiguration,
+    dir_config: &AssetSourceDirectoryConfiguration,
 ) -> Result<(), String> {
     let entries =
         std::fs::read_dir(current).map_err(|e| format!("read_dir {}: {e}", current.display()))?;
@@ -67,7 +61,8 @@ fn walk(
         }
 
         if ft.is_dir() {
-            walk(root, &path, out, seen_keys, dir_config)?;
+            let sub_config = dir_config.for_subdir(&path)?;
+            walk(root, &path, out, seen_keys, &sub_config)?;
         } else if ft.is_file() {
             let relative = path
                 .strip_prefix(root)
