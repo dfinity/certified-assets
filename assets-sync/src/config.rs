@@ -71,15 +71,13 @@ pub enum SecurityPolicy {
 
 /// Represents an absent / null / present optional value.
 /// Used for `headers` so that `null` explicitly clears inherited headers.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 enum Maybe<T> {
     Null,
     #[default]
     Absent,
     Value(T),
 }
-
 
 struct AssetConfigRule {
     r#match: GlobMatcher,
