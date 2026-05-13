@@ -227,3 +227,97 @@ pub fn grant_permission_via_proxy(
         false,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candid::CandidType;
+    use serde::de::DeserializeOwned;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    struct PagedMock {
+        pages: RefCell<VecDeque<Vec<AssetDetails>>>,
+    }
+
+    impl PagedMock {
+        fn new(pages: Vec<Vec<AssetDetails>>) -> Self {
+            Self {
+                pages: RefCell::new(VecDeque::from(pages)),
+            }
+        }
+    }
+
+    impl CanisterCall for PagedMock {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            assert_eq!(method, "list");
+            let page = self.pages.borrow_mut().pop_front().unwrap_or_default();
+            let bytes = candid::encode_one(page).map_err(|e| e.to_string())?;
+            candid::decode_one(&bytes).map_err(|e| e.to_string())
+        }
+    }
+
+    fn mk_assets(n: usize) -> Vec<AssetDetails> {
+        (0..n)
+            .map(|i| AssetDetails {
+                key: format!("/asset-{i}"),
+                encodings: vec![],
+                content_type: "text/plain".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_assets_empty_canister_returns_empty() {
+        let result = list_assets(&PagedMock::new(vec![])).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_assets_single_partial_page_returns_all() {
+        // 5 assets — one partial page, then the implicit empty page terminates the loop.
+        let result = list_assets(&PagedMock::new(vec![mk_assets(5)])).unwrap();
+        assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn list_assets_partial_last_page_terminates_early() {
+        // 100 + 50: the 50-item page is smaller than the 100-item page, so the loop
+        // breaks without making a third request.
+        let mock = PagedMock::new(vec![mk_assets(100), mk_assets(50)]);
+        let result = list_assets(&mock).unwrap();
+        assert_eq!(result.len(), 150);
+        assert!(
+            mock.pages.borrow().is_empty(),
+            "no third request should be made"
+        );
+    }
+
+    #[test]
+    fn list_assets_full_pages_then_empty_returns_all() {
+        // 100 + 100 + 0: two full pages followed by an empty page.
+        let result = list_assets(&PagedMock::new(vec![
+            mk_assets(100),
+            mk_assets(100),
+            vec![],
+        ]))
+        .unwrap();
+        assert_eq!(result.len(), 200);
+    }
+
+    #[test]
+    fn list_assets_multiple_full_pages_then_partial() {
+        // 100 + 100 + 73: terminates on the smaller page.
+        let result = list_assets(&PagedMock::new(vec![
+            mk_assets(100),
+            mk_assets(100),
+            mk_assets(73),
+        ]))
+        .unwrap();
+        assert_eq!(result.len(), 273);
+    }
+}

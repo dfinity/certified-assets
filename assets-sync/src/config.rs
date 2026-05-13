@@ -72,17 +72,14 @@ pub enum SecurityPolicy {
 /// Represents an absent / null / present optional value.
 /// Used for `headers` so that `null` explicitly clears inherited headers.
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 enum Maybe<T> {
     Null,
+    #[default]
     Absent,
     Value(T),
 }
 
-impl<T> Default for Maybe<T> {
-    fn default() -> Self {
-        Self::Absent
-    }
-}
 
 struct AssetConfigRule {
     r#match: GlobMatcher,
@@ -198,7 +195,7 @@ impl AssetConfigTreeNode {
         let entries =
             std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
         for entry in entries.filter_map(|e| e.ok()) {
-            if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                 Self::load(Some(node.clone()), &entry.path(), configs)?;
             }
         }
