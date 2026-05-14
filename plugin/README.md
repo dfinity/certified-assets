@@ -51,6 +51,8 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
   - In `scan.rs`, load the config tree with `AssetSourceDirectoryConfiguration::load(root)` and call `get_asset_config(path)` for each file. Respect the `ignore` field to skip files, and skip the config files themselves (`.ic-assets.json`/`.ic-assets.json5`).
   - Thread the resolved `AssetConfig` through `prepare_asset` and into `build_operations` so that `CreateAssetArguments` fields (`max_age`, `headers`, `enable_aliasing`, `allow_raw_access`) are populated from config instead of hardcoded `None`.
 
+- [ ] **Warn on unmatched config rules** — track which `AssetConfigRule` glob patterns actually matched at least one asset during scanning, and warn about the unused ones so users are alerted to typos. Mirrors `ic-asset`'s `AssetSourceDirectoryConfiguration::get_unused_configs()` (see `ic-asset/src/asset/config.rs`).
+
 - [ ] **Security policy** — adopt `ic-asset`'s CSP / standard security headers. Depends on `.ic-assets.json5` parsing above.
   - Port `SecurityPolicy` enum (`disabled` / `standard` / `hardened`) and the `ConcreteSecurityPolicy` / `to_headers()` logic from `ic-asset/src/security_policy.rs` into `assets-sync`.
   - Wire it into `AssetConfig::combined_headers()` so that `security_policy` entries in `.ic-assets.json5` expand into the corresponding `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, etc. headers before the headers map is passed to `CreateAssetArguments`.
