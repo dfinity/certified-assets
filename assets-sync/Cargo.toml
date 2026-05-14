@@ -8,11 +8,14 @@ publish = false
 brotli.workspace = true
 candid.workspace = true
 flate2.workspace = true
+globset.workspace = true
 hex.workspace = true
+json5.workspace = true
 mime.workspace = true
 mime_guess.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
