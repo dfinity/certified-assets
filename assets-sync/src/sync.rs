@@ -78,7 +78,10 @@ pub fn sync<C: CanisterCall>(
     }
     println!("api_version: {version}");
 
-    let sources = crate::scan::scan(dirs)?;
+    let (sources, warnings) = crate::scan::scan(dirs)?;
+    for w in &warnings {
+        eprintln!("Warning: {w}");
+    }
     println!("found {} file(s) from {:?}", sources.len(), dirs);
 
     let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?

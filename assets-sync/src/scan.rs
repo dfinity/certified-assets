@@ -21,9 +21,12 @@ pub struct AssetSource {
     pub config: AssetConfig,
 }
 
-pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
+/// Scans `dirs` for asset files and returns the discovered sources together
+/// with any warnings about config rules that matched no assets.
+pub fn scan(dirs: &[String]) -> Result<(Vec<AssetSource>, Vec<String>), String> {
     let mut out = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
+    let mut warnings = Vec::new();
     for dir in dirs {
         let root = Path::new(dir);
         // Config loading requires an absolute path.  Canonicalize so that the
@@ -32,9 +35,16 @@ pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
             .canonicalize()
             .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
         let root_config = AssetSourceDirectoryConfiguration::load(&root_abs)?;
-        walk(&root_abs, &root_abs, &mut out, &mut seen_keys, &root_config)?;
+        walk(
+            &root_abs,
+            &root_abs,
+            &mut out,
+            &mut seen_keys,
+            &root_config,
+            &mut warnings,
+        )?;
     }
-    Ok(out)
+    Ok((out, warnings))
 }
 
 fn walk(
@@ -43,6 +53,7 @@ fn walk(
     out: &mut Vec<AssetSource>,
     seen_keys: &mut std::collections::HashSet<String>,
     dir_config: &AssetSourceDirectoryConfiguration,
+    warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     let entries =
         std::fs::read_dir(current).map_err(|e| format!("read_dir {}: {e}", current.display()))?;
@@ -62,7 +73,7 @@ fn walk(
 
         if ft.is_dir() {
             let sub_config = dir_config.for_subdir(&path)?;
-            walk(root, &path, out, seen_keys, &sub_config)?;
+            walk(root, &path, out, seen_keys, &sub_config, warnings)?;
         } else if ft.is_file() {
             let relative = path
                 .strip_prefix(root)
@@ -83,6 +94,16 @@ fn walk(
         }
         // Symlinks (to files or directories) are skipped, matching ic-asset::sync.
     }
+
+    // After all files (and subdirectory files) in this directory have been
+    // processed, report any rules in this directory's own config that never
+    // matched an asset.  We only check when this node was loaded specifically
+    // for `current` so that rules inherited from a parent directory are not
+    // double-reported.
+    if dir_config.is_own_for_dir(current) {
+        warnings.extend(dir_config.get_unused_configs());
+    }
+
     Ok(())
 }
 
@@ -107,11 +128,16 @@ mod tests {
         d.path().to_str().unwrap().to_string()
     }
 
+    /// Convenience: run scan and return only the sources, ignoring warnings.
+    fn scan_sources(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
+        scan(dirs).map(|(sources, _)| sources)
+    }
+
     #[test]
     fn single_file() {
         let dir = tmp();
         fs::write(dir.path().join("index.html"), b"hello").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
@@ -120,7 +146,7 @@ mod tests {
         let dir = tmp();
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/app.js"), b"js").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/sub/app.js"]);
     }
 
@@ -130,7 +156,7 @@ mod tests {
         fs::write(dir.path().join(".hidden"), b"secret").unwrap();
         fs::write(dir.path().join(".gitignore"), b"*.tmp").unwrap();
         fs::write(dir.path().join("visible.txt"), b"ok").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/visible.txt"]);
     }
 
@@ -139,7 +165,7 @@ mod tests {
         let dir = tmp();
         fs::write(dir.path().join(ASSETS_CONFIG_FILENAME_JSON), b"[]").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
@@ -148,14 +174,14 @@ mod tests {
         let dir = tmp();
         fs::write(dir.path().join(ASSETS_CONFIG_FILENAME_JSON5), b"[]").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
     #[test]
     fn empty_directory() {
         let dir = tmp();
-        assert!(scan(&[dir_str(&dir)]).unwrap().is_empty());
+        assert!(scan_sources(&[dir_str(&dir)]).unwrap().is_empty());
     }
 
     #[test]
@@ -164,7 +190,7 @@ mod tests {
         let dir2 = tmp();
         fs::write(dir1.path().join("index.html"), b"v1").unwrap();
         fs::write(dir2.path().join("index.html"), b"v2").unwrap();
-        let err = scan(&[dir_str(&dir1), dir_str(&dir2)]).unwrap_err();
+        let err = scan_sources(&[dir_str(&dir1), dir_str(&dir2)]).unwrap_err();
         assert!(
             err.contains("/index.html"),
             "error should name the key: {err}"
@@ -177,7 +203,7 @@ mod tests {
         let dir2 = tmp();
         fs::write(dir1.path().join("a.txt"), b"a").unwrap();
         fs::write(dir2.path().join("b.txt"), b"b").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir1), dir_str(&dir2)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir1), dir_str(&dir2)]).unwrap());
         assert_eq!(keys, vec!["/a.txt", "/b.txt"]);
     }
 
@@ -187,7 +213,7 @@ mod tests {
         fs::create_dir(dir.path().join(".well-known")).unwrap();
         fs::write(dir.path().join(".well-known/ic-domains"), b"foo.bar.com").unwrap();
         fs::write(dir.path().join("index.html"), b"hello").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/.well-known/ic-domains", "/index.html"]);
     }
 
@@ -201,7 +227,7 @@ mod tests {
         .unwrap();
         fs::write(dir.path().join("data.secret"), b"secret").unwrap();
         fs::write(dir.path().join("index.html"), b"public").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
@@ -215,7 +241,7 @@ mod tests {
         .unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
 
-        let sources = scan(&[dir_str(&dir)]).unwrap();
+        let (sources, _) = scan(&[dir_str(&dir)]).unwrap();
         assert_eq!(sources.len(), 1);
         let config = &sources[0].config;
         assert_eq!(
@@ -231,7 +257,7 @@ mod tests {
     fn default_allow_raw_access_is_true() {
         let dir = tmp();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-        let sources = scan(&[dir_str(&dir)]).unwrap();
+        let (sources, _) = scan(&[dir_str(&dir)]).unwrap();
         assert_eq!(sources[0].config.allow_raw_access, Some(true));
     }
 
@@ -244,7 +270,56 @@ mod tests {
         fs::write(&target, b"content").unwrap();
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/real.txt"]);
+    }
+
+    #[test]
+    fn unmatched_rule_produces_warning() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(ASSETS_CONFIG_FILENAME_JSON),
+            br#"[{"match": "*.html", "cache": {"max_age": 100}}, {"match": "*.typo", "cache": {"max_age": 999}}]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+
+        let (_, warnings) = scan(&[dir_str(&dir)]).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("*.typo"),
+            "warning should name the pattern: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn all_rules_matched_no_warnings() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(ASSETS_CONFIG_FILENAME_JSON),
+            br#"[{"match": "*.html", "cache": {"max_age": 100}}]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+
+        let (_, warnings) = scan(&[dir_str(&dir)]).unwrap();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn unmatched_rule_in_nested_config_produces_warning() {
+        let dir = tmp();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(
+            dir.path().join("sub").join(ASSETS_CONFIG_FILENAME_JSON),
+            br#"[{"match": "*.js", "cache": {"max_age": 60}}, {"match": "*.typo", "cache": {"max_age": 1}}]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("sub/app.js"), b"js").unwrap();
+
+        let (_, warnings) = scan(&[dir_str(&dir)]).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("*.typo"));
     }
 }
