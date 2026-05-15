@@ -8,6 +8,10 @@
 //! Each returned `AssetSource` carries the `AssetConfig` resolved from any
 //! `.ic-assets.json` / `.ic-assets.json5` files found in the directory tree.
 //! Files whose config has `ignore: true` are excluded from the output.
+//!
+//! Warnings about config rules that never matched any asset are written to
+//! stderr at the point of detection, so the icp-cli runtime persists them
+//! after the sync step completes.
 
 use crate::config::{AssetConfig, AssetSourceDirectoryConfiguration};
 use std::path::{Path, PathBuf};
@@ -21,12 +25,11 @@ pub struct AssetSource {
     pub config: AssetConfig,
 }
 
-/// Scans `dirs` for asset files and returns the discovered sources together
-/// with any warnings about config rules that matched no assets.
-pub fn scan(dirs: &[String]) -> Result<(Vec<AssetSource>, Vec<String>), String> {
+/// Scans `dirs` for asset files. Warnings about config rules that matched no
+/// assets are written to stderr inline.
+pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
     let mut out = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
-    let mut warnings = Vec::new();
     for dir in dirs {
         let root = Path::new(dir);
         // Config loading requires an absolute path.  Canonicalize so that the
@@ -35,16 +38,9 @@ pub fn scan(dirs: &[String]) -> Result<(Vec<AssetSource>, Vec<String>), String> 
             .canonicalize()
             .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
         let root_config = AssetSourceDirectoryConfiguration::load(&root_abs)?;
-        walk(
-            &root_abs,
-            &root_abs,
-            &mut out,
-            &mut seen_keys,
-            &root_config,
-            &mut warnings,
-        )?;
+        walk(&root_abs, &root_abs, &mut out, &mut seen_keys, &root_config)?;
     }
-    Ok((out, warnings))
+    Ok(out)
 }
 
 fn walk(
@@ -53,7 +49,6 @@ fn walk(
     out: &mut Vec<AssetSource>,
     seen_keys: &mut std::collections::HashSet<String>,
     dir_config: &AssetSourceDirectoryConfiguration,
-    warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     let entries =
         std::fs::read_dir(current).map_err(|e| format!("read_dir {}: {e}", current.display()))?;
@@ -73,7 +68,7 @@ fn walk(
 
         if ft.is_dir() {
             let sub_config = dir_config.for_subdir(&path)?;
-            walk(root, &path, out, seen_keys, &sub_config, warnings)?;
+            walk(root, &path, out, seen_keys, &sub_config)?;
         } else if ft.is_file() {
             let relative = path
                 .strip_prefix(root)
@@ -101,7 +96,9 @@ fn walk(
     // for `current` so that rules inherited from a parent directory are not
     // double-reported.
     if dir_config.is_own_for_dir(current) {
-        warnings.extend(dir_config.get_unused_configs());
+        for w in dir_config.get_unused_configs() {
+            eprintln!("{w}");
+        }
     }
 
     Ok(())
@@ -128,9 +125,9 @@ mod tests {
         d.path().to_str().unwrap().to_string()
     }
 
-    /// Convenience: run scan and return only the sources, ignoring warnings.
+    /// Convenience alias kept so existing tests keep reading naturally.
     fn scan_sources(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
-        scan(dirs).map(|(sources, _)| sources)
+        scan(dirs)
     }
 
     #[test]
@@ -241,7 +238,7 @@ mod tests {
         .unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
 
-        let (sources, _) = scan(&[dir_str(&dir)]).unwrap();
+        let sources = scan(&[dir_str(&dir)]).unwrap();
         assert_eq!(sources.len(), 1);
         let config = &sources[0].config;
         assert_eq!(
@@ -257,7 +254,7 @@ mod tests {
     fn default_allow_raw_access_is_true() {
         let dir = tmp();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-        let (sources, _) = scan(&[dir_str(&dir)]).unwrap();
+        let sources = scan(&[dir_str(&dir)]).unwrap();
         assert_eq!(sources[0].config.allow_raw_access, Some(true));
     }
 
@@ -274,8 +271,12 @@ mod tests {
         assert_eq!(keys, vec!["/real.txt"]);
     }
 
+    // Unused-config detection is now reported via eprintln rather than a
+    // returned Vec; we just verify that scan still completes successfully
+    // when a config rule matches no asset. The detection logic itself is
+    // covered by the `get_unused_configs` unit test on `AssetSourceDirectoryConfiguration`.
     #[test]
-    fn unmatched_rule_produces_warning() {
+    fn unmatched_rule_does_not_fail_scan() {
         let dir = tmp();
         fs::write(
             dir.path().join(ASSETS_CONFIG_FILENAME_JSON),
@@ -283,43 +284,6 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-
-        let (_, warnings) = scan(&[dir_str(&dir)]).unwrap();
-        assert_eq!(warnings.len(), 1);
-        assert!(
-            warnings[0].contains("*.typo"),
-            "warning should name the pattern: {:?}",
-            warnings
-        );
-    }
-
-    #[test]
-    fn all_rules_matched_no_warnings() {
-        let dir = tmp();
-        fs::write(
-            dir.path().join(ASSETS_CONFIG_FILENAME_JSON),
-            br#"[{"match": "*.html", "cache": {"max_age": 100}}]"#,
-        )
-        .unwrap();
-        fs::write(dir.path().join("index.html"), b"hi").unwrap();
-
-        let (_, warnings) = scan(&[dir_str(&dir)]).unwrap();
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn unmatched_rule_in_nested_config_produces_warning() {
-        let dir = tmp();
-        fs::create_dir(dir.path().join("sub")).unwrap();
-        fs::write(
-            dir.path().join("sub").join(ASSETS_CONFIG_FILENAME_JSON),
-            br#"[{"match": "*.js", "cache": {"max_age": 60}}, {"match": "*.typo", "cache": {"max_age": 1}}]"#,
-        )
-        .unwrap();
-        fs::write(dir.path().join("sub/app.js"), b"js").unwrap();
-
-        let (_, warnings) = scan(&[dir_str(&dir)]).unwrap();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("*.typo"));
+        scan(&[dir_str(&dir)]).unwrap();
     }
 }

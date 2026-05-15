@@ -592,4 +592,33 @@ mod tests {
         let result = ac.get_asset_config(&outside);
         assert_eq!(result, AssetConfig::default());
     }
+
+    #[test]
+    fn get_unused_configs_reports_rules_that_never_matched() {
+        let mut files = HashMap::new();
+        files.insert(
+            "",
+            r#"[{"match": "*.html", "cache": {"max_age": 100}}, {"match": "*.typo", "cache": {"max_age": 999}}]"#,
+        );
+        let d = make_assets_dir(files, &["index.html"]);
+        let ac = load(&d);
+        // Touch the matching rule so only the typo rule remains unused.
+        let _ = cfg(&ac, &d, "index.html");
+        let unused = ac.get_unused_configs();
+        assert_eq!(unused.len(), 1);
+        assert!(
+            unused[0].contains("*.typo"),
+            "warning should name the pattern: {unused:?}"
+        );
+    }
+
+    #[test]
+    fn get_unused_configs_empty_when_all_rules_matched() {
+        let mut files = HashMap::new();
+        files.insert("", r#"[{"match": "*.html", "cache": {"max_age": 100}}]"#);
+        let d = make_assets_dir(files, &["index.html"]);
+        let ac = load(&d);
+        let _ = cfg(&ac, &d, "index.html");
+        assert!(ac.get_unused_configs().is_empty());
+    }
 }
