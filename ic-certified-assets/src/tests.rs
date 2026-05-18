@@ -561,6 +561,133 @@ fn serve_correct_encoding_v2() {
 }
 
 #[test]
+fn serve_single_byte_range_request() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    const BODY: &[u8] = b"0123456789";
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/range.txt", "text/plain")
+            .with_encoding("identity", vec![BODY])],
+    );
+
+    let response = state.http_request(
+        RequestBuilder::get("/range.txt")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", "bytes=2-5")
+            .build(),
+        &[],
+        unused_callback(),
+    );
+
+    assert_eq!(response.status_code, 206);
+    assert_eq!(response.body.as_ref(), b"2345");
+    assert_eq!(
+        lookup_header(&response, "Content-Range"),
+        Some("bytes 2-5/10")
+    );
+    assert_eq!(lookup_header(&response, "Content-Length"), Some("4"));
+    assert_eq!(lookup_header(&response, "Accept-Ranges"), Some("bytes"));
+    assert!(response.streaming_strategy.is_none());
+}
+
+#[test]
+fn serve_open_ended_byte_range_request() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    const BODY: &[u8] = b"0123456789";
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/range.txt", "text/plain")
+            .with_encoding("identity", vec![BODY])],
+    );
+
+    let response = state.http_request(
+        RequestBuilder::get("/range.txt")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", "bytes=6-")
+            .build(),
+        &[],
+        unused_callback(),
+    );
+
+    assert_eq!(response.status_code, 206);
+    assert_eq!(response.body.as_ref(), b"6789");
+    assert_eq!(
+        lookup_header(&response, "Content-Range"),
+        Some("bytes 6-9/10")
+    );
+}
+
+#[test]
+fn serve_suffix_byte_range_request() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    const BODY: &[u8] = b"0123456789";
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/range.txt", "text/plain")
+            .with_encoding("identity", vec![BODY])],
+    );
+
+    let response = state.http_request(
+        RequestBuilder::get("/range.txt")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", "bytes=-3")
+            .build(),
+        &[],
+        unused_callback(),
+    );
+
+    assert_eq!(response.status_code, 206);
+    assert_eq!(response.body.as_ref(), b"789");
+    assert_eq!(
+        lookup_header(&response, "Content-Range"),
+        Some("bytes 7-9/10")
+    );
+}
+
+#[test]
+fn reject_unsatisfiable_byte_range_request() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    const BODY: &[u8] = b"0123456789";
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/range.txt", "text/plain")
+            .with_encoding("identity", vec![BODY])],
+    );
+
+    let response = state.http_request(
+        RequestBuilder::get("/range.txt")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", "bytes=12-15")
+            .build(),
+        &[],
+        unused_callback(),
+    );
+
+    assert_eq!(response.status_code, 416);
+    assert!(response.body.as_ref().is_empty());
+    assert_eq!(lookup_header(&response, "Content-Range"), Some("bytes */10"));
+    assert_eq!(lookup_header(&response, "Content-Length"), Some("0"));
+    assert_eq!(lookup_header(&response, "Accept-Ranges"), Some("bytes"));
+    assert!(response.streaming_strategy.is_none());
+}
+
+#[test]
 fn serve_fallback_v2() {
     let mut state = State::default();
     let system_context = mock_system_context();

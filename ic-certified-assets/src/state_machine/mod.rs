@@ -1326,6 +1326,7 @@ impl State {
         etags: Vec<Hash>,
         req: HttpRequest,
     ) -> HttpResponse {
+        let range_header = req.get_header_value("Range").map(String::as_str);
         if let Ok(asset) = self.get_asset(&path.into()) {
             if !asset.allow_raw_access() && req.is_raw_domain() {
                 return req.redirect_from_raw_to_certified_domain();
@@ -1353,6 +1354,7 @@ impl State {
                     &callback,
                     &etags,
                     req.get_certificate_version(),
+                    range_header,
                 ) {
                     return response;
                 }
@@ -1371,6 +1373,7 @@ impl State {
                     &callback,
                     &etags,
                     req.get_certificate_version(),
+                    range_header,
                 ) {
                     return response;
                 }

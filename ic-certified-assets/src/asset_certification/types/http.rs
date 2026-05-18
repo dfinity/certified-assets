@@ -18,6 +18,53 @@ pub const IC_CERTIFICATE_EXPRESSION_VALUE: &str = r#"default_certification(Valid
 
 pub type HeaderField = (String, String);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ByteRange {
+    FromTo(usize, usize),
+    From(usize),
+    Suffix(usize),
+}
+
+impl ByteRange {
+    fn parse(header_value: &str) -> Option<Self> {
+        let value = header_value.trim();
+        let range_spec = value.strip_prefix("bytes=")?;
+        if range_spec.contains(',') {
+            return None;
+        }
+
+        let (start, end) = range_spec.split_once('-')?;
+        match (start.trim(), end.trim()) {
+            ("", "") => None,
+            ("", suffix) => suffix.parse::<usize>().ok().map(Self::Suffix),
+            (start, "") => start.parse::<usize>().ok().map(Self::From),
+            (start, end) => {
+                let start = start.parse::<usize>().ok()?;
+                let end = end.parse::<usize>().ok()?;
+                Some(Self::FromTo(start, end))
+            }
+        }
+    }
+
+    fn bounds(self, total_len: usize) -> Option<(usize, usize)> {
+        if total_len == 0 {
+            return None;
+        }
+
+        match self {
+            Self::FromTo(start, end) if start <= end && start < total_len => {
+                Some((start, end.min(total_len - 1)))
+            }
+            Self::From(start) if start < total_len => Some((start, total_len - 1)),
+            Self::Suffix(len) if len > 0 => {
+                let start = total_len.saturating_sub(len);
+                Some((start, total_len - 1))
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct HttpRequest {
     pub method: String,
@@ -166,6 +213,7 @@ impl HttpResponse {
         if let Some(head) = certificate_header {
             headers.insert(head.0.clone(), head.1.clone());
         }
+        headers.insert("Accept-Ranges".to_string(), "bytes".to_string());
 
         let streaming_strategy = StreamingCallbackToken::create_token(
             enc_name,
@@ -203,6 +251,60 @@ impl HttpResponse {
         }
     }
 
+    pub fn build_partial_content(
+        asset: &Asset,
+        enc_name: &str,
+        enc: &AssetEncoding,
+        range_header: &str,
+        cert_version: u16,
+    ) -> HttpResponse {
+        let full_body = enc
+            .content_chunks
+            .iter()
+            .flat_map(|chunk| chunk.as_ref())
+            .copied()
+            .collect::<Vec<_>>();
+        let total_len = full_body.len();
+        let mut headers = asset.get_headers_for_asset(enc_name, cert_version);
+        headers.remove("IC-Certificate");
+        headers.remove("ic-certificateexpression");
+        headers.insert("Accept-Ranges".to_string(), "bytes".to_string());
+
+        match ByteRange::parse(range_header).and_then(|range| range.bounds(total_len)) {
+            Some((start, end)) => {
+                let body = full_body[start..=end].to_vec();
+                headers.insert(
+                    "Content-Range".to_string(),
+                    format!("bytes {start}-{end}/{total_len}"),
+                );
+                headers.insert("Content-Length".to_string(), body.len().to_string());
+
+                HttpResponse {
+                    status_code: 206,
+                    headers: headers.into_iter().collect::<_>(),
+                    body: RcBytes::from(ByteBuf::from(body)),
+                    upgrade: None,
+                    streaming_strategy: None,
+                }
+            }
+            None => {
+                headers.insert(
+                    "Content-Range".to_string(),
+                    format!("bytes */{total_len}"),
+                );
+                headers.insert("Content-Length".to_string(), "0".to_string());
+
+                HttpResponse {
+                    status_code: 416,
+                    headers: headers.into_iter().collect::<_>(),
+                    body: RcBytes::default(),
+                    upgrade: None,
+                    streaming_strategy: None,
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn build_ok_from_requested_encodings(
         asset: &Asset,
@@ -213,6 +315,7 @@ impl HttpResponse {
         callback: &CallbackFunc,
         etags: &[Hash],
         cert_version: u16,
+        range_header: Option<&str>,
     ) -> Option<HttpResponse> {
         let most_important_v1 = asset.most_important_encoding_v1();
 
@@ -225,6 +328,15 @@ impl HttpResponse {
                         if enc_name != &most_important_v1 {
                             continue;
                         }
+                    }
+                    if let Some(range_header) = range_header {
+                        return Some(Self::build_partial_content(
+                            asset,
+                            enc_name,
+                            enc,
+                            range_header,
+                            cert_version,
+                        ));
                     }
                     return Some(Self::build_ok(
                         asset,
@@ -246,6 +358,15 @@ impl HttpResponse {
         if cert_version == 1 {
             for enc_name in requested_encodings.iter() {
                 if let Some(enc) = asset.encodings.get(enc_name) {
+                    if let Some(range_header) = range_header {
+                        return Some(Self::build_partial_content(
+                            asset,
+                            enc_name,
+                            enc,
+                            range_header,
+                            cert_version,
+                        ));
+                    }
                     return Some(Self::build_ok(
                         asset,
                         enc_name,
@@ -271,6 +392,15 @@ impl HttpResponse {
                     continue;
                 }
                 if enc.certified {
+                    if let Some(range_header) = range_header {
+                        return Some(Self::build_partial_content(
+                            asset,
+                            &enc_name,
+                            enc,
+                            range_header,
+                            cert_version,
+                        ));
+                    }
                     return Some(Self::build_ok(
                         asset,
                         &enc_name,
