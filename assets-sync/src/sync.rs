@@ -10,9 +10,10 @@ use mime::Mime;
 use std::collections::HashMap;
 
 use crate::canister::{
-    api_version, commit_batch, create_batch, create_chunk, grant_permission_via_proxy, list_assets,
-    list_permitted, AssetDetails, BatchOperationKind, CanisterCall, CommitBatchArguments,
-    CreateAssetArguments, DeleteAssetArguments, Permission, SetAssetContentArguments,
+    api_version, commit_batch, create_batch, create_chunk, get_asset_properties,
+    grant_permission_via_proxy, list_assets, list_permitted, AssetDetails, AssetProperties,
+    BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
+    DeleteAssetArguments, Permission, SetAssetContentArguments, SetAssetPropertiesArguments,
     UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
@@ -90,6 +91,12 @@ pub fn sync<C: CanisterCall>(
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
 
+    let mut canister_asset_properties: HashMap<String, AssetProperties> = HashMap::new();
+    for key in canister_assets.keys() {
+        let props = get_asset_properties(canister, key)?;
+        canister_asset_properties.insert(key.clone(), props);
+    }
+
     // Phase 1: compute metadata only — no batch created yet.
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
     for source in sources {
@@ -97,7 +104,13 @@ pub fn sync<C: CanisterCall>(
         project_assets.insert(asset.source.key.clone(), asset);
     }
 
-    if build_operations(&project_assets, &canister_assets).is_empty() {
+    if build_operations(
+        &project_assets,
+        &canister_assets,
+        &canister_asset_properties,
+    )
+    .is_empty()
+    {
         println!("canister is up to date, nothing to commit");
         return Ok(format!(
             "{} asset(s) already up to date",
@@ -119,7 +132,11 @@ pub fn sync<C: CanisterCall>(
         }
     }
 
-    let operations = build_operations(&project_assets, &canister_assets);
+    let operations = build_operations(
+        &project_assets,
+        &canister_assets,
+        &canister_asset_properties,
+    );
     println!("committing {} operation(s)", operations.len());
 
     commit_batch(
@@ -263,6 +280,7 @@ fn encoding_suffix(encoding: &str) -> String {
 fn build_operations(
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
+    canister_asset_properties: &HashMap<String, AssetProperties>,
 ) -> Vec<BatchOperationKind> {
     let mut ops = Vec::new();
     let mut canister_assets = canister_assets.clone();
@@ -338,7 +356,72 @@ fn build_operations(
         }
     }
 
+    // 5. Update properties for assets that already exist on the canister and
+    //    whose properties drifted from the project config.
+    update_properties(&mut ops, project_assets, canister_asset_properties);
+
     ops
+}
+
+// Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`: for each
+// asset that already exists on the canister, compare `max_age`, `headers`,
+// `allow_raw_access`, and `is_aliased` against the project config and push a
+// `SetAssetProperties` op only when at least one field differs. Newly-created
+// assets already get their properties from `CreateAssetArguments`.
+fn update_properties(
+    ops: &mut Vec<BatchOperationKind>,
+    project_assets: &HashMap<String, ProjectAsset>,
+    canister_asset_properties: &HashMap<String, AssetProperties>,
+) {
+    for (key, pa) in project_assets {
+        let Some(canister_props) = canister_asset_properties.get(key) else {
+            continue;
+        };
+        let config = &pa.source.config;
+
+        let project_max_age = config.cache.as_ref().and_then(|c| c.max_age);
+        let max_age = (project_max_age != canister_props.max_age).then_some(project_max_age);
+
+        let project_headers = config.combined_headers().map(sorted_header_pairs);
+        let canister_headers = canister_props
+            .headers
+            .as_ref()
+            .map(|h| sorted_header_pairs(h.iter().map(|(k, v)| (k.clone(), v.clone()))));
+        let headers = (project_headers != canister_headers).then_some(project_headers);
+
+        let is_aliased =
+            (config.enable_aliasing != canister_props.is_aliased).then_some(config.enable_aliasing);
+
+        let allow_raw_access = (config.allow_raw_access != canister_props.allow_raw_access)
+            .then_some(config.allow_raw_access);
+
+        if max_age.is_some()
+            || headers.is_some()
+            || is_aliased.is_some()
+            || allow_raw_access.is_some()
+        {
+            ops.push(BatchOperationKind::SetAssetProperties(
+                SetAssetPropertiesArguments {
+                    key: key.clone(),
+                    max_age,
+                    headers,
+                    allow_raw_access,
+                    is_aliased,
+                },
+            ));
+        }
+    }
+}
+
+fn sorted_header_pairs<I>(iter: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    // Project headers come from a BTreeMap and canister headers from a HashMap;
+    // sorting both sides yields a stable comparison regardless of input ordering.
+    let mut v: Vec<(String, String)> = iter.into_iter().collect();
+    v.sort();
+    v
 }
 
 #[cfg(test)]
@@ -550,7 +633,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new());
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(ops.len(), 2);
@@ -569,7 +652,7 @@ mod tests {
             "text/html",
             &[("identity", Some(sha))],
         )]);
-        assert!(build_operations(&project, &canister).is_empty());
+        assert!(build_operations(&project, &canister, &HashMap::new()).is_empty());
     }
 
     #[test]
@@ -584,7 +667,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister);
+        let ops = build_operations(&project, &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
         assert_eq!(count_op(&ops, "DeleteAsset"), 0);
@@ -598,7 +681,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&HashMap::new(), &canister);
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(ops.len(), 1);
     }
@@ -615,7 +698,7 @@ mod tests {
             "application/octet-stream",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister);
+        let ops = build_operations(&project, &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
@@ -636,7 +719,7 @@ mod tests {
             "text/html",
             &[("identity", Some(sha)), ("gzip", Some(vec![9, 8, 7]))],
         )]);
-        let ops = build_operations(&project, &canister);
+        let ops = build_operations(&project, &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 0);
         assert_eq!(ops.len(), 1);
@@ -659,7 +742,7 @@ mod tests {
             "text/html",
             &[("identity", Some(identity_sha))],
         )]);
-        let ops = build_operations(&project, &canister);
+        let ops = build_operations(&project, &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 0);
@@ -676,7 +759,7 @@ mod tests {
                 &[("identity", Some(vec![2]))],
             ),
         ]);
-        let ops = build_operations(&HashMap::new(), &canister);
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "DeleteAsset"), 2);
         assert_eq!(ops.len(), 2);
     }
@@ -714,7 +797,7 @@ mod tests {
             "text/plain",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new());
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert!(!ops.iter().any(|op| matches!(
@@ -745,7 +828,7 @@ mod tests {
             &[("identity", vec![1, 2, 3], false)],
             config,
         )]);
-        let ops = build_operations(&project, &HashMap::new());
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
         let create_op = ops
             .iter()
             .find_map(|op| {
@@ -764,6 +847,243 @@ mod tests {
         );
         assert_eq!(create_op.enable_aliasing, Some(true));
         assert_eq!(create_op.allow_raw_access, Some(false));
+    }
+
+    fn set_props_ops(
+        ops: &[BatchOperationKind],
+    ) -> std::collections::BTreeMap<&str, &SetAssetPropertiesArguments> {
+        ops.iter()
+            .filter_map(|op| match op {
+                BatchOperationKind::SetAssetProperties(a) => Some((a.key.as_str(), a)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn update_properties_emits_set_when_max_age_differs() {
+        use crate::config::{AssetConfig, CacheConfig};
+        let config = AssetConfig {
+            cache: Some(CacheConfig {
+                max_age: Some(3600),
+            }),
+            ..AssetConfig::default()
+        };
+        let project = HashMap::from([mk_project_asset_with_config(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+            config,
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: Some(60),
+                headers: None,
+                allow_raw_access: Some(true),
+                is_aliased: None,
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        let by_key = set_props_ops(&ops);
+        assert_eq!(by_key.len(), 1);
+        let set = by_key["/index.html"];
+        assert_eq!(set.max_age, Some(Some(3600)));
+        assert_eq!(set.headers, None);
+        assert_eq!(set.allow_raw_access, None);
+        assert_eq!(set.is_aliased, None);
+    }
+
+    #[test]
+    fn update_properties_emits_nothing_when_all_match() {
+        use crate::config::{AssetConfig, CacheConfig};
+        let config = AssetConfig {
+            cache: Some(CacheConfig {
+                max_age: Some(3600),
+            }),
+            enable_aliasing: Some(true),
+            allow_raw_access: Some(true),
+            ..AssetConfig::default()
+        };
+        let project = HashMap::from([mk_project_asset_with_config(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+            config,
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: Some(3600),
+                headers: None,
+                allow_raw_access: Some(true),
+                is_aliased: Some(true),
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        assert!(
+            set_props_ops(&ops).is_empty(),
+            "no SetAssetProperties op when properties match"
+        );
+    }
+
+    #[test]
+    fn update_properties_clears_max_age_when_canister_has_it_but_project_doesnt() {
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: Some(60),
+                headers: None,
+                // mk_project_asset uses AssetConfig::default() → allow_raw_access: Some(true).
+                allow_raw_access: Some(true),
+                is_aliased: None,
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        let by_key = set_props_ops(&ops);
+        assert_eq!(by_key.len(), 1);
+        // Project has no max_age, canister has Some(60) — the op must explicitly
+        // request clearing it (the inner None means "set to null on the canister").
+        assert_eq!(by_key["/index.html"].max_age, Some(None));
+    }
+
+    #[test]
+    fn update_properties_detects_header_drift_irrespective_of_order() {
+        use crate::config::AssetConfig;
+        use std::collections::BTreeMap;
+        let mut headers = BTreeMap::new();
+        headers.insert("X-A".to_string(), "1".to_string());
+        headers.insert("X-B".to_string(), "2".to_string());
+        let config = AssetConfig {
+            headers: Some(headers),
+            ..AssetConfig::default()
+        };
+        let project = HashMap::from([mk_project_asset_with_config(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+            config,
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let mut canister_headers = HashMap::new();
+        // Same entries as project; HashMap iteration order does not matter
+        // because both sides are sorted before comparison.
+        canister_headers.insert("X-B".to_string(), "2".to_string());
+        canister_headers.insert("X-A".to_string(), "1".to_string());
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: Some(canister_headers),
+                allow_raw_access: Some(true),
+                is_aliased: None,
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        assert!(
+            set_props_ops(&ops).is_empty(),
+            "headers match (order-insensitive); no SetAssetProperties op expected"
+        );
+    }
+
+    #[test]
+    fn rule_only_change_propagates_via_set_asset_properties() {
+        use crate::config::AssetConfig;
+        use crate::security_policy::SecurityPolicy;
+        let sha = vec![1u8, 2, 3];
+
+        // Project config: standard security policy → produces canonical CSP /
+        // X-Frame-Options / etc. headers via `combined_headers()`.
+        let config = AssetConfig {
+            security_policy: Some(SecurityPolicy::Standard),
+            ..AssetConfig::default()
+        };
+        // Identity encoding already in place (matches canister sha).
+        let project = HashMap::from([mk_project_asset_with_config(
+            "/index.html",
+            "text/html",
+            &[("identity", sha.clone(), true)],
+            config,
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(sha))],
+        )]);
+        // Canister currently has no headers stored — i.e., the asset was
+        // deployed before the rule was added.
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: None,
+                allow_raw_access: Some(true),
+                is_aliased: None,
+            },
+        )]);
+
+        let ops = build_operations(&project, &canister, &canister_props);
+
+        // The asset content must not be touched (no Create/Set/Unset/Delete).
+        assert_eq!(count_op(&ops, "CreateAsset"), 0);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 0);
+        assert_eq!(count_op(&ops, "UnsetAssetContent"), 0);
+        assert_eq!(count_op(&ops, "DeleteAsset"), 0);
+
+        let by_key = set_props_ops(&ops);
+        assert_eq!(by_key.len(), 1);
+        let new_headers = by_key["/index.html"]
+            .headers
+            .as_ref()
+            .expect("headers field must be Some(_)")
+            .as_ref()
+            .expect("inner option must be Some(headers) (not clearing)");
+        let map: std::collections::HashMap<&str, &str> = new_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert!(
+            map.contains_key("Content-Security-Policy"),
+            "standard policy CSP header should be present in SetAssetProperties; got: {map:#?}",
+        );
+        assert_eq!(map.get("X-Frame-Options").copied(), Some("DENY"));
+    }
+
+    #[test]
+    fn update_properties_skips_assets_not_on_canister() {
+        // Asset is new to the canister — properties get set via CreateAsset,
+        // not SetAssetProperties.
+        let project = HashMap::from([mk_project_asset(
+            "/new.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+        )]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        assert!(set_props_ops(&ops).is_empty());
     }
 
     #[test]

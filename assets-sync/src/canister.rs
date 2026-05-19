@@ -80,6 +80,14 @@ pub struct CommitBatchArguments {
     pub operations: Vec<BatchOperationKind>,
 }
 
+#[derive(CandidType, Clone, Debug, Deserialize, Default)]
+pub struct AssetProperties {
+    pub max_age: Option<u64>,
+    pub headers: Option<HashMap<String, String>>,
+    pub allow_raw_access: Option<bool>,
+    pub is_aliased: Option<bool>,
+}
+
 #[derive(CandidType, Clone, Debug, Deserialize)]
 pub enum Permission {
     Commit,
@@ -196,6 +204,15 @@ pub fn create_chunk(c: &impl CanisterCall, batch_id: &Nat, content: &[u8]) -> Re
 
 pub fn commit_batch(c: &impl CanisterCall, args: CommitBatchArguments) -> Result<(), String> {
     c.call("commit_batch", args, CallType::Update, true)
+}
+
+pub fn get_asset_properties(c: &impl CanisterCall, key: &str) -> Result<AssetProperties, String> {
+    c.call(
+        "get_asset_properties",
+        key.to_string(),
+        CallType::Query,
+        true,
+    )
 }
 
 pub fn list_permitted(

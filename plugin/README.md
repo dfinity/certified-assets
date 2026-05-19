@@ -58,11 +58,7 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
   - Wire it into `AssetConfig::combined_headers()` so that `security_policy` entries in `.ic-assets.json5` expand into the corresponding `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, etc. headers before the headers map is passed to `CreateAssetArguments`.
   - Emit the same warnings as `ic-asset/src/sync.rs` (`gather_asset_descriptors`): warn when no security policy is set for any asset, warn when `standard` policy is in use (suggesting hardening), and error when `hardened` is declared but no custom headers are provided.
 
-- [ ] **Asset properties update** — emit `SetAssetProperties` ops for assets whose properties drifted. Types are already in place.
-  - Add a `get_asset_properties` call in `canister.rs` (the canister exposes `get_asset_properties` taking a list of keys; see `ic-asset/src/canister_api/methods/asset_properties.rs`).
-  - Call it in `sync()` after `list_assets`, collecting a `HashMap<String, AssetProperties>`.
-  - Add an `update_properties` step at the end of `build_operations`, mirroring `ic-asset/src/batch_upload/operations.rs::update_properties`: for each asset that already exists on the canister, compare `max_age`, `headers`, `allow_raw_access`, and `is_aliased` against the project config and push a `BatchOperationKind::SetAssetProperties` only when at least one field differs.
-  - `SetAssetPropertiesArguments` is already defined in `canister.rs` and `BatchOperationKind::SetAssetProperties` is already a variant, so no new types are needed.
+- [x] **Asset properties update** — emit `SetAssetProperties` ops for assets whose properties drifted on the canister. `get_asset_properties` is called after `list_assets` to collect the current `AssetProperties` for every canister asset, and `update_properties` compares `max_age`, `headers`, `allow_raw_access`, and `is_aliased` field-by-field against the resolved project config (headers compared order-insensitively). Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`.
 
 - [ ] **`commit_batch` chunking** — split operations across multiple `commit_batch` calls to stay within the ~2 MB ICP ingress message limit, matching `ic-asset` behaviour.
   - Replace the single `commit_batch` call in `sync()` with a `commit_in_stages` helper modelled on `ic-asset/src/sync.rs::commit_in_stages`.
