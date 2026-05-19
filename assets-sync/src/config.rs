@@ -60,7 +60,10 @@ impl AssetConfig {
     pub fn combined_headers(&self) -> Option<HeadersConfig> {
         match (self.headers.as_ref(), self.security_policy) {
             (None, None) => None,
-            (None, Some(policy)) => Some(policy.to_headers()),
+            (None, Some(policy)) => {
+                let headers = policy.to_headers();
+                (!headers.is_empty()).then_some(headers)
+            }
             (Some(custom), None) => Some(custom.clone()),
             (Some(custom), Some(policy)) => {
                 let mut headers = custom.clone();
@@ -721,13 +724,14 @@ mod tests {
     }
 
     #[test]
-    fn combined_headers_disabled_policy_is_empty() {
+    fn combined_headers_disabled_policy_is_none() {
         let cfg = AssetConfig {
             security_policy: Some(SecurityPolicy::Disabled),
             ..AssetConfig::default()
         };
         // Disabled policy carries no headers; with no custom headers, the
-        // result is an empty (but `Some`) map.
-        assert!(cfg.combined_headers().unwrap().is_empty());
+        // result should be `None` (not `Some(empty)`), so callers downstream
+        // can't confuse an opted-out policy with an empty header set.
+        assert!(cfg.combined_headers().is_none());
     }
 }
