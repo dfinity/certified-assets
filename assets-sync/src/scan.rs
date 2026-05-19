@@ -8,6 +8,10 @@
 //! Each returned `AssetSource` carries the `AssetConfig` resolved from any
 //! `.ic-assets.json` / `.ic-assets.json5` files found in the directory tree.
 //! Files whose config has `ignore: true` are excluded from the output.
+//!
+//! Warnings about config rules that never matched any asset are written to
+//! stderr at the point of detection, so the icp-cli runtime persists them
+//! after the sync step completes.
 
 use crate::config::{AssetConfig, AssetSourceDirectoryConfiguration};
 use std::path::{Path, PathBuf};
@@ -21,6 +25,8 @@ pub struct AssetSource {
     pub config: AssetConfig,
 }
 
+/// Scans `dirs` for asset files. Warnings about config rules that matched no
+/// assets are written to stderr inline.
 pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
     let mut out = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
@@ -83,6 +89,18 @@ fn walk(
         }
         // Symlinks (to files or directories) are skipped, matching ic-asset::sync.
     }
+
+    // After all files (and subdirectory files) in this directory have been
+    // processed, report any rules in this directory's own config that never
+    // matched an asset.  We only check when this node was loaded specifically
+    // for `current` so that rules inherited from a parent directory are not
+    // double-reported.
+    if dir_config.is_own_for_dir(current) {
+        for w in dir_config.get_unused_configs() {
+            eprintln!("{w}");
+        }
+    }
+
     Ok(())
 }
 
@@ -107,11 +125,16 @@ mod tests {
         d.path().to_str().unwrap().to_string()
     }
 
+    /// Convenience alias kept so existing tests keep reading naturally.
+    fn scan_sources(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
+        scan(dirs)
+    }
+
     #[test]
     fn single_file() {
         let dir = tmp();
         fs::write(dir.path().join("index.html"), b"hello").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
@@ -120,7 +143,7 @@ mod tests {
         let dir = tmp();
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/app.js"), b"js").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/sub/app.js"]);
     }
 
@@ -130,7 +153,7 @@ mod tests {
         fs::write(dir.path().join(".hidden"), b"secret").unwrap();
         fs::write(dir.path().join(".gitignore"), b"*.tmp").unwrap();
         fs::write(dir.path().join("visible.txt"), b"ok").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/visible.txt"]);
     }
 
@@ -139,7 +162,7 @@ mod tests {
         let dir = tmp();
         fs::write(dir.path().join(ASSETS_CONFIG_FILENAME_JSON), b"[]").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
@@ -148,14 +171,14 @@ mod tests {
         let dir = tmp();
         fs::write(dir.path().join(ASSETS_CONFIG_FILENAME_JSON5), b"[]").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
     #[test]
     fn empty_directory() {
         let dir = tmp();
-        assert!(scan(&[dir_str(&dir)]).unwrap().is_empty());
+        assert!(scan_sources(&[dir_str(&dir)]).unwrap().is_empty());
     }
 
     #[test]
@@ -164,7 +187,7 @@ mod tests {
         let dir2 = tmp();
         fs::write(dir1.path().join("index.html"), b"v1").unwrap();
         fs::write(dir2.path().join("index.html"), b"v2").unwrap();
-        let err = scan(&[dir_str(&dir1), dir_str(&dir2)]).unwrap_err();
+        let err = scan_sources(&[dir_str(&dir1), dir_str(&dir2)]).unwrap_err();
         assert!(
             err.contains("/index.html"),
             "error should name the key: {err}"
@@ -177,7 +200,7 @@ mod tests {
         let dir2 = tmp();
         fs::write(dir1.path().join("a.txt"), b"a").unwrap();
         fs::write(dir2.path().join("b.txt"), b"b").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir1), dir_str(&dir2)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir1), dir_str(&dir2)]).unwrap());
         assert_eq!(keys, vec!["/a.txt", "/b.txt"]);
     }
 
@@ -187,7 +210,7 @@ mod tests {
         fs::create_dir(dir.path().join(".well-known")).unwrap();
         fs::write(dir.path().join(".well-known/ic-domains"), b"foo.bar.com").unwrap();
         fs::write(dir.path().join("index.html"), b"hello").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/.well-known/ic-domains", "/index.html"]);
     }
 
@@ -201,7 +224,7 @@ mod tests {
         .unwrap();
         fs::write(dir.path().join("data.secret"), b"secret").unwrap();
         fs::write(dir.path().join("index.html"), b"public").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
@@ -244,7 +267,23 @@ mod tests {
         fs::write(&target, b"content").unwrap();
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/real.txt"]);
+    }
+
+    // Unused-config detection is now reported via eprintln rather than a
+    // returned Vec; we just verify that scan still completes successfully
+    // when a config rule matches no asset. The detection logic itself is
+    // covered by the `get_unused_configs` unit test on `AssetSourceDirectoryConfiguration`.
+    #[test]
+    fn unmatched_rule_does_not_fail_scan() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(ASSETS_CONFIG_FILENAME_JSON),
+            br#"[{"match": "*.html", "cache": {"max_age": 100}}, {"match": "*.typo", "cache": {"max_age": 999}}]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+        scan(&[dir_str(&dir)]).unwrap();
     }
 }

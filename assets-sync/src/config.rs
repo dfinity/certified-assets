@@ -83,6 +83,7 @@ enum Maybe<T> {
 
 struct AssetConfigRule {
     r#match: GlobMatcher,
+    pattern: String,
     cache: Option<CacheConfig>,
     headers: Maybe<HeadersConfig>,
     ignore: Option<bool>,
@@ -117,8 +118,6 @@ pub struct AssetSourceDirectoryConfiguration {
 struct AssetConfigTreeNode {
     parent: Option<ConfigNode>,
     rules: Vec<AssetConfigRule>,
-    // Only used for diagnostics / unused-rule reporting.
-    #[allow(dead_code)]
     origin: PathBuf,
 }
 
@@ -148,6 +147,30 @@ impl AssetSourceDirectoryConfiguration {
     /// directly inside the directory this config was loaded for.
     pub fn get_asset_config(&self, path: &Path) -> AssetConfig {
         self.node.borrow_mut().get_config(path)
+    }
+
+    /// Returns warning strings for every rule in this config node that never
+    /// matched any asset.  Only the rules belonging to *this* node are checked;
+    /// parent-node rules are reported when the parent directory is visited.
+    pub fn get_unused_configs(&self) -> Vec<String> {
+        let node = self.node.borrow();
+        node.rules
+            .iter()
+            .filter(|r| !r.used)
+            .map(|r| {
+                format!(
+                    "config in '{}': pattern '{}' did not match any assets",
+                    node.origin.display(),
+                    r.pattern,
+                )
+            })
+            .collect()
+    }
+
+    /// Returns `true` when this config was loaded specifically for `dir` (i.e.
+    /// it was not inherited from a parent directory that had no config file).
+    pub fn is_own_for_dir(&self, dir: &Path) -> bool {
+        self.node.borrow().origin == dir
     }
 }
 
@@ -316,6 +339,7 @@ impl AssetConfigRule {
             .compile_matcher();
         Ok(Self {
             r#match: matcher,
+            pattern: interim.r#match,
             cache: interim.cache,
             headers: interim.headers,
             ignore: interim.ignore,
@@ -567,5 +591,34 @@ mod tests {
         let outside = d.path().join("../outside/file.txt");
         let result = ac.get_asset_config(&outside);
         assert_eq!(result, AssetConfig::default());
+    }
+
+    #[test]
+    fn get_unused_configs_reports_rules_that_never_matched() {
+        let mut files = HashMap::new();
+        files.insert(
+            "",
+            r#"[{"match": "*.html", "cache": {"max_age": 100}}, {"match": "*.typo", "cache": {"max_age": 999}}]"#,
+        );
+        let d = make_assets_dir(files, &["index.html"]);
+        let ac = load(&d);
+        // Touch the matching rule so only the typo rule remains unused.
+        let _ = cfg(&ac, &d, "index.html");
+        let unused = ac.get_unused_configs();
+        assert_eq!(unused.len(), 1);
+        assert!(
+            unused[0].contains("*.typo"),
+            "warning should name the pattern: {unused:?}"
+        );
+    }
+
+    #[test]
+    fn get_unused_configs_empty_when_all_rules_matched() {
+        let mut files = HashMap::new();
+        files.insert("", r#"[{"match": "*.html", "cache": {"max_age": 100}}]"#);
+        let d = make_assets_dir(files, &["index.html"]);
+        let ac = load(&d);
+        let _ = cfg(&ac, &d, "index.html");
+        assert!(ac.get_unused_configs().is_empty());
     }
 }

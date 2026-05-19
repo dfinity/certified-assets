@@ -47,7 +47,7 @@ impl CanisterCall for WasiCall {
 struct Plugin;
 
 impl Guest for Plugin {
-    fn exec(input: SyncExecInput) -> Result<Option<String>, String> {
+    fn exec(input: SyncExecInput) -> Result<(), String> {
         println!(
             "sync plugin: starting for canister {} (environment: {})",
             input.canister_id, input.environment
@@ -58,7 +58,8 @@ impl Guest for Plugin {
             &input.identity_principal,
             input.proxy_canister_id.as_deref(),
         )?;
-        Ok(Some(summary))
+        eprintln!("{summary}");
+        Ok(())
     }
 }
 
