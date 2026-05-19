@@ -701,6 +701,26 @@ mod tests {
     }
 
     #[test]
+    fn security_policy_fields_parse_from_json5() {
+        let content = r#"[
+          { "match": "*.html", "security_policy": "standard" },
+          { "match": "*.skip", "security_policy": "disabled", "disable_security_policy_warning": true }
+        ]"#;
+        let mut files = HashMap::new();
+        files.insert("", content);
+        let d = make_assets_dir(files, &["index.html", "ignore.skip"]);
+        let ac = load(&d);
+
+        let html_cfg = cfg(&ac, &d, "index.html");
+        assert_eq!(html_cfg.security_policy, Some(SecurityPolicy::Standard));
+        assert_eq!(html_cfg.disable_security_policy_warning, None);
+
+        let skip_cfg = cfg(&ac, &d, "ignore.skip");
+        assert_eq!(skip_cfg.security_policy, Some(SecurityPolicy::Disabled));
+        assert_eq!(skip_cfg.disable_security_policy_warning, Some(true));
+    }
+
+    #[test]
     fn combined_headers_disabled_policy_is_empty() {
         let cfg = AssetConfig {
             security_policy: Some(SecurityPolicy::Disabled),

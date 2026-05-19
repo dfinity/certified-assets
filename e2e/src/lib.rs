@@ -2,6 +2,7 @@ use assert_cmd::Command as AssertCmd;
 use candid::CandidType;
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -103,6 +104,39 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
         .expect("failed to copy plugin.wasm");
 
     tmp
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
+pub struct AssetProperties {
+    pub max_age: Option<u64>,
+    pub headers: Option<BTreeMap<String, String>>,
+    pub allow_raw_access: Option<bool>,
+    pub is_aliased: Option<bool>,
+}
+
+/// Call `get_asset_properties` on the `frontend` canister for `key`.
+pub fn get_asset_properties(project: &Path, key: &str) -> AssetProperties {
+    let stdout = icp_cmd(project)
+        .args([
+            "canister",
+            "call",
+            "frontend",
+            "get_asset_properties",
+            &format!("(\"{key}\")"),
+            "-o",
+            "hex",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let hex_str = String::from_utf8_lossy(&stdout);
+    let bytes = hex::decode(hex_str.trim()).expect("failed to decode hex response");
+    let (properties,) = candid::decode_args::<(AssetProperties,)>(&bytes)
+        .expect("failed to decode candid response");
+    properties
 }
 
 /// Call `list` on the `frontend` canister and return all asset details.
