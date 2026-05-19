@@ -53,7 +53,7 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
 
 - [x] **Warn on unmatched config rules** — track which `AssetConfigRule` glob patterns actually matched at least one asset during scanning, and warn about the unused ones so users are alerted to typos. Mirrors `ic-asset`'s `AssetSourceDirectoryConfiguration::get_unused_configs()` (see `ic-asset/src/asset/config.rs`).
 
-- [ ] **Security policy** — adopt `ic-asset`'s CSP / standard security headers. Depends on `.ic-assets.json5` parsing above.
+- [x] **Security policy** — adopt `ic-asset`'s CSP / standard security headers. Depends on `.ic-assets.json5` parsing above.
   - Port `SecurityPolicy` enum (`disabled` / `standard` / `hardened`) and the `ConcreteSecurityPolicy` / `to_headers()` logic from `ic-asset/src/security_policy.rs` into `assets-sync`.
   - Wire it into `AssetConfig::combined_headers()` so that `security_policy` entries in `.ic-assets.json5` expand into the corresponding `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, etc. headers before the headers map is passed to `CreateAssetArguments`.
   - Emit the same warnings as `ic-asset/src/sync.rs` (`gather_asset_descriptors`): warn when no security policy is set for any asset, warn when `standard` policy is in use (suggesting hardening), and error when `hardened` is declared but no custom headers are provided.
