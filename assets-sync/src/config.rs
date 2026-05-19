@@ -6,10 +6,11 @@
 //! lazily (one directory at a time), which avoids a separate pre-walk.
 
 use crate::content::Encoder;
+use crate::security_policy::SecurityPolicy;
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -32,7 +33,6 @@ pub struct AssetConfig {
     pub enable_aliasing: Option<bool>,
     pub allow_raw_access: Option<bool>,
     pub encodings: Option<Vec<Encoder>>,
-    /// Parsed but not acted upon until the security-policy TODO is implemented.
     pub security_policy: Option<SecurityPolicy>,
     pub disable_security_policy_warning: Option<bool>,
 }
@@ -53,20 +53,53 @@ impl Default for AssetConfig {
 }
 
 impl AssetConfig {
-    /// Returns the effective HTTP headers for this asset.
-    /// Security-policy header injection is deferred to the security-policy TODO.
+    /// Returns the effective HTTP headers for this asset, merging any
+    /// `security_policy` standard headers with the user-supplied `headers`
+    /// map. Custom headers win on conflict, compared case-insensitively
+    /// (HTTP header names are case-insensitive).
     pub fn combined_headers(&self) -> Option<HeadersConfig> {
-        self.headers.clone()
+        match (self.headers.as_ref(), self.security_policy) {
+            (None, None) => None,
+            (None, Some(policy)) => Some(policy.to_headers()),
+            (Some(custom), None) => Some(custom.clone()),
+            (Some(custom), Some(policy)) => {
+                let mut headers = custom.clone();
+                let custom_names: HashSet<String> =
+                    custom.keys().map(|k| k.to_lowercase()).collect();
+                for (name, value) in policy.to_headers() {
+                    if !custom_names.contains(&name.to_lowercase()) {
+                        headers.insert(name, value);
+                    }
+                }
+                Some(headers)
+            }
+        }
     }
-}
 
-/// Parsed but not yet acted upon — see the security-policy TODO.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SecurityPolicy {
-    Disabled,
-    Standard,
-    Hardened,
+    /// True when this asset has no security policy configured and the user
+    /// has not opted out of the warning via `disable_security_policy_warning`.
+    pub fn warn_about_no_security_policy(&self) -> bool {
+        self.security_policy.is_none() && self.disable_security_policy_warning != Some(true)
+    }
+
+    /// True when this asset uses the `standard` policy and the user has not
+    /// opted out of the hardening hint.
+    pub fn warn_about_standard_security_policy(&self) -> bool {
+        self.security_policy == Some(SecurityPolicy::Standard)
+            && self.disable_security_policy_warning != Some(true)
+    }
+
+    /// True when this asset declares `hardened` but supplies no custom
+    /// headers — a hard error, not silenceable by the warning flag.
+    pub fn warn_about_missing_hardening_headers(&self) -> bool {
+        let is_hardened = self.security_policy == Some(SecurityPolicy::Hardened);
+        let has_headers = self
+            .headers
+            .as_ref()
+            .map(|h| !h.is_empty())
+            .unwrap_or(false);
+        is_hardened && !has_headers
+    }
 }
 
 // ── Internal types ───────────────────────────────────────────────────────────
@@ -620,5 +653,61 @@ mod tests {
         let ac = load(&d);
         let _ = cfg(&ac, &d, "index.html");
         assert!(ac.get_unused_configs().is_empty());
+    }
+
+    #[test]
+    fn combined_headers_none_when_no_inputs() {
+        assert!(AssetConfig::default().combined_headers().is_none());
+    }
+
+    #[test]
+    fn combined_headers_uses_policy_when_no_custom_headers() {
+        let cfg = AssetConfig {
+            security_policy: Some(SecurityPolicy::Standard),
+            ..AssetConfig::default()
+        };
+        let headers = cfg.combined_headers().unwrap();
+        assert_eq!(headers["X-Frame-Options"], "DENY");
+    }
+
+    #[test]
+    fn combined_headers_merges_custom_and_policy() {
+        let mut custom = HeadersConfig::new();
+        custom.insert("X-Custom".to_string(), "1".to_string());
+        let cfg = AssetConfig {
+            headers: Some(custom),
+            security_policy: Some(SecurityPolicy::Standard),
+            ..AssetConfig::default()
+        };
+        let headers = cfg.combined_headers().unwrap();
+        assert_eq!(headers["X-Custom"], "1");
+        assert_eq!(headers["X-Frame-Options"], "DENY");
+    }
+
+    #[test]
+    fn combined_headers_custom_wins_case_insensitive() {
+        let mut custom = HeadersConfig::new();
+        custom.insert("x-frame-options".to_string(), "SAMEORIGIN".to_string());
+        let cfg = AssetConfig {
+            headers: Some(custom),
+            security_policy: Some(SecurityPolicy::Standard),
+            ..AssetConfig::default()
+        };
+        let headers = cfg.combined_headers().unwrap();
+        // The policy entry (`X-Frame-Options`) must NOT override the custom
+        // lowercase entry — case-insensitive header-name comparison.
+        assert_eq!(headers["x-frame-options"], "SAMEORIGIN");
+        assert!(!headers.contains_key("X-Frame-Options"));
+    }
+
+    #[test]
+    fn combined_headers_disabled_policy_is_empty() {
+        let cfg = AssetConfig {
+            security_policy: Some(SecurityPolicy::Disabled),
+            ..AssetConfig::default()
+        };
+        // Disabled policy carries no headers; with no custom headers, the
+        // result is an empty (but `Some`) map.
+        assert!(cfg.combined_headers().unwrap().is_empty());
     }
 }

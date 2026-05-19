@@ -3,7 +3,7 @@
 //! V2-only port of `ic-asset`'s `sync` flow, simplified:
 //! - synchronous (drives the host's sync `canister-call` import)
 //! - uses `create_chunk` (one-chunk-per-call) — no batched `create_chunks`
-//! - no proposal mode; no security policy
+//! - no proposal mode
 
 use candid::{Nat, Principal};
 use mime::Mime;
@@ -17,6 +17,7 @@ use crate::canister::{
 };
 use crate::content::{encoders_for, Content, Encoder};
 use crate::scan::AssetSource;
+use crate::security_policy::report_security_policy_issues;
 
 // Stay safely under the canister's ingress message limit (~2 MB).
 const MAX_CHUNK_SIZE: usize = 1_900_000;
@@ -80,6 +81,8 @@ pub fn sync<C: CanisterCall>(
 
     let sources = crate::scan::scan(dirs)?;
     println!("found {} file(s) from {:?}", sources.len(), dirs);
+
+    report_security_policy_issues(&sources)?;
 
     let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
         .into_iter()
