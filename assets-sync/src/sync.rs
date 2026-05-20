@@ -383,10 +383,17 @@ fn update_properties(
         let max_age = (project_max_age != canister_props.max_age).then_some(project_max_age);
 
         let project_headers = config.combined_headers().map(sorted_header_pairs);
-        let canister_headers = canister_props
-            .headers
-            .as_ref()
-            .map(|h| sorted_header_pairs(h.iter().map(|(k, v)| (k.clone(), v.clone()))));
+        // The canister auto-injects `Set-Cookie: ic_env=…` on HTML assets via
+        // `on_asset_change`; that header is runtime-managed, not project-managed,
+        // so strip it before comparing or we'd loop emitting drift forever.
+        // After stripping, an otherwise-empty header map normalises to None so
+        // a canister with only Set-Cookie matches a project with no headers.
+        let canister_headers = canister_props.headers.as_ref().and_then(|h| {
+            let pairs = sorted_header_pairs(h.iter().filter_map(|(k, v)| {
+                (!k.eq_ignore_ascii_case("set-cookie")).then(|| (k.clone(), v.clone()))
+            }));
+            (!pairs.is_empty()).then_some(pairs)
+        });
         let headers = (project_headers != canister_headers).then_some(project_headers);
 
         let is_aliased =
@@ -1071,6 +1078,42 @@ mod tests {
             "standard policy CSP header should be present in SetAssetProperties; got: {map:#?}",
         );
         assert_eq!(map.get("X-Frame-Options").copied(), Some("DENY"));
+    }
+
+    #[test]
+    fn update_properties_ignores_canister_managed_set_cookie() {
+        // The canister auto-injects `Set-Cookie: ic_env=…` on HTML assets via
+        // `on_asset_change`. Without filtering, a no-op re-sync of an HTML
+        // asset with no project headers would emit drift every time.
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let mut canister_headers = HashMap::new();
+        canister_headers.insert(
+            "Set-Cookie".to_string(),
+            "ic_env=ic%5Froot%5Fkey%3D; SameSite=Lax".to_string(),
+        );
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: Some(canister_headers),
+                allow_raw_access: Some(true),
+                is_aliased: None,
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        assert!(
+            set_props_ops(&ops).is_empty(),
+            "Set-Cookie is canister-managed and must not trigger drift",
+        );
     }
 
     #[test]
