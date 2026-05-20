@@ -91,17 +91,26 @@ pub fn sync<C: CanisterCall>(
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
 
-    let mut canister_asset_properties: HashMap<String, AssetProperties> = HashMap::new();
-    for key in canister_assets.keys() {
-        let props = get_asset_properties(canister, key)?;
-        canister_asset_properties.insert(key.clone(), props);
-    }
-
     // Phase 1: compute metadata only — no batch created yet.
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
     for source in sources {
         let asset = prepare_asset(source, &canister_assets)?;
         project_assets.insert(asset.source.key.clone(), asset);
+    }
+
+    // Fetch properties only for assets that will survive this sync (present in
+    // both maps with matching content_type). Keys not in the project will be
+    // deleted; keys with content_type drift will be deleted and recreated with
+    // properties set via CreateAssetArguments. Either way, their current
+    // properties don't influence the batch.
+    let mut canister_asset_properties: HashMap<String, AssetProperties> = HashMap::new();
+    for (key, ca) in &canister_assets {
+        if let Some(pa) = project_assets.get(key) {
+            if pa.media_type.to_string() == ca.content_type {
+                let props = get_asset_properties(canister, key)?;
+                canister_asset_properties.insert(key.clone(), props);
+            }
+        }
     }
 
     if build_operations(
@@ -358,7 +367,12 @@ fn build_operations(
 
     // 5. Update properties for assets that already exist on the canister and
     //    whose properties drifted from the project config.
-    update_properties(&mut ops, project_assets, canister_asset_properties);
+    update_properties(
+        &mut ops,
+        project_assets,
+        &canister_assets,
+        canister_asset_properties,
+    );
 
     ops
 }
@@ -368,12 +382,22 @@ fn build_operations(
 // `allow_raw_access`, and `is_aliased` against the project config and push a
 // `SetAssetProperties` op only when at least one field differs. Newly-created
 // assets already get their properties from `CreateAssetArguments`.
+//
+// `canister_assets` is the post-deletion view: keys removed in step 1 (missing
+// from the project, or content_type drift forcing delete-then-create) are
+// absent. Skipping those keys here avoids emitting a redundant
+// `SetAssetProperties` op for an asset whose properties are already being set
+// by `CreateAssetArguments` in this same batch.
 fn update_properties(
     ops: &mut Vec<BatchOperationKind>,
     project_assets: &HashMap<String, ProjectAsset>,
+    canister_assets: &HashMap<String, AssetDetails>,
     canister_asset_properties: &HashMap<String, AssetProperties>,
 ) {
     for (key, pa) in project_assets {
+        if !canister_assets.contains_key(key) {
+            continue;
+        }
         let Some(canister_props) = canister_asset_properties.get(key) else {
             continue;
         };
@@ -389,9 +413,11 @@ fn update_properties(
         // After stripping, an otherwise-empty header map normalises to None so
         // a canister with only Set-Cookie matches a project with no headers.
         let canister_headers = canister_props.headers.as_ref().and_then(|h| {
-            let pairs = sorted_header_pairs(h.iter().filter_map(|(k, v)| {
-                (!k.eq_ignore_ascii_case("set-cookie")).then(|| (k.clone(), v.clone()))
-            }));
+            let pairs = sorted_header_pairs(
+                h.iter()
+                    .filter(|&(k, _v)| !k.eq_ignore_ascii_case("set-cookie"))
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
             (!pairs.is_empty()).then_some(pairs)
         });
         let headers = (project_headers != canister_headers).then_some(project_headers);
@@ -1113,6 +1139,50 @@ mod tests {
         assert!(
             set_props_ops(&ops).is_empty(),
             "Set-Cookie is canister-managed and must not trigger drift",
+        );
+    }
+
+    #[test]
+    fn update_properties_skips_assets_being_recreated_due_to_content_type_drift() {
+        // Asset on canister has a different content_type → step 1 deletes it
+        // and step 2 recreates it with project properties. update_properties
+        // must not emit a redundant SetAssetProperties op for that key, even
+        // if canister_asset_properties still contains pre-deletion data.
+        use crate::config::{AssetConfig, CacheConfig};
+        let config = AssetConfig {
+            cache: Some(CacheConfig {
+                max_age: Some(3600),
+            }),
+            ..AssetConfig::default()
+        };
+        let project = HashMap::from([mk_project_asset_with_config(
+            "/file",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+            config,
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/file",
+            "application/octet-stream",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        // Simulate a caller that captured properties before the deletion was
+        // decided — the function must defend against this.
+        let canister_props = HashMap::from([(
+            "/file".to_string(),
+            AssetProperties {
+                max_age: Some(60),
+                headers: None,
+                allow_raw_access: Some(true),
+                is_aliased: None,
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        assert_eq!(count_op(&ops, "DeleteAsset"), 1);
+        assert_eq!(count_op(&ops, "CreateAsset"), 1);
+        assert!(
+            set_props_ops(&ops).is_empty(),
+            "no SetAssetProperties op when the asset is being recreated in the same batch"
         );
     }
 
