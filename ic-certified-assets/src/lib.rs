@@ -140,15 +140,6 @@ pub fn create_batch() -> CreateBatchResponse {
     })
 }
 
-pub fn create_chunk(arg: CreateChunkArg) -> CreateChunkResponse {
-    let system_context = SystemContext::new();
-
-    with_state_mut(|s| match s.create_chunk(arg, &system_context) {
-        Ok(chunk_id) => CreateChunkResponse { chunk_id },
-        Err(msg) => trap(&msg),
-    })
-}
-
 pub fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
     let system_context = SystemContext::new();
 
@@ -591,12 +582,6 @@ macro_rules! export_canister_methods {
         #[$crate::ic_certified_assets_candid_method(update)]
         fn create_batch() -> types::CreateBatchResponse {
             $crate::create_batch()
-        }
-
-        #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
-        #[$crate::ic_certified_assets_candid_method(update)]
-        fn create_chunk(arg: types::CreateChunkArg) -> types::CreateChunkResponse {
-            $crate::create_chunk(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]

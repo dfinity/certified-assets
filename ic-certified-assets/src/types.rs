@@ -120,17 +120,6 @@ pub struct CreateBatchResponse {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CreateChunkArg {
-    pub batch_id: BatchId,
-    pub content: ByteBuf,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CreateChunkResponse {
-    pub chunk_id: ChunkId,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct CreateChunksArg {
     pub batch_id: BatchId,
     pub content: Vec<ByteBuf>,

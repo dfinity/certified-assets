@@ -6,7 +6,7 @@ use crate::system_context::canister_env::CanisterEnv;
 use crate::system_context::SystemContext;
 use crate::types::{
     AssetProperties, BatchId, BatchOperation, CommitBatchArguments, CreateAssetArguments,
-    CreateChunkArg, DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg, ListRequest,
+    DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg, ListRequest,
     SetAssetContentArguments, SetAssetPropertiesArguments,
 };
 use crate::url::{url_decode, url_encode, UrlDecodeError};
@@ -286,20 +286,15 @@ fn assemble_create_assets_and_set_contents_operations(
         }));
 
         for (enc, chunks) in asset.encodings {
-            let mut chunk_ids = vec![];
-            for chunk in chunks {
-                chunk_ids.push(
-                    state
-                        .create_chunk(
-                            CreateChunkArg {
-                                batch_id: batch_id.clone(),
-                                content: chunk,
-                            },
-                            system_context,
-                        )
-                        .unwrap(),
-                );
-            }
+            let chunk_ids = state
+                .create_chunks(
+                    CreateChunksArg {
+                        batch_id: batch_id.clone(),
+                        content: chunks,
+                    },
+                    system_context,
+                )
+                .unwrap();
 
             operations.push(BatchOperation::SetAssetContent({
                 SetAssetContentArguments {
@@ -362,10 +357,10 @@ fn can_create_assets_using_batch_api() {
 
     // Try to update a completed batch.
     let error_msg = state
-        .create_chunk(
-            CreateChunkArg {
+        .create_chunks(
+            CreateChunksArg {
                 batch_id,
-                content: ByteBuf::new(),
+                content: vec![ByteBuf::new()],
             },
             &system_context,
         )
@@ -626,10 +621,10 @@ fn batches_are_dropped_after_timeout() {
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
 
     let _chunk_1 = state
-        .create_chunk(
-            CreateChunkArg {
+        .create_chunks(
+            CreateChunksArg {
                 batch_id: batch_1.clone(),
-                content: ByteBuf::from(BODY.to_vec()),
+                content: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -639,10 +634,10 @@ fn batches_are_dropped_after_timeout() {
         system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS + 1;
     let _batch_2 = state.create_batch(&system_context);
 
-    match state.create_chunk(
-        CreateChunkArg {
+    match state.create_chunks(
+        CreateChunksArg {
             batch_id: batch_1,
-            content: ByteBuf::from(BODY.to_vec()),
+            content: vec![ByteBuf::from(BODY.to_vec())],
         },
         &system_context,
     ) {
@@ -660,10 +655,10 @@ fn can_delete_batch_with_chunks() {
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     let _chunk_1 = state
-        .create_chunk(
-            CreateChunkArg {
+        .create_chunks(
+            CreateChunksArg {
                 batch_id: batch_1.clone(),
-                content: ByteBuf::from(BODY.to_vec()),
+                content: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -2418,19 +2413,19 @@ mod enforce_limits {
         let batch_2 = state.create_batch(&system_context).unwrap();
 
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_1.clone(),
-                    content: ByteBuf::new(),
+                    content: vec![ByteBuf::new()],
                 },
                 &system_context,
             )
             .unwrap();
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_2.clone(),
-                    content: ByteBuf::new(),
+                    content: vec![ByteBuf::new()],
                 },
                 &system_context,
             )
@@ -2448,10 +2443,10 @@ mod enforce_limits {
             "chunk limit exceeded"
         );
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_2.clone(),
-                    content: ByteBuf::new(),
+                    content: vec![ByteBuf::new()],
                 },
                 &system_context,
             )
@@ -2459,10 +2454,10 @@ mod enforce_limits {
 
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_1,
-                        content: ByteBuf::new(),
+                        content: vec![ByteBuf::new()],
                     },
                     &system_context,
                 )
@@ -2471,10 +2466,10 @@ mod enforce_limits {
         );
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_2.clone(),
-                        content: ByteBuf::new(),
+                        content: vec![ByteBuf::new()],
                     },
                     &system_context,
                 )
@@ -2528,10 +2523,10 @@ mod enforce_limits {
             .unwrap();
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_2.clone(),
-                        content: ByteBuf::from(c2),
+                        content: vec![ByteBuf::from(c2)],
                     },
                     &system_context,
                 )
@@ -2539,20 +2534,20 @@ mod enforce_limits {
             "byte limit exceeded"
         );
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_2.clone(),
-                    content: ByteBuf::from(c3),
+                    content: vec![ByteBuf::from(c3)],
                 },
                 &system_context,
             )
             .unwrap();
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_1,
-                        content: ByteBuf::from(c4),
+                        content: vec![ByteBuf::from(c4)],
                     },
                     &system_context,
                 )
@@ -2957,11 +2952,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CONTENT),
+                    content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
             )
@@ -2972,7 +2967,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id],
+                chunk_ids,
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
@@ -3004,11 +2999,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CONTENT),
+                    content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
             )
@@ -3019,7 +3014,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id],
+                chunk_ids,
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
             },
@@ -3051,11 +3046,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CONTENT),
+                    content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
             )
@@ -3066,7 +3061,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id],
+                chunk_ids,
                 last_chunk: None,
                 sha256: None,
             },
@@ -3111,20 +3106,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunks
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id_1 = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CHUNK_1),
-                },
-                &system_context,
-            )
-            .unwrap();
-        let chunk_id_2 = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CHUNK_2),
+                    content: vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
                 },
                 &system_context,
             )
@@ -3135,7 +3121,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id_1, chunk_id_2],
+                chunk_ids,
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
@@ -3171,11 +3157,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id_1 = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CHUNK_1),
+                    content: vec![ByteBuf::from(CHUNK_1)],
                 },
                 &system_context,
             )
@@ -3186,7 +3172,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id_1],
+                chunk_ids,
                 last_chunk: Some(ByteBuf::from(LAST_CHUNK)),
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
@@ -3208,11 +3194,11 @@ mod compute_state_hash {
 
         // Setup state
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(b"content1"),
+                    content: vec![ByteBuf::from(b"content1")],
                 },
                 &system_context,
             )
@@ -3232,7 +3218,7 @@ mod compute_state_hash {
                 BatchOperation::SetAssetContent(SetAssetContentArguments {
                     key: "asset1".to_string(),
                     content_encoding: "identity".to_string(),
-                    chunk_ids: vec![chunk_id],
+                    chunk_ids,
                     last_chunk: None,
                     sha256: None,
                 }),

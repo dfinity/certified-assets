@@ -110,14 +110,14 @@ struct CreateBatchResponse {
 }
 
 #[derive(CandidType, Debug)]
-struct CreateChunkRequest<'a> {
+struct CreateChunksRequest<'a> {
     batch_id: Nat,
-    content: &'a [u8],
+    content: Vec<&'a [u8]>,
 }
 
 #[derive(CandidType, Debug, Deserialize)]
-struct CreateChunkResponse {
-    chunk_id: Nat,
+struct CreateChunksResponse {
+    chunk_ids: Vec<Nat>,
 }
 
 #[derive(CandidType, Debug)]
@@ -193,13 +193,17 @@ pub fn create_batch(c: &impl CanisterCall) -> Result<Nat, String> {
     Ok(resp.batch_id)
 }
 
-pub fn create_chunk(c: &impl CanisterCall, batch_id: &Nat, content: &[u8]) -> Result<Nat, String> {
-    let req = CreateChunkRequest {
+pub fn create_chunks(
+    c: &impl CanisterCall,
+    batch_id: &Nat,
+    content: &[&[u8]],
+) -> Result<Vec<Nat>, String> {
+    let req = CreateChunksRequest {
         batch_id: batch_id.clone(),
-        content,
+        content: content.to_vec(),
     };
-    let resp: CreateChunkResponse = c.call("create_chunk", req, CallType::Update, true)?;
-    Ok(resp.chunk_id)
+    let resp: CreateChunksResponse = c.call("create_chunks", req, CallType::Update, true)?;
+    Ok(resp.chunk_ids)
 }
 
 pub fn commit_batch(c: &impl CanisterCall, args: CommitBatchArguments) -> Result<(), String> {

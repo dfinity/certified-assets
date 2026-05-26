@@ -672,17 +672,6 @@ impl State {
         Ok(batch_id)
     }
 
-    pub fn create_chunk(
-        &mut self,
-        arg: CreateChunkArg,
-        system_context: &SystemContext,
-    ) -> Result<ChunkId, String> {
-        let ids = self.create_chunks_helper(arg.batch_id, vec![arg.content], system_context)?;
-        ids.into_iter()
-            .next()
-            .ok_or_else(|| "Bug: created chunk did not return a chunk id.".to_string())
-    }
-
     pub fn create_chunks(
         &mut self,
         CreateChunksArg {

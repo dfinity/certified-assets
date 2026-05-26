@@ -2,7 +2,7 @@
 //!
 //! V2-only port of `ic-asset`'s `sync` flow, simplified:
 //! - synchronous (drives the host's sync `canister-call` import)
-//! - uses `create_chunk` (one-chunk-per-call) — no batched `create_chunks`
+//! - uploads one chunk per `create_chunks` call (no client-side batching)
 //! - no proposal mode
 
 use candid::{Nat, Principal};
@@ -10,7 +10,7 @@ use mime::Mime;
 use std::collections::HashMap;
 
 use crate::canister::{
-    api_version, commit_batch, create_batch, create_chunk, get_asset_properties,
+    api_version, commit_batch, create_batch, create_chunks, get_asset_properties,
     grant_permission_via_proxy, list_assets, list_permitted, AssetDetails, AssetProperties,
     BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
     DeleteAssetArguments, Permission, SetAssetContentArguments, SetAssetPropertiesArguments,
@@ -258,14 +258,17 @@ fn upload_chunks<C: CanisterCall>(
     data: &[u8],
 ) -> Result<Vec<Nat>, String> {
     if data.is_empty() {
-        let id = create_chunk(canister, batch_id, &[])?;
+        let ids = create_chunks(canister, batch_id, &[&[]])?;
         println!("  {key}{} 1/1 (0 bytes)", encoding_suffix(encoding));
-        return Ok(vec![id]);
+        return Ok(ids);
     }
     let total = data.len().div_ceil(MAX_CHUNK_SIZE);
     let mut ids = Vec::with_capacity(total);
     for (i, chunk) in data.chunks(MAX_CHUNK_SIZE).enumerate() {
-        let id = create_chunk(canister, batch_id, chunk)?;
+        let mut got = create_chunks(canister, batch_id, &[chunk])?;
+        let id = got
+            .pop()
+            .ok_or_else(|| "create_chunks returned no chunk id".to_string())?;
         println!(
             "  {key}{} {}/{} ({} bytes)",
             encoding_suffix(encoding),
@@ -470,10 +473,10 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
 
-    // Mirrors the private CreateChunkResponse — same field name produces the same Candid encoding.
+    // Mirrors the private CreateChunksResponse — same field name produces the same Candid encoding.
     #[derive(CandidType)]
-    struct MockChunkResponse {
-        chunk_id: Nat,
+    struct MockChunksResponse {
+        chunk_ids: Vec<Nat>,
     }
 
     struct ChunkCounter(Cell<u32>);
@@ -484,11 +487,11 @@ mod tests {
             A: CandidType,
             R: CandidType + DeserializeOwned,
         {
-            assert_eq!(method, "create_chunk");
+            assert_eq!(method, "create_chunks");
             let id = self.0.get();
             self.0.set(id + 1);
-            let bytes = candid::encode_one(MockChunkResponse {
-                chunk_id: Nat::from(id),
+            let bytes = candid::encode_one(MockChunksResponse {
+                chunk_ids: vec![Nat::from(id)],
             })
             .map_err(|e| e.to_string())?;
             candid::decode_one(&bytes).map_err(|e| e.to_string())

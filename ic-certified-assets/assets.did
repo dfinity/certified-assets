@@ -171,7 +171,7 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
   }) query;
 
   // if get() returned chunks > 1, call this to retrieve them.
-  // chunks may or may not be split up at the same boundaries as presented to create_chunk().
+  // chunks may or may not be split up at the same boundaries as presented to create_chunks().
   get_chunk: (record {
     key: Key;
     content_encoding: text;
@@ -201,7 +201,6 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
 
   create_batch : (record {}) -> (record { batch_id: BatchId });
 
-  create_chunk: (record { batch_id: BatchId; content: blob }) -> (record { chunk_id: ChunkId });
   create_chunks: (record { batch_id: BatchId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });
 
   // Perform all operations successfully, or reject

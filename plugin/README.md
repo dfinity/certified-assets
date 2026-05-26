@@ -38,7 +38,7 @@ The current implementation supports the V2 protocol of the assets canister (tran
 - Walks each directory passed via the manifest's `dirs:` setting; dotfiles are skipped.
 - Detects the MIME type of each file and computes encodings: `gzip` for all `text/*`, `*/javascript`, and `*/html` types (only if the compressed output is smaller), `identity` for everything.
 - Diffs against `list_assets()`: skips encodings already in place (matched by sha256), unsets encodings that are stale, and deletes assets that have been removed or whose `content_type` changed.
-- Opens a transaction (`create_batch`), uploads each content chunk via `create_chunk` (one canister call per chunk, 1.9 MB max), then commits all operations atomically with a single `commit_batch` call.
+- Opens a transaction (`create_batch`), uploads each content chunk via `create_chunks` (one chunk per call, 1.9 MB max), then commits all operations atomically with a single `commit_batch` call.
 - In normal mode all canister calls use `direct: true`. In proxy mode (when a `proxy_canister_id` is provided by the host) the plugin first ensures the signing identity has `Commit` permission, routing a `grant_permission` call through the proxy (which is the canister's controller) if needed, then proceeds with direct calls.
 
 The plugin calls `api_version` first and aborts if the canister advertises anything below 2.
