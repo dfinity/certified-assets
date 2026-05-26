@@ -15,7 +15,7 @@ Defined in `src/types.rs`:
 
 ```
 Permission::Commit            — create/update/delete assets, commit batches
-Permission::Prepare           — create batches and chunks, propose batches
+Permission::Prepare           — create batches and chunks
 Permission::ManagePermissions — grant and revoke permissions for others
 ```
 
@@ -64,9 +64,6 @@ These are serialised to `StableStatePermissionsV2` on upgrade and restored in
 | `delete_asset` | `Commit` |
 | `clear` | `Commit` |
 | `commit_batch` | `Commit` |
-| `propose_commit_batch` | `Prepare` (or `Commit`) |
-| `compute_evidence` | `Prepare` (or `Commit`) |
-| `commit_proposed_batch` | `Commit` |
 | `delete_batch` | `Prepare` (or `Commit`) |
 | `set_asset_properties` | `Commit` |
 | `configure` | `Commit` |

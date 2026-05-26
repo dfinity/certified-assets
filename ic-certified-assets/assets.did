@@ -52,16 +52,6 @@ type CommitBatchArguments = record {
   operations: vec BatchOperationKind
 };
 
-type CommitProposedBatchArguments = record {
-  batch_id: BatchId;
-  evidence: blob;
-};
-
-type ComputeEvidenceArguments = record {
-  batch_id: BatchId;
-  max_iterations: opt nat16
-};
-
 type DeleteBatchArguments = record {
   batch_id: BatchId;
 };
@@ -217,22 +207,13 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
   // Perform all operations successfully, or reject
   commit_batch: (CommitBatchArguments) -> ();
 
-  // Save the batch operations for later commit
-  propose_commit_batch: (CommitBatchArguments) -> ();
-
-  // Given a batch already proposed, perform all operations successfully, or reject
-  commit_proposed_batch: (CommitProposedBatchArguments) -> ();
-
-  // Compute a hash over the CommitBatchArguments.  Call until it returns Some(evidence).
-  compute_evidence: (ComputeEvidenceArguments) -> (opt blob);
-
   // Compute a hash over the canister content.  Call until it returns Some(hash).
   compute_state_hash: () -> (opt text);
 
   // Get information about the current state of the canister
   get_state_info: () -> (StateInfo) query;
 
-  // Delete a batch that has been created, or proposed for commit, but not yet committed
+  // Delete a batch that has been created but not yet committed
   delete_batch: (DeleteBatchArguments) -> ();
 
   create_asset: (CreateAssetArguments) -> ();
@@ -277,6 +258,5 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
   validate_grant_permission: (GrantPermission) -> (ValidationResult);
   validate_revoke_permission: (RevokePermission) -> (ValidationResult);
   validate_take_ownership: () -> (ValidationResult);
-  validate_commit_proposed_batch: (CommitProposedBatchArguments) -> (ValidationResult);
   validate_configure: (ConfigureArguments) -> (ValidationResult);
 }

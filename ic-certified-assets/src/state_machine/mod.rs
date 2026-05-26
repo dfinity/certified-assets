@@ -26,7 +26,7 @@ use crate::{
         CertifiedResponses,
     },
     cookies::add_ic_env_cookie,
-    evidence::EvidenceComputation::{self, Computed},
+    state_hash::StateHashComputation,
     system_context::SystemContext,
     types::*,
     url::url_decode,
@@ -71,8 +71,6 @@ pub fn encoding_certification_order<'a>(
 const DEFAULT_ALIAS_ENABLED: bool = true;
 
 const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
-
-const DEFAULT_MAX_COMPUTE_EVIDENCE_ITERATIONS: u16 = 20;
 
 type Timestamp = Int;
 
@@ -206,8 +204,6 @@ pub struct Chunk {
 
 pub struct Batch {
     pub expires_at: Timestamp,
-    pub commit_batch_arguments: Option<CommitBatchArguments>,
-    pub evidence_computation: Option<EvidenceComputation>,
     pub chunk_content_total_size: usize,
 }
 
@@ -274,17 +270,6 @@ pub enum CommitBatchProgress {
     },
 }
 
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Default)]
-pub enum CommitProposedBatchProgress {
-    #[default]
-    Starting,
-    InProgress {
-        commit_batch_args: CommitBatchArguments,
-        commit_batch_progress: CommitBatchProgress,
-    },
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct Configuration {
     pub max_batches: Option<u64>,
@@ -312,7 +297,7 @@ pub struct State {
 
     encoded_canister_env: String,
 
-    state_hash_computation: Option<EvidenceComputation>,
+    state_hash_computation: Option<StateHashComputation>,
     last_state_update_timestamp_ns: u64,
     last_state_hash_timestamp: u64,
 }
@@ -664,27 +649,9 @@ impl State {
 
     pub fn create_batch(&mut self, system_context: &SystemContext) -> Result<BatchId, String> {
         let now = system_context.current_timestamp_ns;
-        self.batches.retain(|_, b| {
-            b.expires_at > now || matches!(b.evidence_computation, Some(Computed(_)))
-        });
+        self.batches.retain(|_, b| b.expires_at > now);
         self.chunks
             .retain(|_, c| self.batches.contains_key(&c.batch_id));
-
-        if let Some((batch_id, batch)) = self
-            .batches
-            .iter()
-            .find(|(_batch_id, batch)| batch.commit_batch_arguments.is_some())
-        {
-            let message = match batch.evidence_computation {
-                Some(Computed(_)) => format!(
-                    "Batch {batch_id} is already proposed.  Delete or execute it to propose another."
-                ),
-                _ => format!(
-                    "Batch {batch_id} has not completed evidence computation.  Wait for it to expire or delete it to propose another."
-                ),
-            };
-            return Err(message);
-        }
 
         if let Some(max_batches) = self.configuration.max_batches {
             if self.batches.len() as u64 >= max_batches {
@@ -698,8 +665,6 @@ impl State {
             batch_id.clone(),
             Batch {
                 expires_at: Int::from(now + BATCH_EXPIRY_NANOS),
-                commit_batch_arguments: None,
-                evidence_computation: None,
                 chunk_content_total_size: 0,
             },
         );
@@ -741,9 +706,6 @@ impl State {
             .batches
             .get_mut(&batch_id)
             .ok_or_else(|| "batch not found".to_string())?;
-        if batch.commit_batch_arguments.is_some() {
-            return Err(format!("batch {batch_id} has been proposed"));
-        }
 
         batch.expires_at = Int::from(system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS);
 
@@ -1026,170 +988,28 @@ impl State {
         }
     }
 
-    pub fn propose_commit_batch(&mut self, arg: CommitBatchArguments) -> Result<(), String> {
-        let batch = self
-            .batches
-            .get_mut(&arg.batch_id)
-            .expect("batch not found");
-        if batch.commit_batch_arguments.is_some() {
-            return Err(format!(
-                "batch {} already has proposed CommitBatchArguments",
-                arg.batch_id
-            ));
-        };
-        batch.commit_batch_arguments = Some(arg);
-        Ok(())
-    }
-
-    pub fn commit_proposed_batch(
-        &mut self,
-        arg: &CommitProposedBatchArguments,
-        progress: CommitProposedBatchProgress,
-        system_context: &SystemContext,
-    ) -> ComputationStatus<(), CommitProposedBatchProgress, String> {
-        match progress {
-            CommitProposedBatchProgress::Starting => {
-                if let Err(e) = self.validate_commit_proposed_batch_args(arg) {
-                    return ComputationStatus::Error(e);
-                }
-                let batch = self.batches.get_mut(&arg.batch_id).unwrap();
-                let commit_batch_args = batch.commit_batch_arguments.take().unwrap();
-
-                match self.commit_batch(
-                    &commit_batch_args,
-                    CommitBatchProgress::default(),
-                    system_context,
-                ) {
-                    ComputationStatus::Done(()) => ComputationStatus::Done(()),
-                    ComputationStatus::InProgress(commit_batch_progress) => {
-                        ComputationStatus::InProgress(CommitProposedBatchProgress::InProgress {
-                            commit_batch_args,
-                            commit_batch_progress,
-                        })
-                    }
-                    ComputationStatus::Error(e) => ComputationStatus::Error(e),
-                }
-            }
-            CommitProposedBatchProgress::InProgress {
-                commit_batch_args,
-                commit_batch_progress,
-            } => {
-                match self.commit_batch(&commit_batch_args, commit_batch_progress, system_context) {
-                    ComputationStatus::Done(()) => ComputationStatus::Done(()),
-                    ComputationStatus::InProgress(progress) => {
-                        ComputationStatus::InProgress(CommitProposedBatchProgress::InProgress {
-                            commit_batch_args,
-                            commit_batch_progress: progress,
-                        })
-                    }
-                    ComputationStatus::Error(e) => ComputationStatus::Error(e),
-                }
-            }
-        }
-    }
-
-    pub fn validate_commit_proposed_batch(
-        &self,
-        arg: CommitProposedBatchArguments,
-    ) -> Result<String, String> {
-        self.validate_commit_proposed_batch_args(&arg)?;
-        Ok(format!(
-            "commit proposed batch {} with evidence {}",
-            arg.batch_id,
-            hex::encode(arg.evidence)
-        ))
-    }
-
-    fn validate_commit_proposed_batch_args(
-        &self,
-        arg: &CommitProposedBatchArguments,
-    ) -> Result<(), String> {
-        let batch = self.batches.get(&arg.batch_id).ok_or("batch not found")?;
-        if batch.commit_batch_arguments.is_none() {
-            return Err("batch does not have CommitBatchArguments".to_string());
-        };
-        let evidence = if let Some(Computed(evidence)) = &batch.evidence_computation {
-            evidence.clone()
-        } else {
-            return Err("batch does not have computed evidence".to_string());
-        };
-        if evidence != arg.evidence {
-            return Err(format!(
-                "batch computed evidence {} does not match presented evidence {}",
-                hex::encode(evidence),
-                hex::encode(&arg.evidence)
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn compute_evidence(
-        &mut self,
-        arg: &ComputeEvidenceArguments,
-    ) -> ComputationStatus<ByteBuf, (), String> {
-        let batch = match self.batches.get_mut(&arg.batch_id) {
-            Some(b) => b,
-            None => return ComputationStatus::Error("batch not found".to_string()),
-        };
-
-        let cba = match batch.commit_batch_arguments.as_ref() {
-            Some(cba) => cba,
-            None => {
-                return ComputationStatus::Error(
-                    "batch does not have CommitBatchArguments".to_string(),
-                );
-            }
-        };
-
-        let max_iterations = arg
-            .max_iterations
-            .unwrap_or(DEFAULT_MAX_COMPUTE_EVIDENCE_ITERATIONS);
-
-        let mut ec = batch.evidence_computation.take().unwrap_or_default();
-        for _ in 0..max_iterations {
-            ec = ec.advance(cba, &self.chunks);
-            if matches!(ec, Computed(_)) {
-                break;
-            }
-        }
-        batch.evidence_computation = Some(ec);
-
-        match &batch.evidence_computation {
-            Some(Computed(evidence)) => ComputationStatus::Done(evidence.clone()),
-            _ => ComputationStatus::InProgress(()),
-        }
-    }
-
     pub fn compute_state_hash(&mut self) -> ComputationStatus<String, (), ()> {
         if self.last_state_hash_timestamp != self.last_state_update_timestamp_ns {
             self.state_hash_computation = None;
             self.last_state_hash_timestamp = self.last_state_update_timestamp_ns;
         }
 
-        if let Some(EvidenceComputation::Computed(evidence)) = &self.state_hash_computation {
+        if let Some(StateHashComputation::Computed(evidence)) = &self.state_hash_computation {
             return ComputationStatus::Done(hex::encode(evidence.as_slice()));
         }
 
-        let mut ec = self.state_hash_computation.take().unwrap_or_else(|| {
-            let mut sorted_keys: Vec<_> = self.assets.keys().cloned().collect();
-            sorted_keys.sort();
-            EvidenceComputation::Virtual {
-                sorted_keys,
-                current_key_index: 0,
-                state: crate::evidence::VirtualState::CreateAsset,
-                hasher: sha2::Sha256::new(),
-            }
-        });
-
-        // Advance one step
-        ec = ec.advance_virtual(self);
+        let ec = self
+            .state_hash_computation
+            .take()
+            .unwrap_or_else(|| StateHashComputation::new(self));
+        let ec = ec.advance(self);
         self.state_hash_computation = Some(ec);
         ComputationStatus::InProgress(())
     }
 
     pub fn get_state_info(&self) -> StateInfo {
         let state_hash =
-            if let Some(EvidenceComputation::Computed(evidence)) = &self.state_hash_computation {
+            if let Some(StateHashComputation::Computed(evidence)) = &self.state_hash_computation {
                 Some(hex::encode(evidence.as_slice()))
             } else {
                 None

@@ -1,7 +1,7 @@
 //! This module declares canister methods expected by the assets canister client.
 pub mod asset_certification;
 mod cookies;
-pub mod evidence;
+pub mod state_hash;
 pub mod state_machine;
 pub mod system_context;
 pub mod types;
@@ -32,8 +32,6 @@ pub use candid::candid_method as ic_certified_assets_candid_method;
 pub use ic_cdk::query as ic_certified_assets_query;
 #[doc(hidden)]
 pub use ic_cdk::update as ic_certified_assets_update;
-#[doc(hidden)]
-pub use serde_bytes::ByteBuf as ic_certified_assets_ByteBuf;
 
 pub static SUPPORTED_CERTIFICATE_VERSIONS: [u8; 3] = *b"1,2";
 
@@ -217,26 +215,6 @@ pub async fn commit_batch(arg: CommitBatchArguments) {
     with_state_mut(|s| certified_data_set(s.root_hash()));
 }
 
-pub fn propose_commit_batch(arg: CommitBatchArguments) {
-    with_state_mut(|s| {
-        if let Err(msg) = s.propose_commit_batch(arg) {
-            trap(&msg);
-        }
-        certified_data_set(s.root_hash());
-    });
-}
-
-pub async fn compute_evidence(
-    arg: ComputeEvidenceArguments,
-) -> Option<ic_certified_assets_ByteBuf> {
-    let arg_ref = &arg;
-    loop_with_message_extension_until_completion(|_progress| {
-        with_state_mut(|s| s.compute_evidence(arg_ref))
-    })
-    .await
-    .ok()
-}
-
 pub async fn compute_state_hash() -> Option<String> {
     loop_with_message_extension_until_completion(|_progress| {
         with_state_mut(|s| s.compute_state_hash())
@@ -247,24 +225,6 @@ pub async fn compute_state_hash() -> Option<String> {
 
 pub fn get_state_info() -> StateInfo {
     with_state(|s| s.get_state_info())
-}
-
-pub async fn commit_proposed_batch(arg: CommitProposedBatchArguments) {
-    let system_context = SystemContext::new();
-    let arg_ref = &arg;
-
-    loop_with_message_extension_until_completion(|progress| {
-        with_state_mut(|s| s.commit_proposed_batch(arg_ref, progress, &system_context))
-    })
-    .await
-    .map_err(|msg| trap(&msg))
-    .ok();
-
-    with_state_mut(|s| certified_data_set(s.root_hash()));
-}
-
-pub fn validate_commit_proposed_batch(arg: CommitProposedBatchArguments) -> Result<String, String> {
-    with_state_mut(|s| s.validate_commit_proposed_batch(arg))
 }
 
 pub fn delete_batch(arg: DeleteBatchArguments) {
@@ -477,7 +437,6 @@ where
 macro_rules! export_canister_methods {
     () => {
         use $crate::asset_certification;
-        use $crate::ic_certified_assets_ByteBuf;
         use $crate::state_machine;
         use $crate::types;
 
@@ -682,20 +641,6 @@ macro_rules! export_canister_methods {
             $crate::commit_batch(arg).await
         }
 
-        #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
-        #[$crate::ic_certified_assets_candid_method(update)]
-        fn propose_commit_batch(arg: types::CommitBatchArguments) {
-            $crate::propose_commit_batch(arg)
-        }
-
-        #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
-        #[$crate::ic_certified_assets_candid_method(update)]
-        async fn compute_evidence(
-            arg: types::ComputeEvidenceArguments,
-        ) -> Option<ic_certified_assets_ByteBuf> {
-            $crate::compute_evidence(arg).await
-        }
-
         #[$crate::ic_certified_assets_update]
         #[$crate::ic_certified_assets_candid_method(update)]
         async fn compute_state_hash() -> Option<String> {
@@ -706,20 +651,6 @@ macro_rules! export_canister_methods {
         #[$crate::ic_certified_assets_candid_method(query)]
         fn get_state_info() -> types::StateInfo {
             $crate::get_state_info()
-        }
-
-        #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
-        #[$crate::ic_certified_assets_candid_method(update)]
-        async fn commit_proposed_batch(arg: types::CommitProposedBatchArguments) {
-            $crate::commit_proposed_batch(arg).await
-        }
-
-        #[$crate::ic_certified_assets_update]
-        #[$crate::ic_certified_assets_candid_method(update)]
-        fn validate_commit_proposed_batch(
-            arg: types::CommitProposedBatchArguments,
-        ) -> Result<String, String> {
-            $crate::validate_commit_proposed_batch(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
