@@ -1,9 +1,7 @@
 //! This module contains a pure implementation of the certified assets state machine.
 
-mod v1;
 mod v2;
 
-pub use v1::StableStateV1;
 pub use v2::StableStateV2;
 
 // NB. This module should not depend on ic_cdk, it contains only pure state transition functions.

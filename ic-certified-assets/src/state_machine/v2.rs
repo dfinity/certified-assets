@@ -4,17 +4,12 @@ use candid::Principal;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
-use super::v1::{
-    StableAssetEncodingV1, StableAssetV1, StableConfigurationV1, StableStatePermissionsV1,
-    StableStateV1,
-};
 use crate::{
     asset_certification::types::{certification::CertificateExpression, rc_bytes::RcBytes},
     state_machine::Timestamp,
     types::BatchId,
 };
 
-/// Same as [StableStateV1] but serde-serializable
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableStateV2 {
     pub(super) authorized: Vec<Principal>, // ignored if permissions is Some(_)
@@ -24,23 +19,6 @@ pub struct StableStateV2 {
     pub(super) next_batch_id: Option<u64>,
     pub(super) configuration: Option<StableConfigurationV2>,
     pub(super) last_state_update_timestamp: Option<u64>,
-}
-
-impl From<StableStateV1> for StableStateV2 {
-    fn from(stable_state: StableStateV1) -> Self {
-        Self {
-            authorized: stable_state.authorized,
-            permissions: stable_state.permissions.map(Into::into),
-            stable_assets: stable_state
-                .stable_assets
-                .into_iter()
-                .map(|(k, v)| (k, v.into()))
-                .collect(),
-            next_batch_id: stable_state.next_batch_id.map(batch_id_to_u64),
-            configuration: stable_state.configuration.map(Into::into),
-            last_state_update_timestamp: None,
-        }
-    }
 }
 
 impl From<super::State> for StableStateV2 {
@@ -65,22 +43,11 @@ impl From<super::State> for StableStateV2 {
     }
 }
 
-/// Same as [StableStatePermissionsV1] but serde-serializable
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableStatePermissionsV2 {
     pub(super) commit: BTreeSet<Principal>,
     pub(super) prepare: BTreeSet<Principal>,
     pub(super) manage_permissions: BTreeSet<Principal>,
-}
-
-impl From<StableStatePermissionsV1> for StableStatePermissionsV2 {
-    fn from(stable_state_permissions: StableStatePermissionsV1) -> Self {
-        Self {
-            commit: stable_state_permissions.commit,
-            prepare: stable_state_permissions.prepare,
-            manage_permissions: stable_state_permissions.manage_permissions,
-        }
-    }
 }
 
 /// Same as [super::Configuration] but serde-serializable
@@ -93,16 +60,6 @@ pub struct StableConfigurationV2 {
 
 impl From<super::Configuration> for StableConfigurationV2 {
     fn from(configuration: super::Configuration) -> Self {
-        Self {
-            max_batches: configuration.max_batches,
-            max_chunks: configuration.max_chunks,
-            max_bytes: configuration.max_bytes,
-        }
-    }
-}
-
-impl From<StableConfigurationV1> for StableConfigurationV2 {
-    fn from(configuration: StableConfigurationV1) -> Self {
         Self {
             max_batches: configuration.max_batches,
             max_chunks: configuration.max_chunks,
@@ -149,23 +106,6 @@ impl From<super::Asset> for StableAssetV2 {
     }
 }
 
-impl From<StableAssetV1> for StableAssetV2 {
-    fn from(asset: StableAssetV1) -> Self {
-        Self {
-            content_type: asset.content_type,
-            encodings: asset
-                .encodings
-                .into_iter()
-                .map(|(k, v)| (k, v.into()))
-                .collect(),
-            max_age: asset.max_age,
-            headers: asset.headers.map(|h| h.into_iter().collect()),
-            is_aliased: asset.is_aliased,
-            allow_raw_access: asset.allow_raw_access,
-        }
-    }
-}
-
 impl From<StableAssetV2> for super::Asset {
     fn from(stable_asset: StableAssetV2) -> Self {
         Self {
@@ -197,20 +137,6 @@ pub struct StableAssetEncodingV2 {
 
 impl From<super::AssetEncoding> for StableAssetEncodingV2 {
     fn from(asset_encoding: super::AssetEncoding) -> Self {
-        Self {
-            modified: timestamp_to_u64(asset_encoding.modified),
-            content_chunks: asset_encoding.content_chunks,
-            total_length: asset_encoding.total_length,
-            certified: asset_encoding.certified,
-            sha256: asset_encoding.sha256,
-            certificate_expression: asset_encoding.certificate_expression,
-            response_hashes: asset_encoding.response_hashes,
-        }
-    }
-}
-
-impl From<StableAssetEncodingV1> for StableAssetEncodingV2 {
-    fn from(asset_encoding: StableAssetEncodingV1) -> Self {
         Self {
             modified: timestamp_to_u64(asset_encoding.modified),
             content_chunks: asset_encoding.content_chunks,
