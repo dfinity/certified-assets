@@ -64,13 +64,13 @@ pub struct SetAssetPropertiesArguments {
     pub is_aliased: Option<Option<bool>>,
 }
 
-#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
 pub enum RulePattern {
     Exact(String),
     Subtree(String),
 }
 
-#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct RedirectRule {
     pub from: RulePattern,
     pub to: String,
@@ -237,6 +237,10 @@ pub fn get_asset_properties(c: &impl CanisterCall, key: &str) -> Result<AssetPro
         CallType::Query,
         true,
     )
+}
+
+pub fn get_redirect_rules(c: &impl CanisterCall) -> Result<Vec<RedirectRule>, String> {
+    c.call("get_redirect_rules", (), CallType::Query, true)
 }
 
 pub fn list_permitted(
