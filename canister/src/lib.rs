@@ -1,7 +1,24 @@
 mod state;
 
-use ic_cdk::{init, post_upgrade, pre_upgrade};
-use ic_certified_assets::types::AssetCanisterArgs;
+use candid::{candid_method, Principal};
+use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
+use ic_certified_assets::{
+    asset::{AssetDetails, EncodedAsset},
+    can_commit, can_prepare,
+    certification::AssetKey,
+    http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
+    is_controller, is_manager_or_controller,
+    rc_bytes::RcBytes,
+    state::CertifiedTree,
+    types::{
+        AssetCanisterArgs, AssetProperties, CommitBatchArguments, ConfigurationResponse,
+        ConfigureArguments, CreateAssetArguments, CreateBatchResponse, CreateChunksArg,
+        CreateChunksResponse, DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg,
+        GetChunkResponse, GrantPermissionArguments, ListPermittedArguments, ListRequest,
+        RevokePermissionArguments, SetAssetContentArguments, SetAssetPropertiesArguments,
+        StateInfo, StoreArg, UnsetAssetContentArguments,
+    },
+};
 
 use crate::state::{load_stable_state, save_stable_state};
 
@@ -22,4 +39,242 @@ fn post_upgrade(args: Option<AssetCanisterArgs>) {
     ic_certified_assets::post_upgrade(stable_state, args);
 }
 
-ic_certified_assets::export_canister_methods!();
+#[cfg(target_arch = "wasm32")]
+#[unsafe(link_section = "icp:public supported_certificate_versions")]
+static CERTIFICATE_VERSIONS: [u8; 3] = ic_certified_assets::SUPPORTED_CERTIFICATE_VERSIONS;
+
+// Query methods
+
+#[query]
+#[candid_method(query)]
+fn api_version() -> u16 {
+    ic_certified_assets::api_version()
+}
+
+#[query]
+#[candid_method(query)]
+fn retrieve(key: AssetKey) -> RcBytes {
+    ic_certified_assets::retrieve(key)
+}
+
+#[query]
+#[candid_method(query)]
+fn get(arg: GetArg) -> EncodedAsset {
+    ic_certified_assets::get(arg)
+}
+
+#[query]
+#[candid_method(query)]
+fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
+    ic_certified_assets::get_chunk(arg)
+}
+
+#[query]
+#[candid_method(query)]
+fn list(request: ListRequest) -> Vec<AssetDetails> {
+    ic_certified_assets::list(request)
+}
+
+#[query]
+#[candid_method(query)]
+fn certified_tree() -> CertifiedTree {
+    ic_certified_assets::certified_tree()
+}
+
+#[query]
+#[candid_method(query)]
+fn http_request(req: HttpRequest) -> HttpResponse {
+    ic_certified_assets::http_request(req)
+}
+
+#[query]
+#[candid_method(query)]
+fn http_request_streaming_callback(
+    token: StreamingCallbackToken,
+) -> StreamingCallbackHttpResponse {
+    ic_certified_assets::http_request_streaming_callback(token)
+}
+
+#[query]
+#[candid_method(query)]
+fn get_asset_properties(key: AssetKey) -> AssetProperties {
+    ic_certified_assets::get_asset_properties(key)
+}
+
+#[query]
+#[candid_method(query)]
+fn get_state_info() -> StateInfo {
+    ic_certified_assets::get_state_info()
+}
+
+// Update methods
+
+#[update(guard = "is_manager_or_controller")]
+#[candid_method(update)]
+fn authorize(other: Principal) {
+    ic_certified_assets::authorize(other)
+}
+
+#[update(guard = "is_manager_or_controller")]
+#[candid_method(update)]
+fn grant_permission(arg: GrantPermissionArguments) {
+    ic_certified_assets::grant_permission(arg)
+}
+
+#[update]
+#[candid_method(update)]
+async fn validate_grant_permission(arg: GrantPermissionArguments) -> Result<String, String> {
+    ic_certified_assets::validate_grant_permission(arg).await
+}
+
+#[update]
+#[candid_method(update)]
+async fn deauthorize(other: Principal) {
+    ic_certified_assets::deauthorize(other).await
+}
+
+#[update]
+#[candid_method(update)]
+async fn revoke_permission(arg: RevokePermissionArguments) {
+    ic_certified_assets::revoke_permission(arg).await
+}
+
+#[update]
+#[candid_method(update)]
+async fn validate_revoke_permission(arg: RevokePermissionArguments) -> Result<String, String> {
+    ic_certified_assets::validate_revoke_permission(arg).await
+}
+
+#[update]
+#[candid_method(update)]
+fn list_authorized() -> Vec<Principal> {
+    ic_certified_assets::list_authorized()
+}
+
+#[update]
+#[candid_method(update)]
+fn list_permitted(arg: ListPermittedArguments) -> Vec<Principal> {
+    ic_certified_assets::list_permitted(arg)
+}
+
+#[update(guard = "is_controller")]
+#[candid_method(update)]
+async fn take_ownership() {
+    ic_certified_assets::take_ownership().await
+}
+
+#[update]
+#[candid_method(update)]
+async fn validate_take_ownership() -> Result<String, String> {
+    ic_certified_assets::validate_take_ownership().await
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn store(arg: StoreArg) {
+    ic_certified_assets::store(arg)
+}
+
+#[update(guard = "can_prepare")]
+#[candid_method(update)]
+fn create_batch() -> CreateBatchResponse {
+    ic_certified_assets::create_batch()
+}
+
+#[update(guard = "can_prepare")]
+#[candid_method(update)]
+fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
+    ic_certified_assets::create_chunks(arg)
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn create_asset(arg: CreateAssetArguments) {
+    ic_certified_assets::create_asset(arg)
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn set_asset_content(arg: SetAssetContentArguments) {
+    ic_certified_assets::set_asset_content(arg)
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn unset_asset_content(arg: UnsetAssetContentArguments) {
+    ic_certified_assets::unset_asset_content(arg)
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn delete_asset(arg: DeleteAssetArguments) {
+    ic_certified_assets::delete_asset(arg)
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn clear() {
+    ic_certified_assets::clear()
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+async fn commit_batch(arg: CommitBatchArguments) {
+    ic_certified_assets::commit_batch(arg).await
+}
+
+#[update]
+#[candid_method(update)]
+async fn compute_state_hash() -> Option<String> {
+    ic_certified_assets::compute_state_hash().await
+}
+
+#[update(guard = "can_prepare")]
+#[candid_method(update)]
+fn delete_batch(arg: DeleteBatchArguments) {
+    ic_certified_assets::delete_batch(arg)
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn set_asset_properties(arg: SetAssetPropertiesArguments) {
+    ic_certified_assets::set_asset_properties(arg)
+}
+
+#[update(guard = "can_prepare")]
+#[candid_method(update)]
+fn get_configuration() -> ConfigurationResponse {
+    ic_certified_assets::get_configuration()
+}
+
+#[update(guard = "can_commit")]
+#[candid_method(update)]
+fn configure(arg: ConfigureArguments) {
+    ic_certified_assets::configure(arg)
+}
+
+#[update]
+#[candid_method(update)]
+fn validate_configure(arg: ConfigureArguments) -> Result<String, String> {
+    ic_certified_assets::validate_configure(arg)
+}
+
+#[test]
+fn candid_interface_compatibility() {
+    use candid_parser::utils::{service_compatible, CandidSource};
+    use std::path::PathBuf;
+
+    candid::export_service!();
+    let new_interface = __export_service();
+
+    let old_interface =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets.did");
+
+    println!("Exported interface: {new_interface}");
+
+    service_compatible(
+        CandidSource::Text(&new_interface),
+        CandidSource::File(old_interface.as_path()),
+    )
+    .expect("The assets canister interface is not compatible with the assets.did file");
+}

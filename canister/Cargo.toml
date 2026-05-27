@@ -12,7 +12,7 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 ic-certified-assets = { path = "../ic-certified-assets" }
@@ -20,3 +20,6 @@ ic-cdk.workspace = true
 candid.workspace = true
 serde.workspace = true
 serde_cbor.workspace = true
+
+[dev-dependencies]
+candid_parser.workspace = true
