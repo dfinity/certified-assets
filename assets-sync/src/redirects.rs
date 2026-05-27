@@ -338,21 +338,13 @@ mod tests {
     #[test]
     fn rejects_relative_to_on_200() {
         let e = err("/from to 200");
-        assert!(
-            e.message.contains("absolute asset path"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("absolute asset path"), "{}", e.message);
     }
 
     #[test]
     fn rejects_relative_to_on_4xx() {
         let e = err("/from target.html 404");
-        assert!(
-            e.message.contains("absolute asset path"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("absolute asset path"), "{}", e.message);
     }
 
     #[test]
