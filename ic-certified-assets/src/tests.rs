@@ -4,8 +4,7 @@ use crate::http::{
 use crate::batch::{ComputationStatus, BATCH_EXPIRY_NANOS};
 use crate::stable::StableState;
 use crate::state::State;
-use crate::system_context::canister_env::CanisterEnv;
-use crate::system_context::SystemContext;
+use crate::system_context::{CanisterEnv, SystemContext};
 use crate::types::{
     AssetProperties, BatchId, BatchOperation, CommitBatchArguments, CreateAssetArguments,
     DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg, ListRequest,
@@ -3097,7 +3096,7 @@ mod compute_state_hash {
 
         // Update state using commit_batch to ensure timestamp is updated
         // We need a new system context with a later timestamp
-        let canister_env = crate::system_context::canister_env::CanisterEnv {
+        let canister_env = crate::system_context::CanisterEnv {
             ic_root_key: vec![0, 1, 2, 3],
             icp_public_env_vars: BTreeMap::new(),
         };
