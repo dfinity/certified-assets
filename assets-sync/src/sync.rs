@@ -19,7 +19,6 @@ use crate::canister::{
 use crate::content::{encoders_for, Content, Encoder};
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
-use crate::security_policy::report_security_policy_issues;
 use std::path::Path;
 
 // Stay safely under the canister's ingress message limit (~2 MB).
@@ -99,8 +98,6 @@ pub fn sync<C: CanisterCall>(
 
     let sources = crate::scan::scan(dirs)?;
     println!("found {} file(s) from {:?}", sources.len(), dirs);
-
-    report_security_policy_issues(&sources)?;
 
     let project_rules = load_redirect_rules(dir)?;
     println!(
@@ -361,7 +358,8 @@ fn build_operations(
                 headers: pa
                     .source
                     .config
-                    .combined_headers()
+                    .headers
+                    .clone()
                     .map(|h| h.into_iter().collect()),
                 allow_raw_access: pa.source.config.allow_raw_access,
             }));
@@ -469,7 +467,7 @@ fn update_properties(
         let project_max_age = config.cache.as_ref().and_then(|c| c.max_age);
         let max_age = (project_max_age != canister_props.max_age).then_some(project_max_age);
 
-        let project_headers = config.combined_headers().map(sorted_header_pairs);
+        let project_headers = config.headers.clone().map(sorted_header_pairs);
         // The canister auto-injects `Set-Cookie: ic_env=…` on HTML assets via
         // `on_asset_change`; that header is runtime-managed, not project-managed,
         // so strip it before comparing or we'd loop emitting drift forever.
@@ -1267,15 +1265,17 @@ mod tests {
     }
 
     #[test]
-    fn rule_only_change_propagates_via_set_asset_properties() {
+    fn config_only_change_propagates_via_set_asset_properties() {
         use crate::config::AssetConfig;
-        use crate::security_policy::SecurityPolicy;
+        use std::collections::BTreeMap;
         let sha = vec![1u8, 2, 3];
 
-        // Project config: standard security policy → produces canonical CSP /
-        // X-Frame-Options / etc. headers via `combined_headers()`.
+        // Project config: a custom header set; canister currently has none —
+        // simulating an asset deployed before the header rule was added.
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Frame-Options".to_string(), "DENY".to_string());
         let config = AssetConfig {
-            security_policy: Some(SecurityPolicy::Standard),
+            headers: Some(headers),
             ..AssetConfig::default()
         };
         // Identity encoding already in place (matches canister sha).
@@ -1290,8 +1290,6 @@ mod tests {
             "text/html",
             &[("identity", Some(sha))],
         )]);
-        // Canister currently has no headers stored — i.e., the asset was
-        // deployed before the rule was added.
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
@@ -1321,10 +1319,6 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        assert!(
-            map.contains_key("Content-Security-Policy"),
-            "standard policy CSP header should be present in SetAssetProperties; got: {map:#?}",
-        );
         assert_eq!(map.get("X-Frame-Options").copied(), Some("DENY"));
     }
 
