@@ -11,7 +11,7 @@ use reqwest::StatusCode;
 /// 3xx redirect (internal + external), 4xx custom error page, 200 rewrite
 /// (exact and subtree).
 #[test]
-fn redirect_rules_honoured_end_to_end() {
+fn redirect_rules_honoured() {
     let tmp = setup_project("tests/fixture/redirects");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
@@ -83,7 +83,7 @@ fn redirect_rules_honoured_end_to_end() {
 /// or `/blog` → `/blog/index.html`. Literal paths still resolve; the
 /// would-be aliases return 404.
 #[test]
-fn no_implicit_aliasing_after_redirects_landed() {
+fn no_implicit_aliasing() {
     let tmp = setup_project("tests/fixture/no-implicit-aliasing");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
