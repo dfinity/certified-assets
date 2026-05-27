@@ -16,8 +16,8 @@ use crate::{
     },
     cookies::add_ic_env_cookie,
     http::{
-        CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
-        StreamingCallbackToken, FALLBACK_FILE,
+        CallbackFunc, HeaderField, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
+        StreamingCallbackToken, StreamingStrategy, FALLBACK_FILE,
     },
     rc_bytes::RcBytes,
     state_hash::StateHashComputation,
@@ -331,6 +331,103 @@ impl Asset {
             encoding_name.to_owned(),
             ce,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_ok_http_response(
+        &self,
+        enc_name: &str,
+        enc: &AssetEncoding,
+        key: &str,
+        chunk_index: usize,
+        certificate_header: Option<&HeaderField>,
+        callback: &CallbackFunc,
+        etags: &[Hash],
+    ) -> HttpResponse {
+        let mut headers = self.get_headers_for_asset(enc_name);
+        if let Some(head) = certificate_header {
+            headers.insert(head.0.clone(), head.1.clone());
+        }
+
+        let streaming_strategy = StreamingCallbackToken::create_token(
+            enc_name,
+            enc.content_chunks.len(),
+            enc.sha256,
+            key,
+            chunk_index,
+        )
+        .map(|token| StreamingStrategy::Callback {
+            callback: callback.clone(),
+            token,
+        });
+
+        let (status_code, body) = if etags.contains(&enc.sha256) {
+            (304, RcBytes::default())
+        } else {
+            if !headers
+                .iter()
+                .any(|(header_name, _)| header_name.eq_ignore_ascii_case("etag"))
+            {
+                headers.insert(
+                    "etag".to_string(),
+                    format!("\"{}\"", hex::encode(enc.sha256)),
+                );
+            }
+            (200, enc.content_chunks[chunk_index].clone())
+        };
+
+        HttpResponse {
+            status_code,
+            headers: headers.into_iter().collect::<_>(),
+            body,
+            upgrade: None,
+            streaming_strategy,
+        }
+    }
+
+    pub fn build_http_response_for_encodings(
+        &self,
+        requested_encodings: &[String],
+        key: &str,
+        chunk_index: usize,
+        certificate_header: Option<&HeaderField>,
+        callback: &CallbackFunc,
+        etags: &[Hash],
+    ) -> Option<HttpResponse> {
+        // Return a requested encoding that is certified
+        for enc_name in requested_encodings.iter() {
+            if let Some(enc) = self.encodings.get(enc_name) {
+                if enc.certified {
+                    return Some(self.build_ok_http_response(
+                        enc_name,
+                        enc,
+                        key,
+                        chunk_index,
+                        certificate_header,
+                        callback,
+                        etags,
+                    ));
+                }
+            }
+        }
+
+        // None of the requested encodings are available - fall back to the best certified encoding we have
+        for enc_name in encoding_certification_order(self.encodings.keys()) {
+            if let Some(enc) = self.encodings.get(&enc_name) {
+                if enc.certified {
+                    return Some(self.build_ok_http_response(
+                        &enc_name,
+                        enc,
+                        key,
+                        chunk_index,
+                        certificate_header,
+                        callback,
+                        etags,
+                    ));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1122,8 +1219,7 @@ impl State {
 
         if witness_result == WitnessResult::FallbackFound {
             if let Ok(asset) = self.get_asset(&FALLBACK_FILE.to_string()) {
-                if let Some(response) = HttpResponse::build_ok_from_requested_encodings(
-                    asset,
+                if let Some(response) = asset.build_http_response_for_encodings(
                     &requested_encodings,
                     path,
                     chunk_index,
@@ -1139,8 +1235,7 @@ impl State {
                 if !asset.allow_raw_access() && req.is_raw_domain() {
                     return req.redirect_from_raw_to_certified_domain();
                 }
-                if let Some(response) = HttpResponse::build_ok_from_requested_encodings(
-                    asset,
+                if let Some(response) = asset.build_http_response_for_encodings(
                     &requested_encodings,
                     path,
                     chunk_index,

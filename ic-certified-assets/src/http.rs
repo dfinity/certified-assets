@@ -2,9 +2,7 @@ use crate::certification::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
 };
 use crate::rc_bytes::RcBytes;
-use crate::state_machine::{encoding_certification_order, Asset, AssetEncoding};
 use candid::{define_function, CandidType, Deserialize, Nat};
-use ic_certification::Hash;
 use serde_bytes::ByteBuf;
 
 /// The file to serve if the requested file wasn't found.
@@ -134,105 +132,6 @@ impl HttpRequest {
 }
 
 impl HttpResponse {
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_ok(
-        asset: &Asset,
-        enc_name: &str,
-        enc: &AssetEncoding,
-        key: &str,
-        chunk_index: usize,
-        certificate_header: Option<&HeaderField>,
-        callback: &CallbackFunc,
-        etags: &[Hash],
-    ) -> HttpResponse {
-        let mut headers = asset.get_headers_for_asset(enc_name);
-        if let Some(head) = certificate_header {
-            headers.insert(head.0.clone(), head.1.clone());
-        }
-
-        let streaming_strategy = StreamingCallbackToken::create_token(
-            enc_name,
-            enc.content_chunks.len(),
-            enc.sha256,
-            key,
-            chunk_index,
-        )
-        .map(|token| StreamingStrategy::Callback {
-            callback: callback.clone(),
-            token,
-        });
-
-        let (status_code, body) = if etags.contains(&enc.sha256) {
-            (304, RcBytes::default())
-        } else {
-            if !headers
-                .iter()
-                .any(|(header_name, _)| header_name.eq_ignore_ascii_case("etag"))
-            {
-                headers.insert(
-                    "etag".to_string(),
-                    format!("\"{}\"", hex::encode(enc.sha256)),
-                );
-            }
-            (200, enc.content_chunks[chunk_index].clone())
-        };
-
-        HttpResponse {
-            status_code,
-            headers: headers.into_iter().collect::<_>(),
-            body,
-            upgrade: None,
-            streaming_strategy,
-        }
-    }
-
-    pub fn build_ok_from_requested_encodings(
-        asset: &Asset,
-        requested_encodings: &[String],
-        key: &str,
-        chunk_index: usize,
-        certificate_header: Option<&HeaderField>,
-        callback: &CallbackFunc,
-        etags: &[Hash],
-    ) -> Option<HttpResponse> {
-        // Return a requested encoding that is certified
-        for enc_name in requested_encodings.iter() {
-            if let Some(enc) = asset.encodings.get(enc_name) {
-                if enc.certified {
-                    return Some(Self::build_ok(
-                        asset,
-                        enc_name,
-                        enc,
-                        key,
-                        chunk_index,
-                        certificate_header,
-                        callback,
-                        etags,
-                    ));
-                }
-            }
-        }
-
-        // None of the requested encodings are available - fall back to the best certified encoding we have
-        for enc_name in encoding_certification_order(asset.encodings.keys()) {
-            if let Some(enc) = asset.encodings.get(&enc_name) {
-                if enc.certified {
-                    return Some(Self::build_ok(
-                        asset,
-                        &enc_name,
-                        enc,
-                        key,
-                        chunk_index,
-                        certificate_header,
-                        callback,
-                        etags,
-                    ));
-                }
-            }
-        }
-        None
-    }
-
     pub fn build_400(err_msg: &str) -> Self {
         HttpResponse {
             status_code: 400,
