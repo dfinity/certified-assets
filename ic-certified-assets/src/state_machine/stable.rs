@@ -5,8 +5,7 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    certification::CertificateExpression, rc_bytes::RcBytes, state_machine::Timestamp,
-    types::BatchId,
+    asset::Timestamp, certification::CertificateExpression, rc_bytes::RcBytes, types::BatchId,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -77,7 +76,7 @@ impl From<StableConfiguration> for super::Configuration {
     }
 }
 
-/// Same as [super::Asset] but serde-serializable
+/// Same as [crate::asset::Asset] but serde-serializable
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableAsset {
     pub content_type: String,
@@ -88,8 +87,8 @@ pub struct StableAsset {
     pub allow_raw_access: Option<bool>,
 }
 
-impl From<super::Asset> for StableAsset {
-    fn from(asset: super::Asset) -> Self {
+impl From<crate::asset::Asset> for StableAsset {
+    fn from(asset: crate::asset::Asset) -> Self {
         Self {
             content_type: asset.content_type,
             encodings: asset
@@ -105,7 +104,7 @@ impl From<super::Asset> for StableAsset {
     }
 }
 
-impl From<StableAsset> for super::Asset {
+impl From<StableAsset> for crate::asset::Asset {
     fn from(stable_asset: StableAsset) -> Self {
         Self {
             content_type: stable_asset.content_type,
@@ -122,7 +121,7 @@ impl From<StableAsset> for super::Asset {
     }
 }
 
-/// Same as [super::AssetEncoding] but serde-serializable
+/// Same as [crate::asset::AssetEncoding] but serde-serializable
 #[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct StableAssetEncoding {
     pub modified: u64,
@@ -134,8 +133,8 @@ pub struct StableAssetEncoding {
     pub response_hashes: Option<HashMap<u16, [u8; 32]>>,
 }
 
-impl From<super::AssetEncoding> for StableAssetEncoding {
-    fn from(asset_encoding: super::AssetEncoding) -> Self {
+impl From<crate::asset::AssetEncoding> for StableAssetEncoding {
+    fn from(asset_encoding: crate::asset::AssetEncoding) -> Self {
         Self {
             modified: timestamp_to_u64(asset_encoding.modified),
             content_chunks: asset_encoding.content_chunks,
@@ -148,7 +147,7 @@ impl From<super::AssetEncoding> for StableAssetEncoding {
     }
 }
 
-impl From<StableAssetEncoding> for super::AssetEncoding {
+impl From<StableAssetEncoding> for crate::asset::AssetEncoding {
     fn from(stable_asset_encoding: StableAssetEncoding) -> Self {
         Self {
             modified: Timestamp::from(stable_asset_encoding.modified),

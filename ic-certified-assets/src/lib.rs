@@ -1,4 +1,5 @@
 //! This module declares canister methods expected by the assets canister client.
+pub mod asset;
 pub mod certification;
 mod cookies;
 pub mod http;
@@ -15,13 +16,14 @@ mod tests;
 
 pub use crate::state_machine::StableState;
 use crate::{
+    asset::{AssetDetails, EncodedAsset},
     certification::AssetKey,
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
     },
     rc_bytes::RcBytes,
-    state_machine::{AssetDetails, CertifiedTree, ComputationStatus, EncodedAsset, State},
+    state_machine::{CertifiedTree, ComputationStatus, State},
     system_context::SystemContext,
     types::*,
 };
@@ -434,6 +436,7 @@ where
 #[macro_export]
 macro_rules! export_canister_methods {
     () => {
+        use $crate::asset;
         use $crate::certification;
         use $crate::http;
         use $crate::rc_bytes;
@@ -466,7 +469,7 @@ macro_rules! export_canister_methods {
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
-        fn get(arg: types::GetArg) -> state_machine::EncodedAsset {
+        fn get(arg: types::GetArg) -> asset::EncodedAsset {
             $crate::get(arg)
         }
 
@@ -478,7 +481,7 @@ macro_rules! export_canister_methods {
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
-        fn list(request: types::ListRequest) -> Vec<state_machine::AssetDetails> {
+        fn list(request: types::ListRequest) -> Vec<asset::AssetDetails> {
             $crate::list(request)
         }
 
