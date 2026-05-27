@@ -6,14 +6,13 @@
 
 use crate::{
     asset::{
-        aliased_by, aliases_of, on_asset_change, Asset, AssetDetails, AssetEncoding,
-        AssetEncodingDetails, EncodedAsset, DEFAULT_ALIAS_ENABLED,
+        on_asset_change, Asset, AssetDetails, AssetEncoding, AssetEncodingDetails, EncodedAsset,
     },
     batch::{Batch, Chunk, ComputationStatus},
-    certification::{AssetKey, CertifiedResponses, WitnessResult},
+    certification::{AssetKey, CertifiedResponses},
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
-        StreamingCallbackToken, FALLBACK_FILE,
+        StreamingCallbackToken,
     },
     rc_bytes::RcBytes,
     stable::StableState,
@@ -80,20 +79,6 @@ impl State {
     fn get_asset(&self, key: &AssetKey) -> Result<&Asset, String> {
         self.assets
             .get(key)
-            .or_else(|| {
-                let aliased = aliases_of(key)
-                    .into_iter()
-                    .find_map(|alias_key| self.assets.get(&alias_key));
-                if let Some(asset) = aliased {
-                    if asset.is_aliased.unwrap_or(DEFAULT_ALIAS_ENABLED) {
-                        aliased
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
             .ok_or_else(|| "asset not found".to_string())
     }
 
@@ -145,6 +130,10 @@ impl State {
             return Err("asset already exists".to_string());
         }
 
+        // `arg.enable_aliasing` is accepted for backward compatibility but
+        // ignored — the canister no longer aliases on its own; users express
+        // aliasing as an explicit status-200 rule in `_redirects`.
+        let _ = arg.enable_aliasing;
         self.assets.insert(
             arg.key,
             Asset {
@@ -152,7 +141,6 @@ impl State {
                 encodings: HashMap::new(),
                 max_age: arg.max_age,
                 headers: arg.headers,
-                is_aliased: arg.enable_aliasing,
                 allow_raw_access: arg.allow_raw_access,
             },
         );
@@ -261,22 +249,8 @@ impl State {
 
     pub fn delete_asset(&mut self, arg: DeleteAssetArguments) {
         if self.assets.contains_key(&arg.key) {
-            for dependent in self.dependent_keys(&arg.key) {
-                self.asset_hashes.remove_responses_for_path(&dependent);
-                if dependent == FALLBACK_FILE {
-                    self.asset_hashes.remove_fallback_responses();
-                }
-            }
+            self.asset_hashes.remove_responses_for_path(&arg.key);
             self.assets.remove(&arg.key);
-        }
-        for key in aliases_of(&arg.key) {
-            // if an existing file can be aliased to the deleted file it has to become a valid alias again
-            if self.assets.contains_key(&key) {
-                let dependent_keys = self.dependent_keys(&key);
-                if let Some(asset) = self.assets.get_mut(&key) {
-                    on_asset_change(&mut self.asset_hashes, &key, asset, dependent_keys, None);
-                }
-            }
         }
     }
 
@@ -334,7 +308,8 @@ impl State {
         let dependent_keys = self.dependent_keys(&arg.key);
         let asset = self.assets.entry(arg.key.clone()).or_default();
         asset.content_type = arg.content_type;
-        asset.is_aliased = arg.aliased;
+        // `arg.aliased` is accepted for backward compatibility but ignored.
+        let _ = arg.aliased;
 
         let hash = sha2::Sha256::digest(&arg.content).into();
         if let Some(provided_hash) = arg.sha256 {
@@ -441,7 +416,7 @@ impl State {
                         max_age: asset.max_age,
                         headers: asset.headers.clone(),
                         allow_raw_access: asset.allow_raw_access,
-                        is_aliased: asset.is_aliased,
+                        is_aliased: None,
                     }
                 })
             })
@@ -511,18 +486,11 @@ impl State {
         etags: Vec<Hash>,
         req: HttpRequest,
     ) -> HttpResponse {
-        if let Ok(asset) = self.get_asset(&path.into()) {
-            if !asset.allow_raw_access() && req.is_raw_domain() {
-                return req.redirect_from_raw_to_certified_domain();
-            }
-        } else if let Ok(asset) = self.get_asset(&FALLBACK_FILE.to_string()) {
-            if !asset.allow_raw_access() && req.is_raw_domain() {
-                return req.redirect_from_raw_to_certified_domain();
-            }
-        }
-
         // Asset at the requested path wins.
         if let Ok(asset) = self.get_asset(&path.into()) {
+            if !asset.allow_raw_access() && req.is_raw_domain() {
+                return req.redirect_from_raw_to_certified_domain();
+            }
             let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
             if let Some(response) = asset.build_http_response_for_encodings(
                 &requested_encodings,
@@ -540,6 +508,17 @@ impl State {
         for (idx, rule) in self.redirect_rules.iter().enumerate() {
             if !rule.matches(path) {
                 continue;
+            }
+            // Status-200 rules borrow from a target asset — honor that
+            // asset's `allow_raw_access` rule before serving (or even before
+            // the rule has a certified entry — the target may not yet have
+            // an encoding).
+            if rule.status == 200 {
+                if let Some(target) = self.assets.get(&rule.to) {
+                    if !target.allow_raw_access() && req.is_raw_domain() {
+                        return req.redirect_from_raw_to_certified_domain();
+                    }
+                }
             }
             let Some(entry) = self
                 .rule_certified_entries
@@ -560,23 +539,7 @@ impl State {
             );
         }
 
-        let (certificate_header, witness_result) =
-            self.asset_hashes.witness_to_header(path, certificate);
-
-        if witness_result == WitnessResult::FallbackFound {
-            if let Ok(asset) = self.get_asset(&FALLBACK_FILE.to_string()) {
-                if let Some(response) = asset.build_http_response_for_encodings(
-                    &requested_encodings,
-                    path,
-                    chunk_index,
-                    Some(&certificate_header),
-                    &callback,
-                    &etags,
-                ) {
-                    return response;
-                }
-            }
-        }
+        let (certificate_header, _) = self.asset_hashes.witness_to_header(path, certificate);
         HttpResponse::build_404(certificate_header)
     }
 
@@ -716,7 +679,7 @@ impl State {
             max_age: asset.max_age,
             headers: asset.headers.clone(),
             allow_raw_access: asset.allow_raw_access,
-            is_aliased: asset.is_aliased,
+            is_aliased: None,
         })
     }
 
@@ -737,9 +700,8 @@ impl State {
             asset.allow_raw_access = allow_raw_access
         }
 
-        if let Some(is_aliased) = arg.is_aliased {
-            asset.is_aliased = is_aliased
-        }
+        // `arg.is_aliased` is accepted for backward compatibility but ignored.
+        let _ = arg.is_aliased;
 
         on_asset_change(
             &mut self.asset_hashes,
@@ -752,21 +714,14 @@ impl State {
         Ok(())
     }
 
-    // Returns keys that needs to be updated if the supplied key is changed.
-    pub(crate) fn dependent_keys(&self, key: &AssetKey) -> Vec<AssetKey> {
-        if self
-            .assets
-            .get(key)
-            .and_then(|asset| asset.is_aliased)
-            .unwrap_or(DEFAULT_ALIAS_ENABLED)
-        {
-            aliased_by(key)
-                .into_iter()
-                .filter(|k| !self.assets.contains_key(k))
-                .collect()
-        } else {
-            Vec::new()
-        }
+    // Returns keys that need to be updated if the supplied key is changed.
+    //
+    // The built-in aliasing this used to fan out to is gone; nothing pulls
+    // sibling keys today. The hook is kept in the signature of
+    // `on_asset_change` so a future feature can repopulate it without
+    // touching all the call sites.
+    pub(crate) fn dependent_keys(&self, _key: &AssetKey) -> Vec<AssetKey> {
+        Vec::new()
     }
 
     pub fn get_configuration(&self) -> ConfigurationResponse {

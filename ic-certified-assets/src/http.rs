@@ -5,9 +5,6 @@ use crate::rc_bytes::RcBytes;
 use candid::{define_function, CandidType, Deserialize, Nat};
 use serde_bytes::ByteBuf;
 
-/// The file to serve if the requested file wasn't found.
-pub const FALLBACK_FILE: &str = "/index.html";
-
 const HTTP_REDIRECT_PERMANENT: u16 = 308;
 
 pub type HeaderField = (String, String);

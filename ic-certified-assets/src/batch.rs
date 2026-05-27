@@ -10,7 +10,7 @@
 //! helpers they rely on. State methods unrelated to batches stay in the
 //! state machine module.
 
-use crate::asset::{is_html_key, on_asset_change, Timestamp};
+use crate::asset::{on_asset_change, Timestamp};
 use crate::certification::{AssetKey, HashTreePath};
 use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
@@ -267,7 +267,7 @@ impl State {
                         let html_keys: Vec<_> = self
                             .assets
                             .keys()
-                            .filter(|key| is_html_key(key))
+                            .filter(|key| key.ends_with(".html"))
                             .cloned()
                             .collect();
 

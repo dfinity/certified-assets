@@ -272,7 +272,6 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WitnessResult {
     PathFound,
-    FallbackFound,
     NoneFound,
 }
 
@@ -445,24 +444,16 @@ impl CertifiedResponses {
         self.delete(path.as_vec());
     }
 
-    /// If the path has certified responses this function creates a hash tree that proves...
-    /// * The path is part of the CertifiedResponses hash tree
+    /// Builds a witness `HashTree` for the given request path.
     ///
-    /// The hash tree then includes certification for all valid responses for this path.
-    ///
-    /// If the path has no certified responses this function creates a hash tree that proves...
-    /// * The absence of the path in the CertifiedResponses hash tree
-    /// * The presence/absence of a 404 response
-    ///
-    /// The hash tree then includes certification for all valid responses for a 404 response.
-    ///
-    /// # Return Value
-    /// `(found, tree)`
-    /// * `found`:
-    ///   * WitnessResult::Found if `path` has a certified response.
-    ///   * `WitnessResult::FallbackFound` if the path has no certified response, but the fallback path has.
-    ///   * `WitnessResult::NoneFound` if both `path` and the fallback path have no certified response.
-    /// * `tree`: The `HashTree` as described above.
+    /// * If `path` has a certified response, returns `(witness, PathFound)`
+    ///   where the witness proves that response.
+    /// * Otherwise returns `(absence proof + every `<*>` ancestor's subtree,
+    ///   NoneFound)`. The combined proof is enough for the verifier to
+    ///   match on a subtree-fallback response (e.g. a `Subtree` redirect
+    ///   rule) — callers that serve such a response use
+    ///   `witness_to_header_with_location` to point `expr_path` at the
+    ///   right `<*>` ancestor.
     pub fn witness_path(&self, path: &str) -> (HashTree, WitnessResult) {
         let path = AssetPath::from(path);
         let hash_tree_path_root = path.asset_hash_path_root();
@@ -483,12 +474,7 @@ impl CertifiedResponses {
                         merge_hash_trees(accumulator, new_proof)
                     });
 
-            let fallback_path = HashTreePath::not_found_base_path();
-            if self.contains_path(fallback_path.as_vec()) {
-                (combined_proof, WitnessResult::FallbackFound)
-            } else {
-                (combined_proof, WitnessResult::NoneFound)
-            }
+            (combined_proof, WitnessResult::NoneFound)
         }
     }
 

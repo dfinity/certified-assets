@@ -9,7 +9,7 @@
 
 use crate::certification::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
-    response_hash, CertificateExpression, HashTreePath, NestedTreeKey,
+    response_hash, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
 };
 use candid::{CandidType, Deserialize};
 use ic_representation_independent_hash::Value;
@@ -162,16 +162,23 @@ impl RedirectRule {
     /// terminator (`<$>` for exact matches, `<*>` for subtrees), without the
     /// per-response (expr_hash, req_hash, resp_hash) tail.
     pub fn tree_location(&self) -> HashTreePath {
-        let (path, sentinel) = match &self.from {
-            RulePattern::Exact(p) => (p.as_str(), "<$>"),
-            RulePattern::Subtree(p) => (p.trim_end_matches('/'), "<*>"),
-        };
-        let mut segs: Vec<NestedTreeKey> = vec!["http_expr".into()];
-        for s in path.split('/').filter(|s| !s.is_empty()) {
-            segs.push(NestedTreeKey::String(s.to_string()));
+        match &self.from {
+            // Mirror `AssetPath::from(path).asset_hash_path_root()` so a rule
+            // at `/old` lives in the same `<$>` slot the asset at `/old`
+            // would occupy.
+            RulePattern::Exact(p) => AssetPath::from(p.as_str()).asset_hash_path_root(),
+            RulePattern::Subtree(p) => {
+                let trimmed = p.trim_matches('/');
+                let mut segs: Vec<NestedTreeKey> = vec!["http_expr".into()];
+                if !trimmed.is_empty() {
+                    for s in trimmed.split('/') {
+                        segs.push(NestedTreeKey::String(s.to_string()));
+                    }
+                }
+                segs.push("<*>".into());
+                HashTreePath::from(segs)
+            }
         }
-        segs.push(NestedTreeKey::String(sentinel.to_string()));
-        HashTreePath::from(segs)
     }
 
     /// Headers that are part of the certified response for this rule. The
@@ -416,6 +423,23 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["http_expr", "<*>"]);
+    }
+
+    #[test]
+    fn tree_location_root_exact_matches_asset_path() {
+        // An exact rule at `/` must share the same `<$>` slot the asset at
+        // `/` would occupy, including the empty segment that
+        // `AssetPath::from("/")` produces.
+        let r = rule(RulePattern::Exact("/".into()), "/index.html", 200);
+        let segs = r.tree_location().0;
+        let names: Vec<&str> = segs
+            .iter()
+            .map(|k| match k {
+                NestedTreeKey::String(s) => s.as_str(),
+                _ => panic!("expected string segment"),
+            })
+            .collect();
+        assert_eq!(names, vec!["http_expr", "", "<$>"]);
     }
 
     #[test]
