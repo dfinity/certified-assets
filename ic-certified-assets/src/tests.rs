@@ -504,14 +504,16 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
     let batch_id = state.create_batch(&system_context).unwrap();
-    let ops = vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-        rules: vec![RedirectRule {
-            from: RulePattern::Subtree("/".into()),
-            to: target.into(),
-            status: 200,
-            headers: None,
-        }],
-    })];
+    let ops = vec![BatchOperation::SetRedirectRules(
+        SetRedirectRulesArguments {
+            rules: vec![RedirectRule {
+                from: RulePattern::Subtree("/".into()),
+                to: target.into(),
+                status: 200,
+                headers: None,
+            }],
+        },
+    )];
     run_computation_until_completion(|progress| {
         state.commit_batch(
             &CommitBatchArguments {
@@ -543,9 +545,9 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
             headers: None,
         })
         .collect();
-    let ops = vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-        rules,
-    })];
+    let ops = vec![BatchOperation::SetRedirectRules(
+        SetRedirectRulesArguments { rules },
+    )];
     run_computation_until_completion(|progress| {
         state.commit_batch(
             &CommitBatchArguments {
@@ -710,8 +712,7 @@ fn no_implicit_aliasing_without_rules() {
         &mut state,
         &system_context,
         vec![
-            AssetBuilder::new("/foo.html", "text/html")
-                .with_encoding("identity", vec![BODY]),
+            AssetBuilder::new("/foo.html", "text/html").with_encoding("identity", vec![BODY]),
             AssetBuilder::new("/blog/index.html", "text/html")
                 .with_encoding("identity", vec![BODY]),
         ],
@@ -3263,9 +3264,11 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: rules.clone(),
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: rules.clone(),
+                },
+            )],
         )
         .unwrap();
 
@@ -3284,9 +3287,11 @@ mod redirect_rules {
         }];
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: initial.clone(),
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: initial.clone(),
+                },
+            )],
         )
         .unwrap();
 
@@ -3307,9 +3312,9 @@ mod redirect_rules {
         ];
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: mixed,
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments { rules: mixed },
+            )],
         )
         .unwrap_err();
         assert!(err.contains("unsupported status code"), "got: {err}");
@@ -3328,9 +3333,11 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: rules.clone(),
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: rules.clone(),
+                },
+            )],
         )
         .unwrap();
 
@@ -3346,18 +3353,20 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: sample_rules(),
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: sample_rules(),
+                },
+            )],
         )
         .unwrap();
         assert!(!state.get_redirect_rules().is_empty());
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments { rules: vec![] },
+            )],
         )
         .unwrap();
         assert!(state.get_redirect_rules().is_empty());
@@ -3368,14 +3377,16 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Exact("/old".into()),
-                    to: "/new".into(),
-                    status: 301,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/old".into()),
+                        to: "/new".into(),
+                        status: 301,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
 
@@ -3389,14 +3400,16 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Subtree("/legacy/".into()),
-                    to: "/home".into(),
-                    status: 308,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/legacy/".into()),
+                        to: "/home".into(),
+                        status: 308,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
 
@@ -3411,22 +3424,24 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![
-                    RedirectRule {
-                        from: RulePattern::Exact("/dup".into()),
-                        to: "/first".into(),
-                        status: 301,
-                        headers: None,
-                    },
-                    RedirectRule {
-                        from: RulePattern::Exact("/dup".into()),
-                        to: "/second".into(),
-                        status: 302,
-                        headers: None,
-                    },
-                ],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![
+                        RedirectRule {
+                            from: RulePattern::Exact("/dup".into()),
+                            to: "/first".into(),
+                            status: 301,
+                            headers: None,
+                        },
+                        RedirectRule {
+                            from: RulePattern::Exact("/dup".into()),
+                            to: "/second".into(),
+                            status: 302,
+                            headers: None,
+                        },
+                    ],
+                },
+            )],
         )
         .unwrap();
 
@@ -3440,21 +3455,21 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: sample_rules(),
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: sample_rules(),
+                },
+            )],
         )
         .unwrap();
         // Sanity: rules fire pre-upgrade.
-        let pre =
-            certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        let pre = certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
         assert_eq!(pre.status_code, 308);
 
         let stable: StableState = state.into();
         let state: State = stable.into();
 
-        let post =
-            certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        let post = certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
         assert_eq!(post.status_code, 308);
         assert_eq!(lookup_header(&post, "Location"), Some("/home"));
     }
@@ -3465,18 +3480,19 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Exact("/foo".into()),
-                    to: "/foo.html".into(),
-                    status: 200,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/foo".into()),
+                        to: "/foo.html".into(),
+                        status: 200,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
-        let inert =
-            state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
         assert_eq!(inert.status_code, 404);
 
         // Add the asset → rule fires.
@@ -3504,11 +3520,8 @@ mod redirect_rules {
 
         // Delete the target → rule goes inert again.
         delete_asset_via_batch(&mut state, "/foo.html");
-        let after_delete = state.http_request(
-            RequestBuilder::get("/foo").build(),
-            &[],
-            unused_callback(),
-        );
+        let after_delete =
+            state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
         assert_eq!(after_delete.status_code, 404);
     }
 
@@ -3536,14 +3549,16 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Exact("/foo".into()),
-                    to: "/bar.html".into(),
-                    status: 200,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/foo".into()),
+                        to: "/bar.html".into(),
+                        status: 200,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
 
@@ -3581,14 +3596,16 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Subtree("/legacy/".into()),
-                    to: "/404.html".into(),
-                    status: 404,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/legacy/".into()),
+                        to: "/404.html".into(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
 
@@ -3614,14 +3631,16 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Exact("/retired".into()),
-                    to: "/410.html".into(),
-                    status: 410,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/retired".into()),
+                        to: "/410.html".into(),
+                        status: 410,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
 
@@ -3637,20 +3656,19 @@ mod redirect_rules {
         let mut state = State::default();
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Exact("/missing".into()),
-                    to: String::new(),
-                    status: 404,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: String::new(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap_err();
-        assert!(
-            err.contains("must be an absolute asset path"),
-            "got: {err}"
-        );
+        assert!(err.contains("must be an absolute asset path"), "got: {err}");
     }
 
     #[test]
@@ -3663,8 +3681,9 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![BODY])],
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![BODY])
+            ],
         );
 
         let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
@@ -3679,19 +3698,24 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Exact("/missing".into()),
-                    to: "/404.html".into(),
-                    status: 404,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: "/404.html".into(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
         // Target doesn't exist → rule inert → built-in fall-through 404.
-        let inert =
-            state.http_request(RequestBuilder::get("/missing").build(), &[], unused_callback());
+        let inert = state.http_request(
+            RequestBuilder::get("/missing").build(),
+            &[],
+            unused_callback(),
+        );
         assert_eq!(inert.status_code, 404);
         // The body is the built-in "not found", not the (missing) /404.html.
         assert_eq!(inert.body.as_ref(), b"not found");
@@ -3701,8 +3725,7 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &mock_system_context(),
-            vec![AssetBuilder::new("/404.html", "text/html")
-                .with_encoding("identity", vec![PAGE])],
+            vec![AssetBuilder::new("/404.html", "text/html").with_encoding("identity", vec![PAGE])],
         );
         let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
         assert_eq!(response.status_code, 404);
@@ -3718,19 +3741,20 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/404.html", "text/html")
-                .with_encoding("identity", vec![V1])],
+            vec![AssetBuilder::new("/404.html", "text/html").with_encoding("identity", vec![V1])],
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Subtree("/old/".into()),
-                    to: "/404.html".into(),
-                    status: 404,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/old/".into()),
+                        to: "/404.html".into(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
         let v1 = certified_http_request(&state, RequestBuilder::get("/old/x").build());
@@ -3741,8 +3765,7 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/404.html", "text/html")
-                .with_encoding("identity", vec![V2])],
+            vec![AssetBuilder::new("/404.html", "text/html").with_encoding("identity", vec![V2])],
         );
         let v2 = certified_http_request(&state, RequestBuilder::get("/old/x").build());
         assert_eq!(v2.body.as_ref(), V2);
@@ -3754,20 +3777,19 @@ mod redirect_rules {
         let mut state = State::default();
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Exact("/missing".into()),
-                    to: "404.html".into(), // missing leading '/'
-                    status: 404,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: "404.html".into(), // missing leading '/'
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap_err();
-        assert!(
-            err.contains("must be an absolute asset path"),
-            "got: {err}"
-        );
+        assert!(err.contains("must be an absolute asset path"), "got: {err}");
     }
 
     #[test]
@@ -3788,14 +3810,16 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![RedirectRule {
-                    from: RulePattern::Subtree("/".into()),
-                    to: "/index.html".into(),
-                    status: 200,
-                    headers: None,
-                }],
-            })],
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/".into()),
+                        to: "/index.html".into(),
+                        status: 200,
+                        headers: None,
+                    }],
+                },
+            )],
         )
         .unwrap();
 
