@@ -3130,3 +3130,174 @@ mod compute_state_hash {
         assert!(result.is_ok());
     }
 }
+
+mod redirect_rules {
+    use super::*;
+    use crate::redirect::{RedirectRule, RulePattern};
+    use crate::types::SetRedirectRulesArguments;
+
+    fn commit(state: &mut State, ops: Vec<BatchOperation>) -> Result<(), String> {
+        let system_context = mock_system_context();
+        let batch_id = state.create_batch(&system_context).unwrap();
+        run_computation_until_completion(|progress| {
+            state.commit_batch(
+                &CommitBatchArguments {
+                    batch_id: batch_id.clone(),
+                    operations: ops.clone(),
+                },
+                progress,
+                &system_context,
+            )
+        })
+    }
+
+    fn sample_rules() -> Vec<RedirectRule> {
+        vec![
+            RedirectRule {
+                from: RulePattern::Exact("/old".into()),
+                to: "/new".into(),
+                status: 301,
+                headers: None,
+            },
+            RedirectRule {
+                from: RulePattern::Subtree("/legacy/".into()),
+                to: "/home".into(),
+                status: 308,
+                headers: Some(vec![("X-Reason".into(), "moved".into())]),
+            },
+        ]
+    }
+
+    #[test]
+    fn commit_set_redirect_rules_round_trips_through_get() {
+        let mut state = State::default();
+        let rules = sample_rules();
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: rules.clone(),
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(state.get_redirect_rules(), rules);
+    }
+
+    #[test]
+    fn invalid_rule_fails_op_without_mutating_state() {
+        let mut state = State::default();
+        // Seed an initial valid set so we can confirm it is preserved.
+        let initial = vec![RedirectRule {
+            from: RulePattern::Exact("/seed".into()),
+            to: "/dest".into(),
+            status: 301,
+            headers: None,
+        }];
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: initial.clone(),
+            })],
+        )
+        .unwrap();
+
+        // One valid + one invalid (status 418) — the whole op must fail.
+        let mixed = vec![
+            RedirectRule {
+                from: RulePattern::Exact("/a".into()),
+                to: "/b".into(),
+                status: 301,
+                headers: None,
+            },
+            RedirectRule {
+                from: RulePattern::Exact("/c".into()),
+                to: "/d".into(),
+                status: 418,
+                headers: None,
+            },
+        ];
+        let err = commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: mixed,
+            })],
+        )
+        .unwrap_err();
+        assert!(err.contains("unsupported status code"), "got: {err}");
+
+        assert_eq!(
+            state.get_redirect_rules(),
+            initial,
+            "rules must be unchanged after a failed SetRedirectRules"
+        );
+    }
+
+    #[test]
+    fn rules_persist_through_upgrade() {
+        let mut state = State::default();
+        let rules = sample_rules();
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: rules.clone(),
+            })],
+        )
+        .unwrap();
+
+        let stable: StableState = state.into();
+        let state: State = stable.into();
+
+        assert_eq!(state.get_redirect_rules(), rules);
+    }
+
+    #[test]
+    fn empty_rules_replace_existing() {
+        let mut state = State::default();
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: sample_rules(),
+            })],
+        )
+        .unwrap();
+        assert!(!state.get_redirect_rules().is_empty());
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![],
+            })],
+        )
+        .unwrap();
+        assert!(state.get_redirect_rules().is_empty());
+    }
+
+    #[test]
+    fn rules_are_inert_in_step_1_1() {
+        // Step 1.1 deliberately stores rules without affecting `http_request`.
+        // This test will need to change once step 1.2 / 1.3 wire them in.
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/old".into()),
+                    to: "/new".into(),
+                    status: 301,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+
+        let response = state.http_request(
+            RequestBuilder::get("/old").build(),
+            &[],
+            unused_callback(),
+        );
+        assert_eq!(response.status_code, 404);
+    }
+}

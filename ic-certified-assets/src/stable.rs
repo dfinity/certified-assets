@@ -5,7 +5,8 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    asset::Timestamp, certification::CertificateExpression, rc_bytes::RcBytes, types::BatchId,
+    asset::Timestamp, certification::CertificateExpression, rc_bytes::RcBytes,
+    redirect::RedirectRule, types::BatchId,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -17,6 +18,11 @@ pub struct StableState {
     pub(crate) next_batch_id: Option<u64>,
     pub(crate) configuration: Option<StableConfiguration>,
     pub(crate) last_state_update_timestamp: Option<u64>,
+
+    /// Optional so a `StableState` serialized before this field existed still
+    /// deserializes cleanly (yields `None`, which we treat as "no rules").
+    #[serde(default)]
+    pub(crate) redirect_rules: Option<Vec<RedirectRule>>,
 }
 
 impl From<crate::state::State> for StableState {
@@ -37,6 +43,7 @@ impl From<crate::state::State> for StableState {
             next_batch_id: Some(batch_id_to_u64(state.next_batch_id)),
             configuration: Some(state.configuration.into()),
             last_state_update_timestamp: Some(state.last_state_update_timestamp_ns),
+            redirect_rules: Some(state.redirect_rules),
         }
     }
 }

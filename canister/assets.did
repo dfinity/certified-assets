@@ -45,6 +45,24 @@ type BatchOperationKind = variant {
   DeleteAsset: DeleteAssetArguments;
 
   Clear: ClearArguments;
+
+  SetRedirectRules: SetRedirectRulesArguments;
+};
+
+type SetRedirectRulesArguments = record {
+  rules: vec RedirectRule;
+};
+
+type RulePattern = variant {
+  Exact: text;
+  Subtree: text;
+};
+
+type RedirectRule = record {
+  from: RulePattern;
+  to: text;
+  status: nat16;
+  headers: opt vec HeaderField;
 };
 
 type CommitBatchArguments = record {
@@ -257,6 +275,10 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
   take_ownership: () -> ();
   list_authorized: () -> (vec principal);
   list_permitted: (ListPermitted) -> (vec principal);
+
+  // ───────── Redirect rules ─────────
+
+  get_redirect_rules: () -> (vec RedirectRule) query;
 
   // ───────── State integrity ─────────
 

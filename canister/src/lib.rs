@@ -9,6 +9,7 @@ use ic_certified_assets::{
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
     is_controller, is_manager_or_controller,
     rc_bytes::RcBytes,
+    redirect::RedirectRule,
     state::CertifiedTree,
     types::{
         AssetCanisterArgs, AssetProperties, CommitBatchArguments, ConfigurationResponse,
@@ -96,6 +97,11 @@ fn get_asset_properties(key: AssetKey) -> AssetProperties {
 #[query]
 fn get_state_info() -> StateInfo {
     ic_certified_assets::get_state_info()
+}
+
+#[query]
+fn get_redirect_rules() -> Vec<RedirectRule> {
+    ic_certified_assets::get_redirect_rules()
 }
 
 // Update methods
