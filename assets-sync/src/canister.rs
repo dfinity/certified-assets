@@ -28,7 +28,6 @@ pub struct CreateAssetArguments {
     pub content_type: String,
     pub max_age: Option<u64>,
     pub headers: Option<HashMap<String, String>>,
-    pub enable_aliasing: Option<bool>,
     pub allow_raw_access: Option<bool>,
 }
 
@@ -61,7 +60,6 @@ pub struct SetAssetPropertiesArguments {
     pub max_age: Option<Option<u64>>,
     pub headers: Option<Option<Vec<(String, String)>>>,
     pub allow_raw_access: Option<Option<bool>>,
-    pub is_aliased: Option<Option<bool>>,
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -105,7 +103,6 @@ pub struct AssetProperties {
     pub max_age: Option<u64>,
     pub headers: Option<HashMap<String, String>>,
     pub allow_raw_access: Option<bool>,
-    pub is_aliased: Option<bool>,
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize)]
