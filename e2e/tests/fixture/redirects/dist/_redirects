@@ -1,0 +1,7 @@
+# integration fixture covering all three response kinds
+/old              /new.html              301
+/legacy           https://example.com/   302
+/missing-page     /404.html              404
+/gone-page        /410.html              410
+/about            /about.html            200
+/blog/*           /blog/index.html       200

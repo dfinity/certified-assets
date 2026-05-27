@@ -139,6 +139,59 @@ pub fn get_asset_properties(project: &Path, key: &str) -> AssetProperties {
     properties
 }
 
+/// Return the canister ID of `frontend` as printed by `icp canister status --id-only`.
+pub fn frontend_canister_id(project: &Path) -> String {
+    let stdout = icp_cmd(project)
+        .args(["canister", "status", "frontend", "--id-only"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(stdout)
+        .expect("--id-only output should be utf-8")
+        .trim()
+        .to_string()
+}
+
+/// Return the local network's HTTP gateway URL (e.g. `http://localhost:1234`),
+/// as reported by `icp network status --json`.
+pub fn gateway_url(project: &Path) -> String {
+    let stdout = icp_cmd(project)
+        .args(["network", "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value =
+        serde_json::from_slice(&stdout).expect("network status JSON should parse");
+    json["gateway_url"]
+        .as_str()
+        .expect("gateway_url missing from network status JSON")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Fetch `<path>` (must start with `/`) from the `frontend` canister via the
+/// local HTTP gateway. The reqwest client is configured to NOT follow
+/// redirects so callers can assert on 3xx status codes and the `Location`
+/// header. Going through the gateway implicitly validates the
+/// `IC-Certificate` — if certification fails, the gateway short-circuits
+/// before the response reaches the caller.
+pub fn http_fetch(project: &Path, path: &str) -> reqwest::blocking::Response {
+    let cid = frontend_canister_id(project);
+    let base = gateway_url(project);
+    let url = format!("{base}{path}?canisterId={cid}");
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build reqwest client")
+        .get(&url)
+        .send()
+        .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
+}
+
 /// Call `list` on the `frontend` canister and return all asset details.
 pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
     let stdout = icp_cmd(project)
