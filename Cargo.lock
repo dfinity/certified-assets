@@ -1271,6 +1271,7 @@ dependencies = [
  "base64 0.22.1",
  "candid",
  "hex",
+ "http",
  "ic-cdk",
  "ic-certification 3.2.0",
  "ic-certification-testing",
