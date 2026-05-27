@@ -12,6 +12,7 @@ use crate::certification::{
     response_hash, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
 };
 use candid::{CandidType, Deserialize};
+use http::{HeaderName, HeaderValue, StatusCode};
 use ic_representation_independent_hash::Value;
 use serde::Serialize;
 use sha2::Digest;
@@ -44,7 +45,15 @@ pub enum RulePattern {
     Subtree(String),
 }
 
-const SUPPORTED_STATUS_CODES: [u16; 7] = [200, 301, 302, 307, 308, 404, 410];
+const SUPPORTED_STATUS_CODES: &[StatusCode] = &[
+    StatusCode::OK,
+    StatusCode::MOVED_PERMANENTLY,
+    StatusCode::FOUND,
+    StatusCode::TEMPORARY_REDIRECT,
+    StatusCode::PERMANENT_REDIRECT,
+    StatusCode::NOT_FOUND,
+    StatusCode::GONE,
+];
 
 /// Shape-checks a rule. Step 1.1 only checks invariants that don't need rule
 /// semantics — later steps grow this with header/target rules.
@@ -66,12 +75,15 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
         ));
     }
 
-    if !SUPPORTED_STATUS_CODES.contains(&rule.status) {
-        return Err(format!(
-            "unsupported status code {} (expected one of 200, 301, 302, 307, 308, 404, 410)",
-            rule.status
-        ));
-    }
+    let status = StatusCode::from_u16(rule.status)
+        .ok()
+        .filter(|s| SUPPORTED_STATUS_CODES.contains(s))
+        .ok_or_else(|| {
+            format!(
+                "unsupported status code {} (expected one of 200, 301, 302, 307, 308, 404, 410)",
+                rule.status
+            )
+        })?;
 
     if rule.to.contains(":splat") || rule.to.contains(":placeholder") {
         return Err(
@@ -81,14 +93,14 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
         );
     }
 
-    if rule.status == 200 && !rule.to.starts_with('/') {
+    if status == StatusCode::OK && !rule.to.starts_with('/') {
         return Err(format!(
             "'to' for a status-200 rewrite must be an absolute asset path (got '{}')",
             rule.to
         ));
     }
 
-    if matches!(rule.status, 404 | 410) && !rule.to.starts_with('/') {
+    if status.is_client_error() && !rule.to.starts_with('/') {
         return Err(format!(
             "'to' for a 4xx rule must be an absolute asset path \
              (e.g. '/404.html'); got '{}'",
@@ -97,7 +109,6 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
     }
 
     if let Some(headers) = &rule.headers {
-        let is_redirect = (301..=308).contains(&rule.status);
         for (k, v) in headers {
             if k.is_empty() {
                 return Err("header name must not be empty".to_string());
@@ -105,14 +116,14 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
             if v.is_empty() {
                 return Err(format!("header '{k}' has empty value"));
             }
-            if !k.bytes().all(is_valid_header_name_byte) {
-                return Err(format!("header name '{k}' contains invalid characters"));
-            }
-            if !v.bytes().all(is_valid_header_value_byte) {
-                return Err(format!("header '{k}' value contains invalid characters"));
-            }
-            if k.eq_ignore_ascii_case("location") {
-                return Err(if is_redirect {
+            let name = HeaderName::from_bytes(k.as_bytes())
+                .map_err(|_| format!("header name '{k}' contains invalid characters"))?;
+            // `HeaderValue` rejects CR/LF, so a rule can't smuggle header
+            // injection through the canister.
+            HeaderValue::from_str(v)
+                .map_err(|_| format!("header '{k}' value contains invalid characters"))?;
+            if name == http::header::LOCATION {
+                return Err(if status.is_redirection() {
                     "'Location' header must not be set on a 3xx rule; \
                      the canister derives it from the rule's 'to' field"
                         .to_string()
@@ -127,8 +138,8 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
             // and 4xx custom error pages), the content-type comes from the
             // target — overriding it would split it from the certified
             // headers the verifier checks.
-            let borrows_from_target = matches!(rule.status, 200 | 404 | 410);
-            if borrows_from_target && k.eq_ignore_ascii_case("content-type") {
+            let borrows_from_target = status == StatusCode::OK || status.is_client_error();
+            if borrows_from_target && name == http::header::CONTENT_TYPE {
                 return Err(
                     "'content-type' header must not be overridden when the rule serves an \
                      asset body; the canister takes 'content-type' from the target asset"
@@ -139,22 +150,6 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-fn is_valid_header_name_byte(b: u8) -> bool {
-    // RFC 7230 token characters.
-    matches!(b,
-        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
-        | b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.'
-        | b'^' | b'_' | b'`' | b'|' | b'~'
-    )
-}
-
-fn is_valid_header_value_byte(b: u8) -> bool {
-    // Visible ASCII plus space/tab — matches RFC 7230 `field-value` for the
-    // common single-line case. We deliberately reject CR/LF so a rule can't
-    // smuggle header injection through the canister.
-    b == b'\t' || (0x20..=0x7e).contains(&b)
 }
 
 impl RedirectRule {
@@ -204,7 +199,7 @@ impl RedirectRule {
     pub fn certified_headers(&self) -> Vec<(String, String)> {
         let mut headers: Vec<(String, String)> =
             vec![("content-type".to_string(), "text/plain".to_string())];
-        if (301..=308).contains(&self.status) {
+        if StatusCode::from_u16(self.status).is_ok_and(|s| s.is_redirection()) {
             headers.push(("location".to_string(), self.to.clone()));
         }
         if let Some(extras) = &self.headers {
