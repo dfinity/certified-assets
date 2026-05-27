@@ -514,8 +514,7 @@ impl State {
             // 4xx custom error page) honor the target's `allow_raw_access`
             // setting — checked even before the rule has a certified entry
             // because the target may not yet have an encoding.
-            let borrows_from_target =
-                rule.status == 200 || (matches!(rule.status, 404 | 410) && !rule.to.is_empty());
+            let borrows_from_target = matches!(rule.status, 200 | 404 | 410);
             if borrows_from_target {
                 if let Some(target) = self.assets.get(&rule.to) {
                     if !target.allow_raw_access() && req.is_raw_domain() {
@@ -565,6 +564,7 @@ impl State {
         );
         match &entry.kind {
             crate::redirect::CertifiedRuleEntryKind::Synthetic { expression } => {
+                // Synthetic entries only cover 3xx redirects — empty body.
                 let cert_expr_header =
                     crate::certification::build_ic_certificate_expression_header(expression);
                 let mut headers = rule.certified_headers();
@@ -574,7 +574,7 @@ impl State {
                 HttpResponse {
                     status_code: rule.status,
                     headers,
-                    body: RcBytes::from(ByteBuf::from(rule.body())),
+                    body: RcBytes::from(ByteBuf::new()),
                     upgrade: None,
                     streaming_strategy: None,
                 }
@@ -780,10 +780,12 @@ impl State {
             }
         }
         match rule.status {
-            200 => self.build_alias_rule_entry(rule, rule.status),
-            // 4xx with a non-empty `to` becomes a custom error page borrowing
-            // the target asset's body and certified header set.
-            404 | 410 if !rule.to.is_empty() => self.build_alias_rule_entry(rule, rule.status),
+            // 200 rewrites and 4xx custom error pages both borrow body +
+            // headers from the target asset (4xx re-certifies with the
+            // override status; see `build_alias_rule_entry`).
+            200 | 404 | 410 => self.build_alias_rule_entry(rule, rule.status),
+            // 3xx redirects synthesize an empty body; only the headers
+            // (content-type, Location) are certified.
             _ => {
                 let entry = crate::redirect::build_synthetic_entry(rule);
                 for tp in &entry.tree_paths {

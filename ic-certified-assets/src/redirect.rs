@@ -24,8 +24,10 @@ pub struct RedirectRule {
     /// Target. Interpretation depends on `status`:
     /// - 200: absolute asset path (rewrite — serve target's body)
     /// - 3xx: absolute URL or absolute path (sent as `Location`)
-    /// - 4xx: empty for a synthesized body, or an absolute asset path to
-    ///   serve as the custom error page (e.g. `/404.html`)
+    /// - 4xx: absolute asset path to serve as the custom error page
+    ///   (e.g. `/404.html`); if the asset doesn't exist the rule stays
+    ///   inert and unmatched paths fall through to the canister's
+    ///   built-in 404
     pub to: String,
     /// One of 200, 301, 302, 307, 308, 404, 410.
     pub status: u16,
@@ -86,9 +88,9 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
         ));
     }
 
-    if matches!(rule.status, 404 | 410) && !rule.to.is_empty() && !rule.to.starts_with('/') {
+    if matches!(rule.status, 404 | 410) && !rule.to.starts_with('/') {
         return Err(format!(
-            "'to' for a 4xx rule must be empty or an absolute asset path \
+            "'to' for a 4xx rule must be an absolute asset path \
              (e.g. '/404.html'); got '{}'",
             rule.to
         ));
@@ -125,8 +127,7 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
             // and 4xx custom error pages), the content-type comes from the
             // target — overriding it would split it from the certified
             // headers the verifier checks.
-            let borrows_from_target = rule.status == 200
-                || (matches!(rule.status, 404 | 410) && !rule.to.is_empty());
+            let borrows_from_target = matches!(rule.status, 200 | 404 | 410);
             if borrows_from_target && k.eq_ignore_ascii_case("content-type") {
                 return Err(
                     "'content-type' header must not be overridden when the rule serves an \
@@ -196,13 +197,10 @@ impl RedirectRule {
         }
     }
 
-    /// Headers that are part of the certified response for this rule. The
-    /// `ic-certificateexpression` header is appended at certification time and
-    /// is not included here.
-    ///
-    /// Step 1.2: 3xx rules carry `content-type` + `Location`, 4xx rules carry
-    /// `content-type`. Status-200 rules (step 1.3) borrow their headers from
-    /// the target asset; this method is not used in that path.
+    /// Headers that the rule itself synthesizes (used only by 3xx rules; 200
+    /// and 4xx rules borrow their headers from the target asset). The
+    /// `ic-certificateexpression` header is appended at certification time
+    /// and is not included here.
     pub fn certified_headers(&self) -> Vec<(String, String)> {
         let mut headers: Vec<(String, String)> =
             vec![("content-type".to_string(), "text/plain".to_string())];
@@ -215,15 +213,6 @@ impl RedirectRule {
             }
         }
         headers
-    }
-
-    /// Synthesized response body for the rule's status.
-    pub fn body(&self) -> Vec<u8> {
-        match self.status {
-            404 => b"Not Found".to_vec(),
-            410 => b"Gone".to_vec(),
-            _ => Vec::new(),
-        }
     }
 }
 
@@ -257,8 +246,9 @@ pub enum CertifiedRuleEntryKind {
     AliasOf { target_key: String, status: u16 },
 }
 
-/// Build the certified-tree entries for a non-status-200 rule. The rule's
-/// body and headers come from the rule itself.
+/// Build the certified-tree entries for a 3xx redirect rule. The response
+/// has an empty body; only the headers (content-type, Location, and any
+/// rule-supplied extras) are certified.
 pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
     let headers = rule.certified_headers();
     let header_values: Vec<(String, Value)> = headers
@@ -266,8 +256,7 @@ pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
 
-    let body = rule.body();
-    let body_hash: [u8; 32] = sha2::Sha256::digest(&body).into();
+    let body_hash: [u8; 32] = sha2::Sha256::digest([]).into();
 
     let expression = build_ic_certificate_expression_from_headers(&header_values);
 
@@ -474,41 +463,17 @@ mod tests {
     }
 
     #[test]
-    fn certified_headers_4xx_no_location() {
-        let r = rule(RulePattern::Exact("/missing".into()), "", 404);
-        let headers = r.certified_headers();
-        assert!(headers.iter().all(|(k, _)| k != "location"));
-        assert!(headers.iter().any(|(k, _)| k == "content-type"));
-    }
-
-    #[test]
-    fn body_4xx_nonempty() {
-        let r404 = rule(RulePattern::Exact("/missing".into()), "", 404);
-        let r410 = rule(RulePattern::Exact("/gone".into()), "", 410);
-        assert_eq!(r404.body(), b"Not Found");
-        assert_eq!(r410.body(), b"Gone");
-    }
-
-    #[test]
-    fn body_3xx_empty() {
-        let r = rule(RulePattern::Exact("/old".into()), "/new", 301);
-        assert!(r.body().is_empty());
-    }
-
-    #[test]
     fn build_synthetic_entry_distinct_per_status() {
-        // Different status codes must yield different response hashes so the
-        // tree can disambiguate identical paths.
+        // Different 3xx status codes must yield different response hashes so
+        // the tree can disambiguate identical paths.
         let exact = RulePattern::Exact("/x".into());
         let e301 = build_synthetic_entry(&rule(exact.clone(), "/y", 301));
         let e302 = build_synthetic_entry(&rule(exact.clone(), "/y", 302));
-        let e404 = build_synthetic_entry(&rule(exact, "", 404));
-        // All three sit at the same tree location prefix.
+        let e307 = build_synthetic_entry(&rule(exact, "/y", 307));
         assert_eq!(e301.location.0, e302.location.0);
-        assert_eq!(e301.location.0, e404.location.0);
-        // ...but their full tree paths differ in expr_hash / resp_hash.
+        assert_eq!(e301.location.0, e307.location.0);
         assert_ne!(e301.tree_paths[0].0, e302.tree_paths[0].0);
-        assert_ne!(e301.tree_paths[0].0, e404.tree_paths[0].0);
+        assert_ne!(e301.tree_paths[0].0, e307.tree_paths[0].0);
     }
 
     #[test]
@@ -520,6 +485,18 @@ mod tests {
         );
         let err = validate(&r).unwrap_err();
         assert!(err.contains("absolute asset path"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_4xx_empty_target() {
+        // `_redirects` always provides a target — empty `to` is a misuse.
+        for status in [404, 410] {
+            let err = validate(&rule(RulePattern::Exact("/x".into()), "", status)).unwrap_err();
+            assert!(
+                err.contains("must be an absolute asset path"),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]
