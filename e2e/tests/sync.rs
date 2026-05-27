@@ -219,25 +219,28 @@ fn security_policy_headers_persisted() {
     );
 }
 
-/// Configure two source directories with non-overlapping files and sync.
-/// All files from both directories must appear in the canister with the
-/// correct leading-slash keys.
+/// The assets sync plugin owns the URL space of its canister and only
+/// supports a single source directory. A manifest that lists multiple
+/// `dirs:` entries must fail the sync step before any canister mutation.
 #[test]
-fn multi_directory_sync() {
+fn multi_directory_sync_rejected() {
     let tmp = setup_project("tests/fixture/multi-dir");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
-    icp_cmd(project).arg("deploy").assert().success();
-
-    let assets = list_assets(project);
-
-    assert!(
-        assets.iter().any(|a| a.key == "/page.html"),
-        "/page.html from dist-a should be present; got: {assets:#?}",
+    let output = icp_cmd(project)
+        .arg("deploy")
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
     assert!(
-        assets.iter().any(|a| a.key == "/app.js"),
-        "/app.js from dist-b should be present; got: {assets:#?}",
+        combined.contains("expected exactly one input directory"),
+        "expected multi-dir rejection message; got:\n{combined}",
     );
 }

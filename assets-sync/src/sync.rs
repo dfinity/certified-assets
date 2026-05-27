@@ -70,6 +70,21 @@ pub fn sync<C: CanisterCall>(
     identity_principal: &str,
     proxy_canister_id: Option<&str>,
 ) -> Result<String, String> {
+    // The assets plugin owns the URL space of its canister: every key starts at
+    // `/`, `_redirects` lives at the project root, and the canister has no
+    // notion of "merge two trees together". Multiple input directories would
+    // produce ambiguous redirect-file precedence and quietly hide key
+    // collisions, so the contract is exactly one directory.
+    let dir = match dirs {
+        [d] => d,
+        _ => {
+            return Err(format!(
+                "assets sync plugin: expected exactly one input directory, got {}",
+                dirs.len()
+            ))
+        }
+    };
+
     if let Some(_proxy) = proxy_canister_id {
         ensure_commit_permission(canister, identity_principal)?;
     }
@@ -87,7 +102,7 @@ pub fn sync<C: CanisterCall>(
 
     report_security_policy_issues(&sources)?;
 
-    let project_rules = load_redirect_rules(dirs)?;
+    let project_rules = load_redirect_rules(dir)?;
     println!("parsed {} redirect rule(s) from _redirects", project_rules.len());
 
     let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
@@ -408,24 +423,18 @@ fn build_operations(
     ops
 }
 
-/// Reads `_redirects` from each input directory and concatenates the parsed
-/// rules in `dirs` order. A missing file is treated as "no rules from this
-/// dir"; parse errors carry the offending file's path and 1-based line
-/// number so users can fix issues without a canister round-trip.
-fn load_redirect_rules(dirs: &[String]) -> Result<Vec<RedirectRule>, String> {
-    let mut rules = Vec::new();
-    for dir in dirs {
-        let path = Path::new(dir).join(REDIRECTS_FILENAME);
-        if !path.exists() {
-            continue;
-        }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let parsed = redirects::parse(&content)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        rules.extend(parsed);
+/// Reads `_redirects` from the project's input directory, if present. A
+/// missing file is treated as "no rules"; parse errors carry the file's
+/// path and 1-based line number so users can fix issues without a canister
+/// round-trip.
+fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
+    let path = Path::new(dir).join(REDIRECTS_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
     }
-    Ok(rules)
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    redirects::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`: for each
@@ -1541,6 +1550,29 @@ mod tests {
         let mock = PermissionMock::new(vec![identity]);
         ensure_commit_permission(&mock, &identity.to_text()).unwrap();
         assert!(mock.grant_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn sync_rejects_zero_input_dirs() {
+        let mock = SyncMock::new();
+        let err = sync(&mock, &[], &Principal::anonymous().to_text(), None).unwrap_err();
+        assert!(
+            err.contains("expected exactly one input directory"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn sync_rejects_multiple_input_dirs() {
+        let mock = SyncMock::new();
+        let err = sync(
+            &mock,
+            &["dist-a".to_string(), "dist-b".to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("got 2"), "got: {err}");
     }
 
     // Direct mode: canister rejects create_batch with a permission error → sync propagates it.
