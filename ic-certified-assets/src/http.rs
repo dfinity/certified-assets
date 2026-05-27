@@ -39,7 +39,7 @@ pub struct StreamingCallbackToken {
     pub sha256: Option<ByteBuf>,
 }
 
-define_function!(pub CallbackFunc : (StreamingCallbackToken) -> (StreamingCallbackHttpResponse) query);
+define_function!(pub CallbackFunc : (StreamingCallbackToken) -> (Option<StreamingCallbackHttpResponse>) query);
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub enum StreamingStrategy {
     Callback {

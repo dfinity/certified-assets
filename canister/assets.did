@@ -157,7 +157,21 @@ type SetPermissions = record {
 };
 
 service: (asset_canister_args: opt AssetCanisterArgs) -> {
+  // ───────── Canister metadata ─────────
+
   api_version: () -> (nat16) query;
+
+  // ───────── HTTP gateway ─────────
+  // Standard canister HTTP interface; see
+  // https://docs.internetcomputer.org/references/http-gateway-protocol-spec/
+
+  http_request: (request: HttpRequest) -> (HttpResponse) query;
+  http_request_streaming_callback: (token: StreamingCallbackToken) -> (opt StreamingCallbackHttpResponse) query;
+
+  // ───────── Asset queries ─────────
+
+  // Single-call retrieval of a small asset that fits in one response message.
+  retrieve: (key: Key) -> (blob) query;
 
   get: (record {
     key: Key;
@@ -194,34 +208,18 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
     is_aliased: opt bool;
   }) query;
 
-  certified_tree : (record {}) -> (record {
+  get_asset_properties : (key: Key) -> (record {
+    max_age: opt nat64;
+    headers: opt vec HeaderField;
+    allow_raw_access: opt bool;
+    is_aliased: opt bool; } ) query;
+
+  certified_tree : () -> (record {
     certificate: blob;
     tree: blob;
   }) query;
 
-  create_batch : (record {}) -> (record { batch_id: BatchId });
-
-  create_chunks: (record { batch_id: BatchId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });
-
-  // Perform all operations successfully, or reject
-  commit_batch: (CommitBatchArguments) -> ();
-
-  // Compute a hash over the canister content.  Call until it returns Some(hash).
-  compute_state_hash: () -> (opt text);
-
-  // Get information about the current state of the canister
-  get_state_info: () -> (StateInfo) query;
-
-  // Delete a batch that has been created but not yet committed
-  delete_batch: (DeleteBatchArguments) -> ();
-
-  create_asset: (CreateAssetArguments) -> ();
-  set_asset_content: (SetAssetContentArguments) -> ();
-  unset_asset_content: (UnsetAssetContentArguments) -> ();
-
-  delete_asset: (DeleteAssetArguments) -> ();
-
-  clear: (ClearArguments) -> ();
+  // ───────── Asset mutations ─────────
 
   // Single call to create an asset with content for a single content encoding that
   // fits within the message ingress limit.
@@ -230,29 +228,52 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
     content_type: text;
     content_encoding: text;
     content: blob;
-    sha256: opt blob
+    sha256: opt blob;
+    aliased: opt bool;
   }) -> ();
 
-  http_request: (request: HttpRequest) -> (HttpResponse) query;
-  http_request_streaming_callback: (token: StreamingCallbackToken) -> (opt StreamingCallbackHttpResponse) query;
+  create_asset: (CreateAssetArguments) -> ();
+  set_asset_content: (SetAssetContentArguments) -> ();
+  unset_asset_content: (UnsetAssetContentArguments) -> ();
+  set_asset_properties: (SetAssetPropertiesArguments) -> ();
+
+  delete_asset: (DeleteAssetArguments) -> ();
+  clear: () -> ();
+
+  // ───────── Batch upload ─────────
+
+  create_batch : () -> (record { batch_id: BatchId });
+  create_chunks: (record { batch_id: BatchId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });
+
+  // Perform all operations successfully, or reject
+  commit_batch: (CommitBatchArguments) -> ();
+  // Delete a batch that has been created but not yet committed
+  delete_batch: (DeleteBatchArguments) -> ();
+
+  // ───────── Permissions ─────────
 
   authorize: (principal) -> ();
   deauthorize: (principal) -> ();
-  list_authorized: () -> (vec principal);
   grant_permission: (GrantPermission) -> ();
   revoke_permission: (RevokePermission) -> ();
-  list_permitted: (ListPermitted) -> (vec principal);
   take_ownership: () -> ();
+  list_authorized: () -> (vec principal);
+  list_permitted: (ListPermitted) -> (vec principal);
 
-  get_asset_properties : (key: Key) -> (record {
-    max_age: opt nat64;
-    headers: opt vec HeaderField;
-    allow_raw_access: opt bool;
-    is_aliased: opt bool; } ) query;
-  set_asset_properties: (SetAssetPropertiesArguments) -> ();
+  // ───────── State integrity ─────────
+
+  // Get information about the current state of the canister
+  get_state_info: () -> (StateInfo) query;
+  // Compute a hash over the canister content. Call until it returns Some(hash).
+  compute_state_hash: () -> (opt text);
+
+  // ───────── Configuration ─────────
 
   get_configuration: () -> (ConfigurationResponse);
   configure: (ConfigureArguments) -> ();
+
+  // ───────── Proposal validation ─────────
+  // Dry-run validators used by SNS / NNS proposal flows.
 
   validate_grant_permission: (GrantPermission) -> (ValidationResult);
   validate_revoke_permission: (RevokePermission) -> (ValidationResult);

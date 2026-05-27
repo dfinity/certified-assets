@@ -1,7 +1,7 @@
+use crate::batch::{ComputationStatus, BATCH_EXPIRY_NANOS};
 use crate::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
-use crate::batch::{ComputationStatus, BATCH_EXPIRY_NANOS};
 use crate::stable::StableState;
 use crate::state::State;
 use crate::system_context::{CanisterEnv, SystemContext};

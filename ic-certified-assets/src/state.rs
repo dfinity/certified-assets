@@ -5,7 +5,6 @@
 //! as formal arguments. This approach makes it very easy to test the state machine.
 
 use crate::{
-    stable::StableState,
     asset::{
         aliased_by, aliases_of, on_asset_change, Asset, AssetDetails, AssetEncoding,
         AssetEncodingDetails, EncodedAsset, DEFAULT_ALIAS_ENABLED,
@@ -17,6 +16,7 @@ use crate::{
         StreamingCallbackToken, FALLBACK_FILE,
     },
     rc_bytes::RcBytes,
+    stable::StableState,
     state_hash::StateHashComputation,
     system_context::SystemContext,
     types::*,
@@ -353,7 +353,6 @@ impl State {
 
         Ok(())
     }
-
 
     pub fn compute_state_hash(&mut self) -> ComputationStatus<String, (), ()> {
         if self.last_state_hash_timestamp != self.last_state_update_timestamp_ns {
@@ -711,7 +710,6 @@ impl State {
             self.configuration.max_bytes = max_bytes;
         }
     }
-
 }
 
 impl From<StableState> for State {
@@ -767,4 +765,3 @@ impl From<StableState> for State {
         state
     }
 }
-

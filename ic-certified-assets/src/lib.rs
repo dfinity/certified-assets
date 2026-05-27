@@ -269,10 +269,12 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
 
 pub fn http_request_streaming_callback(
     token: StreamingCallbackToken,
-) -> StreamingCallbackHttpResponse {
+) -> Option<StreamingCallbackHttpResponse> {
     with_state(|s| {
-        s.http_request_streaming_callback(token)
-            .unwrap_or_else(|msg| trap(&msg))
+        Some(
+            s.http_request_streaming_callback(token)
+                .unwrap_or_else(|msg| trap(&msg)),
+        )
     })
 }
 
