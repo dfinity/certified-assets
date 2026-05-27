@@ -64,6 +64,25 @@ pub struct SetAssetPropertiesArguments {
     pub is_aliased: Option<Option<bool>>,
 }
 
+#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+pub enum RulePattern {
+    Exact(String),
+    Subtree(String),
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+pub struct RedirectRule {
+    pub from: RulePattern,
+    pub to: String,
+    pub status: u16,
+    pub headers: Option<Vec<(String, String)>>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct SetRedirectRulesArguments {
+    pub rules: Vec<RedirectRule>,
+}
+
 #[derive(CandidType, Clone, Debug)]
 pub enum BatchOperationKind {
     Clear(ClearArguments),
@@ -72,6 +91,7 @@ pub enum BatchOperationKind {
     UnsetAssetContent(UnsetAssetContentArguments),
     SetAssetContent(SetAssetContentArguments),
     SetAssetProperties(SetAssetPropertiesArguments),
+    SetRedirectRules(SetRedirectRulesArguments),
 }
 
 #[derive(CandidType, Debug)]
