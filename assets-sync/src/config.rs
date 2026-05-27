@@ -30,7 +30,6 @@ pub struct AssetConfig {
     pub cache: Option<CacheConfig>,
     pub headers: Option<HeadersConfig>,
     pub ignore: Option<bool>,
-    pub enable_aliasing: Option<bool>,
     pub allow_raw_access: Option<bool>,
     pub encodings: Option<Vec<Encoder>>,
     pub security_policy: Option<SecurityPolicy>,
@@ -43,7 +42,6 @@ impl Default for AssetConfig {
             cache: None,
             headers: None,
             ignore: None,
-            enable_aliasing: None,
             allow_raw_access: Some(true),
             encodings: None,
             security_policy: None,
@@ -123,7 +121,6 @@ struct AssetConfigRule {
     cache: Option<CacheConfig>,
     headers: Maybe<HeadersConfig>,
     ignore: Option<bool>,
-    enable_aliasing: Option<bool>,
     allow_raw_access: Option<bool>,
     encodings: Option<Vec<Encoder>>,
     security_policy: Option<SecurityPolicy>,
@@ -290,9 +287,6 @@ impl AssetConfig {
         if other.ignore.is_some() {
             self.ignore = other.ignore;
         }
-        if other.enable_aliasing.is_some() {
-            self.enable_aliasing = other.enable_aliasing;
-        }
         if other.allow_raw_access.is_some() {
             self.allow_raw_access = other.allow_raw_access;
         }
@@ -312,6 +306,12 @@ impl AssetConfig {
 // ── Deserialization helpers ──────────────────────────────────────────────────
 
 /// Intermediate representation used during JSON5 parsing.
+///
+/// `enable_aliasing` is accepted but ignored: the canister no longer
+/// performs implicit `.html` / `index.html` aliasing — declare the same
+/// behaviour in `_redirects` instead. The field is kept here so older
+/// configs parse cleanly during the migration window; a warning is emitted
+/// per usage in `from_interim`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InterimAssetConfigRule {
@@ -373,13 +373,20 @@ impl AssetConfigRule {
         let matcher = Glob::new(glob_str)
             .map_err(|e| format!("'{}' is not a valid glob pattern: {e}", interim.r#match))?
             .compile_matcher();
+        if interim.enable_aliasing.is_some() {
+            eprintln!(
+                "config rule '{}' in '{}': 'enable_aliasing' is ignored — the canister no \
+                 longer performs implicit aliasing. Declare the equivalent rule in _redirects.",
+                interim.r#match,
+                config_dir.display(),
+            );
+        }
         Ok(Self {
             r#match: matcher,
             pattern: interim.r#match,
             cache: interim.cache,
             headers: interim.headers,
             ignore: interim.ignore,
-            enable_aliasing: interim.enable_aliasing,
             allow_raw_access: interim.allow_raw_access,
             encodings: interim.encodings,
             security_policy: interim.security_policy,

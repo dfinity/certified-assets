@@ -345,7 +345,6 @@ fn build_operations(
                     .config
                     .combined_headers()
                     .map(|h| h.into_iter().collect()),
-                enable_aliasing: pa.source.config.enable_aliasing,
                 allow_raw_access: pa.source.config.allow_raw_access,
             }));
         }
@@ -430,10 +429,10 @@ fn load_redirect_rules(dirs: &[String]) -> Result<Vec<RedirectRule>, String> {
 }
 
 // Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`: for each
-// asset that already exists on the canister, compare `max_age`, `headers`,
-// `allow_raw_access`, and `is_aliased` against the project config and push a
-// `SetAssetProperties` op only when at least one field differs. Newly-created
-// assets already get their properties from `CreateAssetArguments`.
+// asset that already exists on the canister, compare `max_age`, `headers`, and
+// `allow_raw_access` against the project config and push a `SetAssetProperties`
+// op only when at least one field differs. Newly-created assets already get
+// their properties from `CreateAssetArguments`.
 //
 // `canister_assets` is the post-deletion view: keys removed in step 1 (missing
 // from the project, or content_type drift forcing delete-then-create) are
@@ -474,24 +473,16 @@ fn update_properties(
         });
         let headers = (project_headers != canister_headers).then_some(project_headers);
 
-        let is_aliased =
-            (config.enable_aliasing != canister_props.is_aliased).then_some(config.enable_aliasing);
-
         let allow_raw_access = (config.allow_raw_access != canister_props.allow_raw_access)
             .then_some(config.allow_raw_access);
 
-        if max_age.is_some()
-            || headers.is_some()
-            || is_aliased.is_some()
-            || allow_raw_access.is_some()
-        {
+        if max_age.is_some() || headers.is_some() || allow_raw_access.is_some() {
             ops.push(BatchOperationKind::SetAssetProperties(
                 SetAssetPropertiesArguments {
                     key: key.clone(),
                     max_age,
                     headers,
                     allow_raw_access,
-                    is_aliased,
                 },
             ));
         }
@@ -1079,7 +1070,6 @@ mod tests {
                 max_age: Some(86400),
             }),
             headers: Some(headers),
-            enable_aliasing: Some(true),
             allow_raw_access: Some(false),
             ..Default::default()
         };
@@ -1106,7 +1096,6 @@ mod tests {
             create_op.headers.as_ref().unwrap()["X-Frame-Options"],
             "DENY"
         );
-        assert_eq!(create_op.enable_aliasing, Some(true));
         assert_eq!(create_op.allow_raw_access, Some(false));
     }
 
@@ -1147,7 +1136,6 @@ mod tests {
                 max_age: Some(60),
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
@@ -1157,7 +1145,6 @@ mod tests {
         assert_eq!(set.max_age, Some(Some(3600)));
         assert_eq!(set.headers, None);
         assert_eq!(set.allow_raw_access, None);
-        assert_eq!(set.is_aliased, None);
     }
 
     #[test]
@@ -1167,7 +1154,6 @@ mod tests {
             cache: Some(CacheConfig {
                 max_age: Some(3600),
             }),
-            enable_aliasing: Some(true),
             allow_raw_access: Some(true),
             ..AssetConfig::default()
         };
@@ -1188,7 +1174,6 @@ mod tests {
                 max_age: Some(3600),
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: Some(true),
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
@@ -1217,7 +1202,6 @@ mod tests {
                 headers: None,
                 // mk_project_asset uses AssetConfig::default() → allow_raw_access: Some(true).
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
@@ -1261,7 +1245,6 @@ mod tests {
                 max_age: None,
                 headers: Some(canister_headers),
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
@@ -1303,7 +1286,6 @@ mod tests {
                 max_age: None,
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
 
@@ -1360,7 +1342,6 @@ mod tests {
                 max_age: None,
                 headers: Some(canister_headers),
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
@@ -1402,7 +1383,6 @@ mod tests {
                 max_age: Some(60),
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
