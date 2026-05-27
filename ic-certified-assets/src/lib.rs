@@ -249,6 +249,9 @@ pub fn certified_tree() -> CertifiedTree {
 }
 
 pub fn http_request(req: HttpRequest) -> HttpResponse {
+    if req.certificate_version != Some(2) {
+        trap("Only support V2 certification");
+    }
     let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
 
     with_state(|s| {

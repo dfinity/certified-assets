@@ -326,18 +326,11 @@ impl Asset {
         }
     }
 
-    pub fn get_headers_for_asset(
-        &self,
-        encoding_name: &str,
-        cert_version: u16,
-    ) -> HashMap<String, String> {
-        let ce = if cert_version != 1 {
-            self.encodings
-                .get(encoding_name)
-                .and_then(|e| e.certificate_expression.as_ref())
-        } else {
-            None
-        };
+    pub fn get_headers_for_asset(&self, encoding_name: &str) -> HashMap<String, String> {
+        let ce = self
+            .encodings
+            .get(encoding_name)
+            .and_then(|e| e.certificate_expression.as_ref());
         build_headers(
             self.headers.as_ref().map(|h| h.iter()),
             &self.max_age,
@@ -1143,11 +1136,8 @@ impl State {
             }
         }
 
-        let (certificate_header, witness_result) = if req.get_certificate_version() == 1 {
-            self.asset_hashes.witness_to_header_v1(path, certificate)
-        } else {
-            self.asset_hashes.witness_to_header(path, certificate)
-        };
+        let (certificate_header, witness_result) =
+            self.asset_hashes.witness_to_header(path, certificate);
 
         if witness_result == WitnessResult::FallbackFound {
             if let Ok(asset) = self.get_asset(&FALLBACK_FILE.to_string()) {
@@ -1159,7 +1149,6 @@ impl State {
                     Some(&certificate_header),
                     &callback,
                     &etags,
-                    req.get_certificate_version(),
                 ) {
                     return response;
                 }
@@ -1177,13 +1166,12 @@ impl State {
                     Some(&certificate_header),
                     &callback,
                     &etags,
-                    req.get_certificate_version(),
                 ) {
                     return response;
                 }
             }
         }
-        HttpResponse::build_404(certificate_header, req.get_certificate_version())
+        HttpResponse::build_404(certificate_header)
     }
 
     pub fn http_request(
