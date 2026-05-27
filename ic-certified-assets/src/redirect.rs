@@ -7,8 +7,14 @@
 //! certified tree (1.2: 3xx/4xx; 1.3: status-200 rewrites) and remove the
 //! canister's built-in aliasing (1.4).
 
+use crate::certification::{
+    build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
+    response_hash, CertificateExpression, HashTreePath, NestedTreeKey,
+};
 use candid::{CandidType, Deserialize};
+use ic_representation_independent_hash::Value;
 use serde::Serialize;
+use sha2::Digest;
 
 /// A single rule, mirroring one line of a Netlify-style `_redirects` file.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize, Serialize)]
@@ -73,6 +79,7 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
     }
 
     if let Some(headers) = &rule.headers {
+        let is_redirect = (301..=308).contains(&rule.status);
         for (k, v) in headers {
             if k.is_empty() {
                 return Err("header name must not be empty".to_string());
@@ -85,6 +92,18 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
             }
             if !v.bytes().all(is_valid_header_value_byte) {
                 return Err(format!("header '{k}' value contains invalid characters"));
+            }
+            if k.eq_ignore_ascii_case("location") {
+                return Err(if is_redirect {
+                    "'Location' header must not be set on a 3xx rule; \
+                     the canister derives it from the rule's 'to' field"
+                        .to_string()
+                } else {
+                    format!(
+                        "'Location' header is only valid on 3xx rules (status {})",
+                        rule.status
+                    )
+                });
             }
         }
     }
@@ -106,6 +125,117 @@ fn is_valid_header_value_byte(b: u8) -> bool {
     // common single-line case. We deliberately reject CR/LF so a rule can't
     // smuggle header injection through the canister.
     b == b'\t' || (0x20..=0x7e).contains(&b)
+}
+
+impl RedirectRule {
+    /// Does this rule's `from` pattern match the given request path?
+    pub fn matches(&self, request_path: &str) -> bool {
+        match &self.from {
+            RulePattern::Exact(p) => p == request_path,
+            RulePattern::Subtree(prefix) => request_path.starts_with(prefix.as_str()),
+        }
+    }
+
+    /// Source path the rule is anchored at (the `from` pattern, without the
+    /// trailing `/` for subtrees).
+    pub fn source(&self) -> &str {
+        match &self.from {
+            RulePattern::Exact(p) | RulePattern::Subtree(p) => p.as_str(),
+        }
+    }
+
+    /// Tree location for this rule's certified entry — segments through the
+    /// terminator (`<$>` for exact matches, `<*>` for subtrees), without the
+    /// per-response (expr_hash, req_hash, resp_hash) tail.
+    pub fn tree_location(&self) -> HashTreePath {
+        let (path, sentinel) = match &self.from {
+            RulePattern::Exact(p) => (p.as_str(), "<$>"),
+            RulePattern::Subtree(p) => (p.trim_end_matches('/'), "<*>"),
+        };
+        let mut segs: Vec<NestedTreeKey> = vec!["http_expr".into()];
+        for s in path.split('/').filter(|s| !s.is_empty()) {
+            segs.push(NestedTreeKey::String(s.to_string()));
+        }
+        segs.push(NestedTreeKey::String(sentinel.to_string()));
+        HashTreePath::from(segs)
+    }
+
+    /// Headers that are part of the certified response for this rule. The
+    /// `ic-certificateexpression` header is appended at certification time and
+    /// is not included here.
+    ///
+    /// Step 1.2: 3xx rules carry `content-type` + `Location`, 4xx rules carry
+    /// `content-type`. Status-200 rules (step 1.3) borrow their headers from
+    /// the target asset; this method is not used in that path.
+    pub fn certified_headers(&self) -> Vec<(String, String)> {
+        let mut headers: Vec<(String, String)> =
+            vec![("content-type".to_string(), "text/plain".to_string())];
+        if (301..=308).contains(&self.status) {
+            headers.push(("location".to_string(), self.to.clone()));
+        }
+        if let Some(extras) = &self.headers {
+            for (k, v) in extras {
+                headers.push((k.to_lowercase(), v.clone()));
+            }
+        }
+        headers
+    }
+
+    /// Synthesized response body for the rule's status.
+    pub fn body(&self) -> Vec<u8> {
+        match self.status {
+            404 => b"Not Found".to_vec(),
+            410 => b"Gone".to_vec(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Precomputed certified-tree entry for a single rule.
+#[derive(Clone, Debug)]
+pub struct CertifiedRuleEntry {
+    /// Full path including the per-response tail — used to insert/remove the
+    /// entry in the asset_hashes tree.
+    pub tree_path: HashTreePath,
+    /// Location prefix (`["http_expr", segs.., "<$>"|"<*>"]`) — used as the
+    /// `expr_path` field of the `IC-Certificate` response header.
+    pub location: HashTreePath,
+    /// The certificate expression listing the certified header names.
+    pub expression: CertificateExpression,
+}
+
+/// Build the certified-tree entry for a non-status-200 rule.
+pub(crate) fn build_certified_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
+    let headers = rule.certified_headers();
+    let header_values: Vec<(String, Value)> = headers
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+
+    let body = rule.body();
+    let body_hash: [u8; 32] = sha2::Sha256::digest(&body).into();
+
+    let expression = build_ic_certificate_expression_from_headers(&header_values);
+
+    // Mirror `certify_fallback_response`: the synthesized
+    // `ic-certificateexpression` header is itself part of the certified
+    // response.
+    let cert_expr_header = build_ic_certificate_expression_header(&expression);
+    let mut certified = header_values.clone();
+    certified.push((cert_expr_header.0, Value::String(cert_expr_header.1)));
+    let resp_hash = response_hash(&certified, rule.status, &body_hash);
+
+    let location = rule.tree_location();
+    let mut full_segs = location.0.clone();
+    full_segs.push(NestedTreeKey::Hash(expression.expression_hash));
+    full_segs.push(NestedTreeKey::String(String::new())); // empty request hash sentinel
+    full_segs.push(NestedTreeKey::Hash(resp_hash.0));
+
+    CertifiedRuleEntry {
+        tree_path: HashTreePath::from(full_segs),
+        location,
+        expression,
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +319,110 @@ mod tests {
         r.headers = Some(vec![("X-Foo".into(), "bar\r\nX-Evil: 1".into())]);
         let err = validate(&r).unwrap_err();
         assert!(err.contains("invalid characters"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_location_header_on_3xx() {
+        let mut r = rule(RulePattern::Exact("/a".into()), "/b", 301);
+        r.headers = Some(vec![("Location".into(), "/other".into())]);
+        let err = validate(&r).unwrap_err();
+        assert!(err.contains("derives it from the rule's 'to' field"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_location_header_on_4xx() {
+        let mut r = rule(RulePattern::Exact("/a".into()), "/b", 404);
+        r.headers = Some(vec![("Location".into(), "/other".into())]);
+        let err = validate(&r).unwrap_err();
+        assert!(err.contains("only valid on 3xx rules"), "got: {err}");
+    }
+
+    #[test]
+    fn tree_location_exact() {
+        let r = rule(RulePattern::Exact("/old".into()), "/new", 301);
+        let segs = r.tree_location().0;
+        let names: Vec<&str> = segs
+            .iter()
+            .map(|k| match k {
+                NestedTreeKey::String(s) => s.as_str(),
+                _ => panic!("expected string segment"),
+            })
+            .collect();
+        assert_eq!(names, vec!["http_expr", "old", "<$>"]);
+    }
+
+    #[test]
+    fn tree_location_subtree() {
+        let r = rule(RulePattern::Subtree("/blog/".into()), "/home", 308);
+        let segs = r.tree_location().0;
+        let names: Vec<&str> = segs
+            .iter()
+            .map(|k| match k {
+                NestedTreeKey::String(s) => s.as_str(),
+                _ => panic!("expected string segment"),
+            })
+            .collect();
+        assert_eq!(names, vec!["http_expr", "blog", "<*>"]);
+    }
+
+    #[test]
+    fn tree_location_root_subtree() {
+        let r = rule(RulePattern::Subtree("/".into()), "/home", 308);
+        let segs = r.tree_location().0;
+        let names: Vec<&str> = segs
+            .iter()
+            .map(|k| match k {
+                NestedTreeKey::String(s) => s.as_str(),
+                _ => panic!("expected string segment"),
+            })
+            .collect();
+        assert_eq!(names, vec!["http_expr", "<*>"]);
+    }
+
+    #[test]
+    fn certified_headers_3xx_includes_location() {
+        let r = rule(RulePattern::Exact("/old".into()), "/new", 301);
+        let headers = r.certified_headers();
+        assert!(headers.iter().any(|(k, v)| k == "location" && v == "/new"));
+        assert!(headers.iter().any(|(k, _)| k == "content-type"));
+    }
+
+    #[test]
+    fn certified_headers_4xx_no_location() {
+        let r = rule(RulePattern::Exact("/missing".into()), "", 404);
+        let headers = r.certified_headers();
+        assert!(headers.iter().all(|(k, _)| k != "location"));
+        assert!(headers.iter().any(|(k, _)| k == "content-type"));
+    }
+
+    #[test]
+    fn body_4xx_nonempty() {
+        let r404 = rule(RulePattern::Exact("/missing".into()), "", 404);
+        let r410 = rule(RulePattern::Exact("/gone".into()), "", 410);
+        assert_eq!(r404.body(), b"Not Found");
+        assert_eq!(r410.body(), b"Gone");
+    }
+
+    #[test]
+    fn body_3xx_empty() {
+        let r = rule(RulePattern::Exact("/old".into()), "/new", 301);
+        assert!(r.body().is_empty());
+    }
+
+    #[test]
+    fn build_certified_entry_distinct_per_status() {
+        // Different status codes must yield different response hashes so the
+        // tree can disambiguate identical paths.
+        let exact = RulePattern::Exact("/x".into());
+        let e301 = build_certified_entry(&rule(exact.clone(), "/y", 301));
+        let e302 = build_certified_entry(&rule(exact.clone(), "/y", 302));
+        let e404 = build_certified_entry(&rule(exact, "", 404));
+        // All three sit at the same tree location prefix.
+        assert_eq!(e301.location.0, e302.location.0);
+        assert_eq!(e301.location.0, e404.location.0);
+        // ...but their full tree paths differ in expr_hash / resp_hash.
+        assert_ne!(e301.tree_path.0, e302.tree_path.0);
+        assert_ne!(e301.tree_path.0, e404.tree_path.0);
     }
 
     #[test]

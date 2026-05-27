@@ -3276,9 +3276,7 @@ mod redirect_rules {
     }
 
     #[test]
-    fn rules_are_inert_in_step_1_1() {
-        // Step 1.1 deliberately stores rules without affecting `http_request`.
-        // This test will need to change once step 1.2 / 1.3 wire them in.
+    fn exact_3xx_rule_serves_redirect_with_certificate() {
         let mut state = State::default();
         commit(
             &mut state,
@@ -3293,11 +3291,158 @@ mod redirect_rules {
         )
         .unwrap();
 
+        let response = certified_http_request(&state, RequestBuilder::get("/old").build());
+        assert_eq!(response.status_code, 301);
+        assert_eq!(lookup_header(&response, "Location"), Some("/new"));
+    }
+
+    #[test]
+    fn subtree_3xx_rule_fires_for_descendants_and_verifies() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/legacy/".into()),
+                    to: "/home".into(),
+                    status: 308,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+
+        let response =
+            certified_http_request(&state, RequestBuilder::get("/legacy/anything/here").build());
+        assert_eq!(response.status_code, 308);
+        assert_eq!(lookup_header(&response, "Location"), Some("/home"));
+    }
+
+    #[test]
+    fn rule_4xx_404_and_410_serve_certified_bodies() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![
+                    RedirectRule {
+                        from: RulePattern::Exact("/missing.html".into()),
+                        to: String::new(),
+                        status: 404,
+                        headers: None,
+                    },
+                    RedirectRule {
+                        from: RulePattern::Exact("/gone".into()),
+                        to: String::new(),
+                        status: 410,
+                        headers: None,
+                    },
+                ],
+            })],
+        )
+        .unwrap();
+
+        let not_found =
+            certified_http_request(&state, RequestBuilder::get("/missing.html").build());
+        assert_eq!(not_found.status_code, 404);
+        assert_eq!(not_found.body.as_ref(), b"Not Found");
+
+        let gone = certified_http_request(&state, RequestBuilder::get("/gone").build());
+        assert_eq!(gone.status_code, 410);
+        assert_eq!(gone.body.as_ref(), b"Gone");
+    }
+
+    #[test]
+    fn first_match_wins_across_multiple_3xx_rules() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![
+                    RedirectRule {
+                        from: RulePattern::Exact("/dup".into()),
+                        to: "/first".into(),
+                        status: 301,
+                        headers: None,
+                    },
+                    RedirectRule {
+                        from: RulePattern::Exact("/dup".into()),
+                        to: "/second".into(),
+                        status: 302,
+                        headers: None,
+                    },
+                ],
+            })],
+        )
+        .unwrap();
+
+        let response = certified_http_request(&state, RequestBuilder::get("/dup").build());
+        assert_eq!(response.status_code, 301);
+        assert_eq!(lookup_header(&response, "Location"), Some("/first"));
+    }
+
+    #[test]
+    fn rules_survive_post_upgrade_and_witnesses_still_validate() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: sample_rules(),
+            })],
+        )
+        .unwrap();
+        // Sanity: rules fire pre-upgrade.
+        let pre =
+            certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        assert_eq!(pre.status_code, 308);
+
+        let stable: StableState = state.into();
+        let state: State = stable.into();
+
+        let post =
+            certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        assert_eq!(post.status_code, 308);
+        assert_eq!(lookup_header(&post, "Location"), Some("/home"));
+    }
+
+    #[test]
+    fn status_200_rules_remain_inert_until_step_1_3() {
+        // Step 1.2 deliberately skips wiring status-200 rules — they are
+        // visible in `get_redirect_rules` but `http_request` does not yet
+        // honor them. Remove this test once step 1.3 lands the rewrite path.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/target.html", "text/html")
+                .with_encoding("identity", vec![BODY])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/foo".into()),
+                    to: "/target.html".into(),
+                    status: 200,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+
+        // The rule itself does not fire. (Built-in alias /foo → /foo.html
+        // still maps /foo to nothing, falling through to the built-in 404.
+        // Step 1.4 removes that built-in too; for now the response is a 404.)
         let response = state.http_request(
-            RequestBuilder::get("/old").build(),
+            RequestBuilder::get("/foo").build(),
             &[],
             unused_callback(),
         );
         assert_eq!(response.status_code, 404);
+
+        // But the rule is stored.
+        assert_eq!(state.get_redirect_rules().len(), 1);
     }
 }
