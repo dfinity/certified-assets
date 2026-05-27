@@ -374,7 +374,7 @@ fn can_create_assets_using_batch_api() {
 }
 
 #[test]
-fn serve_correct_encoding_v2() {
+fn serve_correct_encoding() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -427,7 +427,7 @@ fn serve_correct_encoding_v2() {
 }
 
 #[test]
-fn serve_fallback_v2() {
+fn serve_fallback() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -1996,7 +1996,7 @@ mod certificate_expression {
 }
 
 #[cfg(test)]
-mod certification_v2 {
+mod certification {
     use super::*;
 
     #[test]

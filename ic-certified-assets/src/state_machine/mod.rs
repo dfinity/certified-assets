@@ -44,11 +44,10 @@ use std::convert::TryInto;
 /// delays the expiry further.
 pub const BATCH_EXPIRY_NANOS: u64 = 300_000_000_000;
 
-/// The order in which we pick encodings for certification.
+/// The preferred order in which we pick encodings.
 const ENCODING_CERTIFICATION_ORDER: &[&str] = &["identity", "gzip", "compress", "deflate", "br"];
-// Order of encodings is relevant for v1. Follow ENCODING_CERTIFICATION_ORDER,
-// then follow the order of existing encodings.
-// For v2, it is important to certify all encodings, therefore all encodings are added to the list.
+// All encodings get certified; this function returns them in preference order
+// (preferred names first, then any remaining encodings in iteration order).
 pub fn encoding_certification_order<'a>(
     actual_encodings: impl Iterator<Item = &'a String>,
 ) -> Vec<String> {
@@ -77,8 +76,6 @@ pub struct AssetEncoding {
     pub modified: Timestamp,
     pub content_chunks: Vec<RcBytes>,
     pub total_length: usize,
-    /// Valid as-is for v2.
-    /// For v1, also make sure that encoding name == asset.most_important_encoding_v1()
     pub certified: bool,
     pub sha256: [u8; 32],
     pub certificate_expression: Option<CertificateExpression>,
@@ -86,7 +83,7 @@ pub struct AssetEncoding {
 }
 
 impl AssetEncoding {
-    fn asset_hash_path_v2(&self, path: &AssetPath, status_code: u16) -> Option<HashTreePath> {
+    fn asset_hash_path(&self, path: &AssetPath, status_code: u16) -> Option<HashTreePath> {
         self.certificate_expression.as_ref().and_then(|ce| {
             self.response_hashes.as_ref().and_then(|hashes| {
                 hashes.get(&status_code).map(|response_hash| {
@@ -339,16 +336,6 @@ impl Asset {
             ce,
         )
     }
-
-    // certification v1 only certifies the most important encoding
-    pub fn most_important_encoding_v1(&self) -> String {
-        for enc in encoding_certification_order(self.encodings.keys()).into_iter() {
-            if self.encodings.contains_key(&enc) {
-                return enc;
-            }
-        }
-        "no encoding found".to_string()
-    }
 }
 
 impl State {
@@ -538,10 +525,8 @@ impl State {
         if self.assets.contains_key(&arg.key) {
             for dependent in self.dependent_keys(&arg.key) {
                 self.asset_hashes.remove_responses_for_path(&dependent);
-                self.asset_hashes.remove_responses_for_path_v1(&dependent);
                 if dependent == FALLBACK_FILE {
                     self.asset_hashes.remove_fallback_responses();
-                    self.asset_hashes.remove_fallback_responses_v1();
                 }
             }
             self.assets.remove(&arg.key);
@@ -1338,7 +1323,7 @@ impl State {
     fn certify_404_if_required(&mut self) {
         if !self
             .asset_hashes
-            .contains_path(HashTreePath::not_found_base_path_v2().as_vec())
+            .contains_path(HashTreePath::not_found_base_path().as_vec())
         {
             let response = HttpResponse::uncertified_404();
             let headers: Vec<_> = response
@@ -1467,7 +1452,6 @@ fn on_asset_change(
 
     asset.update_ic_certificate_expressions();
 
-    let most_important_encoding_v1 = asset.most_important_encoding_v1();
     let Asset {
         content_type,
         encodings,
@@ -1477,20 +1461,12 @@ fn on_asset_change(
     } = asset;
 
     // Insert certified response values into hash_tree
-    // Once certification v1 support is removed, encoding_certification_order().iter() can be replaced with asset.encodings.iter_mut()
-    for enc_name in encoding_certification_order(encodings.keys()).iter() {
-        if let Some(enc) = encodings.get_mut(enc_name) {
-            enc.response_hashes =
-                Some(enc.compute_response_hashes(headers, max_age, content_type, enc_name));
+    for (enc_name, enc) in encodings.iter_mut() {
+        enc.response_hashes =
+            Some(enc.compute_response_hashes(headers, max_age, content_type, enc_name));
 
-            insert_new_response_hashes_for_encoding(
-                asset_hashes,
-                enc,
-                &affected_keys,
-                enc_name == &most_important_encoding_v1,
-            );
-            enc.certified = true;
-        }
+        insert_new_response_hashes_for_encoding(asset_hashes, enc, &affected_keys);
+        enc.certified = true;
     }
 }
 
@@ -1500,10 +1476,8 @@ fn delete_preexisting_asset_hashes(
 ) {
     for key in affected_keys.iter() {
         asset_hashes.remove_responses_for_path(key);
-        asset_hashes.remove_responses_for_path_v1(key);
         if key == FALLBACK_FILE {
             asset_hashes.remove_fallback_responses();
-            asset_hashes.remove_fallback_responses_v1();
         }
     }
 }
@@ -1512,16 +1486,11 @@ fn insert_new_response_hashes_for_encoding(
     asset_hashes: &mut CertifiedResponses,
     enc: &AssetEncoding,
     affected_keys: &Vec<String>,
-    is_most_important_encoding: bool,
 ) {
-    let affected_keys_slice: Vec<&str> = affected_keys.iter().map(|s| s.as_str()).collect();
-    if is_most_important_encoding {
-        asset_hashes.certify_response_v1(affected_keys_slice.as_slice(), &[], Some(enc.sha256));
-    }
     for key in affected_keys {
         let key_path = AssetPath::from(&key);
         for status_code in STATUS_CODES_TO_CERTIFY {
-            if let Some(hash_path) = enc.asset_hash_path_v2(&key_path, status_code) {
+            if let Some(hash_path) = enc.asset_hash_path(&key_path, status_code) {
                 asset_hashes.certify_response_precomputed(&hash_path);
             } else {
                 unreachable!(

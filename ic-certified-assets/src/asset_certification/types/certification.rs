@@ -1,7 +1,4 @@
-use super::{
-    http::{build_ic_certificate_expression_from_headers, FALLBACK_FILE},
-    rc_bytes::RcBytes,
-};
+use super::{http::build_ic_certificate_expression_from_headers, rc_bytes::RcBytes};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::CandidType;
 use ic_representation_independent_hash::Value;
@@ -61,14 +58,7 @@ impl AssetPath {
         format!("/{}", self.0.join("/"))
     }
 
-    pub fn asset_hash_path_v1(&self) -> HashTreePath {
-        HashTreePath(vec![
-            "http_assets".into(),
-            self.reconstruct_asset_key().into(),
-        ])
-    }
-
-    pub fn asset_hash_path_root_v2(&self) -> HashTreePath {
+    pub fn asset_hash_path_root(&self) -> HashTreePath {
         let mut hash_path: Vec<NestedTreeKey> = self
             .0
             .iter()
@@ -87,7 +77,7 @@ impl AssetPath {
     ) -> HashTreePath {
         let mut hash_path: Vec<NestedTreeKey> = vec![];
         if matches!(self.0.last(), Some(segment) if segment == "<*>") {
-            // it's a v2 fallback path
+            // it's a fallback path
             hash_path.push("http_expr".into());
             hash_path.push("<*>".into());
         } else {
@@ -110,10 +100,6 @@ impl AssetPath {
 
     pub fn fallback_path() -> Self {
         Self(vec!["http_expr".into(), "<*>".into()])
-    }
-
-    pub fn fallback_path_v1() -> Self {
-        Self::from(FALLBACK_FILE)
     }
 }
 
@@ -152,7 +138,7 @@ impl HashTreePath {
     /// - that there is no fallback file with higher priority
     ///
     /// in the hash tree.
-    pub fn fallback_paths_v2(&self) -> Vec<Self> {
+    pub fn fallback_paths(&self) -> Vec<Self> {
         let mut paths = Vec::new();
 
         // starting at 1 because "http_expr" is always the starting element
@@ -200,16 +186,11 @@ impl HashTreePath {
         AssetPath::from(path).hash_tree_path(&certificate_expression, &request_hash, response_hash)
     }
 
-    pub fn not_found_base_path_v2() -> Self {
+    pub fn not_found_base_path() -> Self {
         HashTreePath::from(Vec::from([
             NestedTreeKey::String("http_expr".into()),
             NestedTreeKey::String("<*>".into()),
         ]))
-    }
-
-    pub fn not_found_base_path_v1() -> Self {
-        let not_found_path = AssetPath::from(FALLBACK_FILE);
-        not_found_path.asset_hash_path_v1()
     }
 }
 
