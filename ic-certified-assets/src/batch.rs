@@ -14,7 +14,7 @@ use crate::asset::{is_html_key, on_asset_change, Timestamp};
 use crate::certification::{AssetKey, HashTreePath};
 use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
-use crate::state_machine::State;
+use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
     BatchId, BatchOperation, ChunkId, CommitBatchArguments, CreateChunksArg, DeleteBatchArguments,

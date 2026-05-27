@@ -1,13 +1,11 @@
 //! This module contains a pure implementation of the certified assets state machine.
+//!
+//! NB. This module should not depend on ic_cdk, it contains only pure state transition functions.
+//! All the environment (time, certificates, etc.) is passed to the state transition functions
+//! as formal arguments. This approach makes it very easy to test the state machine.
 
-mod stable;
-
-pub use stable::StableState;
-
-// NB. This module should not depend on ic_cdk, it contains only pure state transition functions.
-// All the environment (time, certificates, etc.) is passed to the state transition functions
-// as formal arguments.  This approach makes it very easy to test the state machine.
 use crate::{
+    stable::StableState,
     asset::{
         aliased_by, aliases_of, on_asset_change, Asset, AssetDetails, AssetEncoding,
         AssetEncodingDetails, EncodedAsset, DEFAULT_ALIAS_ENABLED,

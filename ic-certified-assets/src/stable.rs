@@ -10,17 +10,17 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableState {
-    pub(super) authorized: Vec<Principal>, // ignored if permissions is Some(_)
-    pub(super) permissions: Option<StableStatePermissions>,
-    pub(super) stable_assets: HashMap<String, StableAsset>,
+    pub(crate) authorized: Vec<Principal>, // ignored if permissions is Some(_)
+    pub(crate) permissions: Option<StableStatePermissions>,
+    pub(crate) stable_assets: HashMap<String, StableAsset>,
 
-    pub(super) next_batch_id: Option<u64>,
-    pub(super) configuration: Option<StableConfiguration>,
-    pub(super) last_state_update_timestamp: Option<u64>,
+    pub(crate) next_batch_id: Option<u64>,
+    pub(crate) configuration: Option<StableConfiguration>,
+    pub(crate) last_state_update_timestamp: Option<u64>,
 }
 
-impl From<super::State> for StableState {
-    fn from(state: super::State) -> Self {
+impl From<crate::state::State> for StableState {
+    fn from(state: crate::state::State) -> Self {
         let permissions = StableStatePermissions {
             commit: state.commit_principals,
             prepare: state.prepare_principals,
@@ -43,12 +43,12 @@ impl From<super::State> for StableState {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableStatePermissions {
-    pub(super) commit: BTreeSet<Principal>,
-    pub(super) prepare: BTreeSet<Principal>,
-    pub(super) manage_permissions: BTreeSet<Principal>,
+    pub(crate) commit: BTreeSet<Principal>,
+    pub(crate) prepare: BTreeSet<Principal>,
+    pub(crate) manage_permissions: BTreeSet<Principal>,
 }
 
-/// Same as [super::Configuration] but serde-serializable
+/// Same as [crate::state::Configuration] but serde-serializable
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableConfiguration {
     pub max_batches: Option<u64>,
@@ -56,8 +56,8 @@ pub struct StableConfiguration {
     pub max_bytes: Option<u64>,
 }
 
-impl From<super::Configuration> for StableConfiguration {
-    fn from(configuration: super::Configuration) -> Self {
+impl From<crate::state::Configuration> for StableConfiguration {
+    fn from(configuration: crate::state::Configuration) -> Self {
         Self {
             max_batches: configuration.max_batches,
             max_chunks: configuration.max_chunks,
@@ -66,7 +66,7 @@ impl From<super::Configuration> for StableConfiguration {
     }
 }
 
-impl From<StableConfiguration> for super::Configuration {
+impl From<StableConfiguration> for crate::state::Configuration {
     fn from(stable_configuration: StableConfiguration) -> Self {
         Self {
             max_batches: stable_configuration.max_batches,

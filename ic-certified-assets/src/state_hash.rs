@@ -1,4 +1,4 @@
-use crate::state_machine::State;
+use crate::state::State;
 use crate::types::{CreateAssetArguments, SetAssetContentArguments};
 use itertools::Itertools;
 use serde_bytes::ByteBuf;

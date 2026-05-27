@@ -6,8 +6,9 @@ mod cookies;
 pub mod http;
 pub mod nested_tree;
 pub mod rc_bytes;
+pub mod stable;
+pub mod state;
 pub mod state_hash;
-pub mod state_machine;
 pub mod system_context;
 pub mod types;
 mod url;
@@ -15,7 +16,7 @@ mod url;
 #[cfg(test)]
 mod tests;
 
-pub use crate::state_machine::StableState;
+pub use crate::stable::StableState;
 use crate::{
     asset::{AssetDetails, EncodedAsset},
     batch::ComputationStatus,
@@ -25,7 +26,7 @@ use crate::{
         StreamingCallbackToken,
     },
     rc_bytes::RcBytes,
-    state_machine::{CertifiedTree, State},
+    state::{CertifiedTree, State},
     system_context::SystemContext,
     types::*,
 };
@@ -438,13 +439,12 @@ where
 #[macro_export]
 macro_rules! export_canister_methods {
     () => {
-        use $crate::asset;
-        use $crate::batch;
-        use $crate::certification;
-        use $crate::http;
-        use $crate::rc_bytes;
-        use $crate::state_machine;
-        use $crate::types;
+        use $crate::asset as __ic_certified_assets_asset;
+        use $crate::certification as __ic_certified_assets_certification;
+        use $crate::http as __ic_certified_assets_http;
+        use $crate::rc_bytes as __ic_certified_assets_rc_bytes;
+        use $crate::state as __ic_certified_assets_state;
+        use $crate::types as __ic_certified_assets_types;
 
         use $crate::can_commit as __ic_certified_assets_can_commit;
         use $crate::can_prepare as __ic_certified_assets_can_prepare;
@@ -465,56 +465,56 @@ macro_rules! export_canister_methods {
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn retrieve(
-            key: certification::AssetKey,
-        ) -> rc_bytes::RcBytes {
+            key: __ic_certified_assets_certification::AssetKey,
+        ) -> __ic_certified_assets_rc_bytes::RcBytes {
             $crate::retrieve(key)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
-        fn get(arg: types::GetArg) -> asset::EncodedAsset {
+        fn get(arg: __ic_certified_assets_types::GetArg) -> __ic_certified_assets_asset::EncodedAsset {
             $crate::get(arg)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
-        fn get_chunk(arg: types::GetChunkArg) -> types::GetChunkResponse {
+        fn get_chunk(arg: __ic_certified_assets_types::GetChunkArg) -> __ic_certified_assets_types::GetChunkResponse {
             $crate::get_chunk(arg)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
-        fn list(request: types::ListRequest) -> Vec<asset::AssetDetails> {
+        fn list(request: __ic_certified_assets_types::ListRequest) -> Vec<__ic_certified_assets_asset::AssetDetails> {
             $crate::list(request)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
-        fn certified_tree() -> state_machine::CertifiedTree {
+        fn certified_tree() -> __ic_certified_assets_state::CertifiedTree {
             $crate::certified_tree()
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn http_request(
-            req: http::HttpRequest,
-        ) -> http::HttpResponse {
+            req: __ic_certified_assets_http::HttpRequest,
+        ) -> __ic_certified_assets_http::HttpResponse {
             $crate::http_request(req)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn http_request_streaming_callback(
-            token: http::StreamingCallbackToken,
-        ) -> http::StreamingCallbackHttpResponse {
+            token: __ic_certified_assets_http::StreamingCallbackToken,
+        ) -> __ic_certified_assets_http::StreamingCallbackHttpResponse {
             $crate::http_request_streaming_callback(token)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn get_asset_properties(
-            key: certification::AssetKey,
-        ) -> types::AssetProperties {
+            key: __ic_certified_assets_certification::AssetKey,
+        ) -> __ic_certified_assets_types::AssetProperties {
             $crate::get_asset_properties(key)
         }
 
@@ -531,14 +531,14 @@ macro_rules! export_canister_methods {
             guard = "__ic_certified_assets_is_manager_or_controller"
         )]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn grant_permission(arg: types::GrantPermissionArguments) {
+        fn grant_permission(arg: __ic_certified_assets_types::GrantPermissionArguments) {
             $crate::grant_permission(arg)
         }
 
         #[$crate::ic_certified_assets_update]
         #[$crate::ic_certified_assets_candid_method(update)]
         async fn validate_grant_permission(
-            arg: types::GrantPermissionArguments,
+            arg: __ic_certified_assets_types::GrantPermissionArguments,
         ) -> Result<String, String> {
             $crate::validate_grant_permission(arg).await
         }
@@ -551,14 +551,14 @@ macro_rules! export_canister_methods {
 
         #[$crate::ic_certified_assets_update]
         #[$crate::ic_certified_assets_candid_method(update)]
-        async fn revoke_permission(arg: types::RevokePermissionArguments) {
+        async fn revoke_permission(arg: __ic_certified_assets_types::RevokePermissionArguments) {
             $crate::revoke_permission(arg).await
         }
 
         #[$crate::ic_certified_assets_update]
         #[$crate::ic_certified_assets_candid_method(update)]
         async fn validate_revoke_permission(
-            arg: types::RevokePermissionArguments,
+            arg: __ic_certified_assets_types::RevokePermissionArguments,
         ) -> Result<String, String> {
             $crate::validate_revoke_permission(arg).await
         }
@@ -571,7 +571,7 @@ macro_rules! export_canister_methods {
 
         #[$crate::ic_certified_assets_update]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn list_permitted(arg: types::ListPermittedArguments) -> Vec<candid::Principal> {
+        fn list_permitted(arg: __ic_certified_assets_types::ListPermittedArguments) -> Vec<candid::Principal> {
             $crate::list_permitted(arg)
         }
 
@@ -589,43 +589,43 @@ macro_rules! export_canister_methods {
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn store(arg: types::StoreArg) {
+        fn store(arg: __ic_certified_assets_types::StoreArg) {
             $crate::store(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn create_batch() -> types::CreateBatchResponse {
+        fn create_batch() -> __ic_certified_assets_types::CreateBatchResponse {
             $crate::create_batch()
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn create_chunks(arg: types::CreateChunksArg) -> types::CreateChunksResponse {
+        fn create_chunks(arg: __ic_certified_assets_types::CreateChunksArg) -> __ic_certified_assets_types::CreateChunksResponse {
             $crate::create_chunks(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn create_asset(arg: types::CreateAssetArguments) {
+        fn create_asset(arg: __ic_certified_assets_types::CreateAssetArguments) {
             $crate::create_asset(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn set_asset_content(arg: types::SetAssetContentArguments) {
+        fn set_asset_content(arg: __ic_certified_assets_types::SetAssetContentArguments) {
             $crate::set_asset_content(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn unset_asset_content(arg: types::UnsetAssetContentArguments) {
+        fn unset_asset_content(arg: __ic_certified_assets_types::UnsetAssetContentArguments) {
             $crate::unset_asset_content(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn delete_asset(arg: types::DeleteAssetArguments) {
+        fn delete_asset(arg: __ic_certified_assets_types::DeleteAssetArguments) {
             $crate::delete_asset(arg)
         }
 
@@ -637,7 +637,7 @@ macro_rules! export_canister_methods {
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        async fn commit_batch(arg: types::CommitBatchArguments) {
+        async fn commit_batch(arg: __ic_certified_assets_types::CommitBatchArguments) {
             $crate::commit_batch(arg).await
         }
 
@@ -649,37 +649,37 @@ macro_rules! export_canister_methods {
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
-        fn get_state_info() -> types::StateInfo {
+        fn get_state_info() -> __ic_certified_assets_types::StateInfo {
             $crate::get_state_info()
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn delete_batch(arg: types::DeleteBatchArguments) {
+        fn delete_batch(arg: __ic_certified_assets_types::DeleteBatchArguments) {
             $crate::delete_batch(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn set_asset_properties(arg: types::SetAssetPropertiesArguments) {
+        fn set_asset_properties(arg: __ic_certified_assets_types::SetAssetPropertiesArguments) {
             $crate::set_asset_properties(arg)
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_prepare")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn get_configuration() -> types::ConfigurationResponse {
+        fn get_configuration() -> __ic_certified_assets_types::ConfigurationResponse {
             $crate::get_configuration()
         }
 
         #[$crate::ic_certified_assets_update(guard = "__ic_certified_assets_can_commit")]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn configure(arg: types::ConfigureArguments) {
+        fn configure(arg: __ic_certified_assets_types::ConfigureArguments) {
             $crate::configure(arg)
         }
 
         #[$crate::ic_certified_assets_update]
         #[$crate::ic_certified_assets_candid_method(update)]
-        fn validate_configure(arg: types::ConfigureArguments) -> Result<String, String> {
+        fn validate_configure(arg: __ic_certified_assets_types::ConfigureArguments) -> Result<String, String> {
             $crate::validate_configure(arg)
         }
     };
