@@ -8,22 +8,18 @@ pub use stable::StableState;
 // All the environment (time, certificates, etc.) is passed to the state transition functions
 // as formal arguments.  This approach makes it very easy to test the state machine.
 use crate::{
-    asset_certification::{
-        types::{
-            certification::{
-                AssetKey, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
-                RequestHash, ResponseHash, WitnessResult,
-            },
-            http::{
-                build_ic_certificate_expression_from_headers_and_encoding,
-                build_ic_certificate_expression_header, response_hash, CallbackFunc, HttpRequest,
-                HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken, FALLBACK_FILE,
-            },
-            rc_bytes::RcBytes,
-        },
-        CertifiedResponses,
+    certification::{
+        build_ic_certificate_expression_from_headers_and_encoding,
+        build_ic_certificate_expression_header, response_hash, AssetKey, AssetPath,
+        CertificateExpression, CertifiedResponses, HashTreePath, NestedTreeKey, RequestHash,
+        ResponseHash, WitnessResult,
     },
     cookies::add_ic_env_cookie,
+    http::{
+        CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
+        StreamingCallbackToken, FALLBACK_FILE,
+    },
+    rc_bytes::RcBytes,
     state_hash::StateHashComputation,
     system_context::SystemContext,
     types::*,

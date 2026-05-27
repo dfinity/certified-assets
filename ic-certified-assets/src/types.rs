@@ -1,6 +1,7 @@
 //! This module defines types shared by the certified assets state machine and the canister
 //! endpoints.
-use crate::asset_certification::types::{certification::AssetKey, rc_bytes::RcBytes};
+use crate::certification::AssetKey;
+use crate::rc_bytes::RcBytes;
 use candid::{CandidType, Deserialize, Nat, Principal};
 use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;

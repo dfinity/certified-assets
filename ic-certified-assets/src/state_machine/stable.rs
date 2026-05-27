@@ -5,8 +5,7 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    asset_certification::types::{certification::CertificateExpression, rc_bytes::RcBytes},
-    state_machine::Timestamp,
+    certification::CertificateExpression, rc_bytes::RcBytes, state_machine::Timestamp,
     types::BatchId,
 };
 

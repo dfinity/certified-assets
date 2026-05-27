@@ -1,6 +1,9 @@
 //! This module declares canister methods expected by the assets canister client.
-pub mod asset_certification;
+pub mod certification;
 mod cookies;
+pub mod http;
+pub mod nested_tree;
+pub mod rc_bytes;
 pub mod state_hash;
 pub mod state_machine;
 pub mod system_context;
@@ -12,15 +15,16 @@ mod tests;
 
 pub use crate::state_machine::StableState;
 use crate::{
-    asset_certification::types::http::{
+    certification::AssetKey,
+    http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
     },
+    rc_bytes::RcBytes,
     state_machine::{AssetDetails, CertifiedTree, ComputationStatus, EncodedAsset, State},
     system_context::SystemContext,
     types::*,
 };
-use asset_certification::types::{certification::AssetKey, rc_bytes::RcBytes};
 use candid::Principal;
 use ic_cdk::api::{canister_self, certified_data_set, data_certificate, msg_caller, trap};
 use std::cell::RefCell;
@@ -430,7 +434,9 @@ where
 #[macro_export]
 macro_rules! export_canister_methods {
     () => {
-        use $crate::asset_certification;
+        use $crate::certification;
+        use $crate::http;
+        use $crate::rc_bytes;
         use $crate::state_machine;
         use $crate::types;
 
@@ -453,8 +459,8 @@ macro_rules! export_canister_methods {
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn retrieve(
-            key: asset_certification::types::certification::AssetKey,
-        ) -> asset_certification::types::rc_bytes::RcBytes {
+            key: certification::AssetKey,
+        ) -> rc_bytes::RcBytes {
             $crate::retrieve(key)
         }
 
@@ -485,23 +491,23 @@ macro_rules! export_canister_methods {
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn http_request(
-            req: asset_certification::types::http::HttpRequest,
-        ) -> asset_certification::types::http::HttpResponse {
+            req: http::HttpRequest,
+        ) -> http::HttpResponse {
             $crate::http_request(req)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn http_request_streaming_callback(
-            token: asset_certification::types::http::StreamingCallbackToken,
-        ) -> asset_certification::types::http::StreamingCallbackHttpResponse {
+            token: http::StreamingCallbackToken,
+        ) -> http::StreamingCallbackHttpResponse {
             $crate::http_request_streaming_callback(token)
         }
 
         #[$crate::ic_certified_assets_query]
         #[$crate::ic_certified_assets_candid_method(query)]
         fn get_asset_properties(
-            key: asset_certification::types::certification::AssetKey,
+            key: certification::AssetKey,
         ) -> types::AssetProperties {
             $crate::get_asset_properties(key)
         }

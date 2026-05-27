@@ -1,4 +1,4 @@
-use crate::asset_certification::types::http::{
+use crate::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
 use crate::state_machine::{ComputationStatus, StableState, State, BATCH_EXPIRY_NANOS};
@@ -1873,7 +1873,7 @@ mod allow_raw_access {
 #[cfg(test)]
 mod certificate_expression {
     use super::*;
-    use crate::asset_certification::types::http::build_ic_certificate_expression_from_headers_and_encoding;
+    use crate::certification::build_ic_certificate_expression_from_headers_and_encoding;
     use ic_representation_independent_hash::Value;
 
     #[test]
