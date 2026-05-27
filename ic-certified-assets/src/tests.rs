@@ -3407,40 +3407,6 @@ mod redirect_rules {
     }
 
     #[test]
-    fn rule_4xx_404_and_410_serve_certified_bodies() {
-        let mut state = State::default();
-        commit(
-            &mut state,
-            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
-                rules: vec![
-                    RedirectRule {
-                        from: RulePattern::Exact("/missing.html".into()),
-                        to: String::new(),
-                        status: 404,
-                        headers: None,
-                    },
-                    RedirectRule {
-                        from: RulePattern::Exact("/gone".into()),
-                        to: String::new(),
-                        status: 410,
-                        headers: None,
-                    },
-                ],
-            })],
-        )
-        .unwrap();
-
-        let not_found =
-            certified_http_request(&state, RequestBuilder::get("/missing.html").build());
-        assert_eq!(not_found.status_code, 404);
-        assert_eq!(not_found.body.as_ref(), b"Not Found");
-
-        let gone = certified_http_request(&state, RequestBuilder::get("/gone").build());
-        assert_eq!(gone.status_code, 410);
-        assert_eq!(gone.body.as_ref(), b"Gone");
-    }
-
-    #[test]
     fn first_match_wins_across_multiple_3xx_rules() {
         let mut state = State::default();
         commit(
@@ -3665,11 +3631,11 @@ mod redirect_rules {
     }
 
     #[test]
-    fn rule_4xx_without_target_keeps_synthesized_body() {
-        // Backwards-compat: a 4xx rule with empty `to` still produces the
-        // canister-synthesized "Not Found" / "Gone" body.
+    fn validate_rejects_4xx_with_empty_target() {
+        // `_redirects` always supplies a target — the canister rejects 4xx
+        // rules without one (the catch-all 404 covers the empty case).
         let mut state = State::default();
-        commit(
+        let err = commit(
             &mut state,
             vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
                 rules: vec![RedirectRule {
@@ -3680,10 +3646,30 @@ mod redirect_rules {
                 }],
             })],
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(
+            err.contains("must be an absolute asset path"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn no_rules_falls_through_to_builtin_404() {
+        // No `_redirects` rules at all: missing paths return the canister's
+        // built-in certified 404 ("not found" body).
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/index.html", "text/html")
+                .with_encoding("identity", vec![BODY])],
+        );
+
         let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
         assert_eq!(response.status_code, 404);
-        assert_eq!(response.body.as_ref(), b"Not Found");
+        assert_eq!(response.body.as_ref(), b"not found");
     }
 
     #[test]
@@ -3779,7 +3765,7 @@ mod redirect_rules {
         )
         .unwrap_err();
         assert!(
-            err.contains("must be empty or an absolute asset path"),
+            err.contains("must be an absolute asset path"),
             "got: {err}"
         );
     }
