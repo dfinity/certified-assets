@@ -32,7 +32,7 @@ Platform-agnostic library implementing the asset sync logic: directory scanning,
 
 ## Redirects, rewrites, and custom error pages
 
-The canister honours a Netlify-style `_redirects` file at the root of each input directory. Each line is `<from> <to> <status>`, where `<status>` is one of `{200, 301, 302, 307, 308, 404, 410}`:
+The canister honours a Netlify-style `_redirects` file at the root of the project's input directory. (The sync plugin only accepts one source directory — see [`plugin/README.md`](plugin/README.md#scope) for why.) Each line is `<from> <to> <status>`, where `<status>` is one of `{200, 301, 302, 307, 308, 404, 410}`:
 
 ```text
 /old-page        /new-page              301   # 3xx redirect (Location header)

@@ -35,10 +35,11 @@ The output WASM lands at `../target/wasm32-wasip2/release/plugin.wasm` — the p
 ## Scope
 
 The current implementation supports the V2 protocol of the assets canister (transactional batch API):
-- Walks each directory passed via the manifest's `dirs:` setting; dotfiles are skipped.
+- The manifest's `dirs:` setting must list **exactly one** directory. The plugin rejects the sync before any canister call if zero or multiple entries are given — the assets canister owns the URL space below `/`, and a single tree keeps key collisions and `_redirects` precedence unambiguous.
+- Walks that directory; dotfiles are skipped.
 - Detects the MIME type of each file and computes encodings: `gzip` for all `text/*`, `*/javascript`, and `*/html` types (only if the compressed output is smaller), `identity` for everything.
 - Diffs against `list_assets()`: skips encodings already in place (matched by sha256), unsets encodings that are stale, and deletes assets that have been removed or whose `content_type` changed.
-- Reads `_redirects` at the root of each input directory and replaces the canister's ruleset in the same batch (see "Redirects" below).
+- Reads `_redirects` at the root of the input directory and replaces the canister's ruleset in the same batch (see "Redirects" below).
 - Opens a transaction (`create_batch`), uploads each content chunk via `create_chunks` (one chunk per call, 1.9 MB max), then commits all operations atomically with a single `commit_batch` call.
 - In normal mode all canister calls use `direct: true`. In proxy mode (when a `proxy_canister_id` is provided by the host) the plugin first ensures the signing identity has `Commit` permission, routing a `grant_permission` call through the proxy (which is the canister's controller) if needed, then proceeds with direct calls.
 
@@ -46,7 +47,7 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
 
 ## Redirects
 
-The plugin reads a Netlify-style `_redirects` file at the root of each input directory. The file itself is **not** uploaded as an asset — it's consumed by the plugin and lowered into canister-side rules. Each non-empty, non-comment line:
+The plugin reads a Netlify-style `_redirects` file at the root of the input directory (`dirs:` must list exactly one). The file itself is **not** uploaded as an asset — it's consumed by the plugin and lowered into canister-side rules. Each non-empty, non-comment line:
 
 ```
 <from>  <to>  <status>
