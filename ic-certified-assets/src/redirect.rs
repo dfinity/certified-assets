@@ -22,9 +22,10 @@ pub struct RedirectRule {
     /// Request-side pattern.
     pub from: RulePattern,
     /// Target. Interpretation depends on `status`:
-    /// - 200: absolute asset path
+    /// - 200: absolute asset path (rewrite — serve target's body)
     /// - 3xx: absolute URL or absolute path (sent as `Location`)
-    /// - 4xx: ignored (no target needed for an error response)
+    /// - 4xx: empty for a synthesized body, or an absolute asset path to
+    ///   serve as the custom error page (e.g. `/404.html`)
     pub to: String,
     /// One of 200, 301, 302, 307, 308, 404, 410.
     pub status: u16,
@@ -85,6 +86,14 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
         ));
     }
 
+    if matches!(rule.status, 404 | 410) && !rule.to.is_empty() && !rule.to.starts_with('/') {
+        return Err(format!(
+            "'to' for a 4xx rule must be empty or an absolute asset path \
+             (e.g. '/404.html'); got '{}'",
+            rule.to
+        ));
+    }
+
     if let Some(headers) = &rule.headers {
         let is_redirect = (301..=308).contains(&rule.status);
         for (k, v) in headers {
@@ -112,10 +121,16 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
                     )
                 });
             }
-            if rule.status == 200 && k.eq_ignore_ascii_case("content-type") {
+            // For rules that borrow a body from a target asset (200 rewrites
+            // and 4xx custom error pages), the content-type comes from the
+            // target — overriding it would split it from the certified
+            // headers the verifier checks.
+            let borrows_from_target = rule.status == 200
+                || (matches!(rule.status, 404 | 410) && !rule.to.is_empty());
+            if borrows_from_target && k.eq_ignore_ascii_case("content-type") {
                 return Err(
-                    "'content-type' header must not be overridden on a status-200 rewrite; \
-                     the canister takes it from the target asset"
+                    "'content-type' header must not be overridden when the rule serves an \
+                     asset body; the canister takes 'content-type' from the target asset"
                         .to_string(),
                 );
             }
@@ -228,10 +243,18 @@ pub struct CertifiedRuleEntry {
 
 #[derive(Clone, Debug)]
 pub enum CertifiedRuleEntryKind {
-    /// 3xx / 4xx rule: response body and headers are synthesized by the rule.
+    /// 3xx rule, or 4xx rule with no `to` target: response body and headers
+    /// are synthesized by the rule.
     Synthetic { expression: CertificateExpression },
-    /// Status-200 rule: response borrows everything from the target asset.
-    AliasOf { target_key: String },
+    /// Rule borrows its body from a target asset.
+    ///
+    /// `status == 200`: pure rewrite — the rule re-uses each encoding's
+    /// existing certified response hash verbatim.
+    ///
+    /// `status` is 404 or 410: custom error page — the rule serves the
+    /// target asset's body but re-certifies each encoding with the override
+    /// status (different response_hash than the asset's own 200 entry).
+    AliasOf { target_key: String, status: u16 },
 }
 
 /// Build the certified-tree entries for a non-status-200 rule. The rule's

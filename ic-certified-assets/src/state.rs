@@ -499,6 +499,7 @@ impl State {
                 Some(&cert_header),
                 &callback,
                 &etags,
+                None,
             ) {
                 return response;
             }
@@ -509,11 +510,13 @@ impl State {
             if !rule.matches(path) {
                 continue;
             }
-            // Status-200 rules borrow from a target asset — honor that
-            // asset's `allow_raw_access` rule before serving (or even before
-            // the rule has a certified entry — the target may not yet have
-            // an encoding).
-            if rule.status == 200 {
+            // Rules that borrow a body from a target asset (200 rewrite or
+            // 4xx custom error page) honor the target's `allow_raw_access`
+            // setting — checked even before the rule has a certified entry
+            // because the target may not yet have an encoding.
+            let borrows_from_target =
+                rule.status == 200 || (matches!(rule.status, 404 | 410) && !rule.to.is_empty());
+            if borrows_from_target {
                 if let Some(target) = self.assets.get(&rule.to) {
                     if !target.allow_raw_access() && req.is_raw_domain() {
                         return req.redirect_from_raw_to_certified_domain();
@@ -576,10 +579,11 @@ impl State {
                     streaming_strategy: None,
                 }
             }
-            crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key } => {
+            crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status } => {
                 let Some(asset) = self.assets.get(target_key) else {
                     return HttpResponse::build_404(cert_header);
                 };
+                let status_override = (*status != 200).then_some(*status);
                 asset
                     .build_http_response_for_encodings(
                         requested_encodings,
@@ -588,6 +592,7 @@ impl State {
                         Some(&cert_header),
                         callback,
                         etags,
+                        status_override,
                     )
                     .unwrap_or_else(|| HttpResponse::build_404(cert_header))
             }
@@ -774,33 +779,54 @@ impl State {
                 return None;
             }
         }
-        if rule.status == 200 {
-            self.build_alias_rule_entry(rule)
-        } else {
-            let entry = crate::redirect::build_synthetic_entry(rule);
-            for tp in &entry.tree_paths {
-                self.asset_hashes.certify_response_precomputed(tp);
+        match rule.status {
+            200 => self.build_alias_rule_entry(rule, rule.status),
+            // 4xx with a non-empty `to` becomes a custom error page borrowing
+            // the target asset's body and certified header set.
+            404 | 410 if !rule.to.is_empty() => self.build_alias_rule_entry(rule, rule.status),
+            _ => {
+                let entry = crate::redirect::build_synthetic_entry(rule);
+                for tp in &entry.tree_paths {
+                    self.asset_hashes.certify_response_precomputed(tp);
+                }
+                Some(entry)
             }
-            Some(entry)
         }
     }
 
     fn build_alias_rule_entry(
         &mut self,
         rule: &crate::redirect::RedirectRule,
+        status: u16,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         let target_key = rule.to.clone();
         let target = self.assets.get(&target_key)?;
         let location = rule.tree_location();
         let mut tree_paths = Vec::new();
-        for enc in target.encodings.values() {
+        for (enc_name, enc) in &target.encodings {
             let Some(expr) = enc.certificate_expression.as_ref() else {
                 continue;
             };
-            let Some(resp_hash) = enc.response_hashes.as_ref().and_then(|m| m.get(&200)) else {
-                continue;
+            let resp_hash = if status == 200 {
+                // Borrow the asset's already-certified 200 response hash.
+                let Some(h) = enc.response_hashes.as_ref().and_then(|m| m.get(&200)) else {
+                    continue;
+                };
+                *h
+            } else {
+                // 4xx custom error page: re-certify with the override status
+                // using the same headers and body the asset would serve at 200.
+                let base_headers: Vec<(String, ic_representation_independent_hash::Value)> =
+                    target
+                        .get_headers_for_asset(enc_name)
+                        .into_iter()
+                        .map(|(k, v)| {
+                            (k, ic_representation_independent_hash::Value::String(v))
+                        })
+                        .collect();
+                crate::certification::response_hash(&base_headers, status, &enc.sha256).0
             };
-            let tp = crate::redirect::alias_tree_path(&location, expr.expression_hash, *resp_hash);
+            let tp = crate::redirect::alias_tree_path(&location, expr.expression_hash, resp_hash);
             self.asset_hashes.certify_response_precomputed(&tp);
             tree_paths.push(tp);
         }
@@ -810,7 +836,7 @@ impl State {
         Some(crate::redirect::CertifiedRuleEntry {
             tree_paths,
             location,
-            kind: crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key },
+            kind: crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status },
         })
     }
 
