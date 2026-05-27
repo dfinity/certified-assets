@@ -2,6 +2,7 @@
 //! endpoints.
 use crate::certification::AssetKey;
 use crate::rc_bytes::RcBytes;
+use crate::redirect::RedirectRule;
 use candid::{CandidType, Deserialize, Nat, Principal};
 use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
@@ -73,6 +74,12 @@ pub enum BatchOperation {
     DeleteAsset(DeleteAssetArguments),
     Clear(ClearArguments),
     SetAssetProperties(SetAssetPropertiesArguments),
+    SetRedirectRules(SetRedirectRulesArguments),
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SetRedirectRulesArguments {
+    pub rules: Vec<RedirectRule>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]

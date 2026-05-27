@@ -62,6 +62,8 @@ pub struct State {
 
     pub(crate) asset_hashes: CertifiedResponses,
 
+    pub(crate) redirect_rules: Vec<crate::redirect::RedirectRule>,
+
     pub(crate) encoded_canister_env: String,
 
     pub(crate) state_hash_computation: Option<StateHashComputation>,
@@ -699,6 +701,10 @@ impl State {
         }
     }
 
+    pub fn get_redirect_rules(&self) -> Vec<crate::redirect::RedirectRule> {
+        self.redirect_rules.clone()
+    }
+
     pub fn configure(&mut self, args: ConfigureArguments) {
         if let Some(max_batches) = args.max_batches {
             self.configuration.max_batches = max_batches;
@@ -746,6 +752,7 @@ impl From<StableState> for State {
                 .map(Into::into)
                 .unwrap_or_default(),
             last_state_update_timestamp_ns: stable_state.last_state_update_timestamp.unwrap_or(0),
+            redirect_rules: stable_state.redirect_rules.unwrap_or_default(),
             ..Self::default()
         };
 

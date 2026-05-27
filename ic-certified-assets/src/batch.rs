@@ -14,6 +14,7 @@ use crate::asset::{is_html_key, on_asset_change, Timestamp};
 use crate::certification::{AssetKey, HashTreePath};
 use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
+use crate::redirect;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
@@ -338,6 +339,20 @@ impl State {
                     }
                     BatchOperation::SetAssetProperties(arg) => {
                         self.set_asset_properties(arg.clone())
+                    }
+                    BatchOperation::SetRedirectRules(arg) => {
+                        // Validate every rule before mutating state so a single
+                        // bad rule fails the whole op with no partial update.
+                        let mut validation: Result<(), String> = Ok(());
+                        for rule in &arg.rules {
+                            if let Err(e) = redirect::validate(rule) {
+                                validation = Err(e);
+                                break;
+                            }
+                        }
+                        validation.map(|_| {
+                            self.redirect_rules = arg.rules.clone();
+                        })
                     }
                 };
                 if let Err(e) = result {

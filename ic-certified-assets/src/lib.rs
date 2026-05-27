@@ -6,6 +6,7 @@ mod cookies;
 pub mod http;
 pub mod nested_tree;
 pub mod rc_bytes;
+pub mod redirect;
 pub mod stable;
 pub mod state;
 pub mod state_hash;
@@ -223,6 +224,10 @@ pub fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
 
 pub fn list(request: ListRequest) -> Vec<AssetDetails> {
     with_state(|s| s.list_assets(request))
+}
+
+pub fn get_redirect_rules() -> Vec<crate::redirect::RedirectRule> {
+    with_state(|s| s.get_redirect_rules())
 }
 
 pub fn certified_tree() -> CertifiedTree {
