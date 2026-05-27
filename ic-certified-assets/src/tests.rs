@@ -3406,25 +3406,86 @@ mod redirect_rules {
     }
 
     #[test]
-    fn status_200_rules_remain_inert_until_step_1_3() {
-        // Step 1.2 deliberately skips wiring status-200 rules — they are
-        // visible in `get_redirect_rules` but `http_request` does not yet
-        // honor them. Remove this test once step 1.3 lands the rewrite path.
+    fn status_200_target_coupling() {
+        // Install rule before the target exists → rule is inert.
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/foo".into()),
+                    to: "/foo.html".into(),
+                    status: 200,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+        let inert =
+            state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+        assert_eq!(inert.status_code, 404);
+
+        // Add the asset → rule fires.
+        const BODY_V1: &[u8] = b"<!DOCTYPE html><html>v1</html>";
+        create_assets(
+            &mut state,
+            &mock_system_context(),
+            vec![AssetBuilder::new("/foo.html", "text/html")
+                .with_encoding("identity", vec![BODY_V1])],
+        );
+        let v1 = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(v1.status_code, 200);
+        assert_eq!(v1.body.as_ref(), BODY_V1);
+
+        // Modify the asset → rule still fires with the new content.
+        const BODY_V2: &[u8] = b"<!DOCTYPE html><html>v2 different</html>";
+        create_assets(
+            &mut state,
+            &mock_system_context(),
+            vec![AssetBuilder::new("/foo.html", "text/html")
+                .with_encoding("identity", vec![BODY_V2])],
+        );
+        let v2 = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(v2.body.as_ref(), BODY_V2);
+
+        // Delete the target → rule goes inert again.
+        delete_asset_via_batch(&mut state, "/foo.html");
+        let after_delete = state.http_request(
+            RequestBuilder::get("/foo").build(),
+            &[],
+            unused_callback(),
+        );
+        assert_eq!(after_delete.status_code, 404);
+    }
+
+    fn delete_asset_via_batch(state: &mut State, key: &str) {
+        commit(
+            state,
+            vec![BatchOperation::DeleteAsset(DeleteAssetArguments {
+                key: key.to_string(),
+            })],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn asset_shadows_exact_rule_at_same_path() {
         let mut state = State::default();
         let system_context = mock_system_context();
-        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        const RULE_TARGET: &[u8] = b"rule-target";
+        const SOURCE_ASSET: &[u8] = b"source-asset";
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/target.html", "text/html")
-                .with_encoding("identity", vec![BODY])],
+            vec![AssetBuilder::new("/bar.html", "text/html")
+                .with_encoding("identity", vec![RULE_TARGET])],
         );
         commit(
             &mut state,
             vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
                 rules: vec![RedirectRule {
                     from: RulePattern::Exact("/foo".into()),
-                    to: "/target.html".into(),
+                    to: "/bar.html".into(),
                     status: 200,
                     headers: None,
                 }],
@@ -3432,17 +3493,61 @@ mod redirect_rules {
         )
         .unwrap();
 
-        // The rule itself does not fire. (Built-in alias /foo → /foo.html
-        // still maps /foo to nothing, falling through to the built-in 404.
-        // Step 1.4 removes that built-in too; for now the response is a 404.)
-        let response = state.http_request(
-            RequestBuilder::get("/foo").build(),
-            &[],
-            unused_callback(),
-        );
-        assert_eq!(response.status_code, 404);
+        // Without an asset at /foo, the rule fires.
+        let via_rule = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(via_rule.body.as_ref(), RULE_TARGET);
 
-        // But the rule is stored.
-        assert_eq!(state.get_redirect_rules().len(), 1);
+        // Upload an asset at /foo → asset wins.
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/foo", "text/html")
+                .with_encoding("identity", vec![SOURCE_ASSET])],
+        );
+        let via_asset = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(via_asset.body.as_ref(), SOURCE_ASSET);
+
+        // Delete the source asset → rule reappears.
+        delete_asset_via_batch(&mut state, "/foo");
+        let back_to_rule = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(back_to_rule.body.as_ref(), RULE_TARGET);
+    }
+
+    #[test]
+    fn subtree_200_rule_fires_for_unshadowed_children() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>index</html>";
+        const REAL_BODY: &[u8] = b"<!DOCTYPE html><html>real</html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![INDEX_BODY]),
+                AssetBuilder::new("/real-page", "text/html")
+                    .with_encoding("identity", vec![REAL_BODY]),
+            ],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/".into()),
+                    to: "/index.html".into(),
+                    status: 200,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+
+        // Real asset still wins for its own path.
+        let real = certified_http_request(&state, RequestBuilder::get("/real-page").build());
+        assert_eq!(real.body.as_ref(), REAL_BODY);
+
+        // Unshadowed path falls back to the rule → /index.html content.
+        let fallback = certified_http_request(&state, RequestBuilder::get("/anything").build());
+        assert_eq!(fallback.body.as_ref(), INDEX_BODY);
     }
 }

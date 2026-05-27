@@ -78,6 +78,13 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
         );
     }
 
+    if rule.status == 200 && !rule.to.starts_with('/') {
+        return Err(format!(
+            "'to' for a status-200 rewrite must be an absolute asset path (got '{}')",
+            rule.to
+        ));
+    }
+
     if let Some(headers) = &rule.headers {
         let is_redirect = (301..=308).contains(&rule.status);
         for (k, v) in headers {
@@ -104,6 +111,13 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
                         rule.status
                     )
                 });
+            }
+            if rule.status == 200 && k.eq_ignore_ascii_case("content-type") {
+                return Err(
+                    "'content-type' header must not be overridden on a status-200 rewrite; \
+                     the canister takes it from the target asset"
+                        .to_string(),
+                );
             }
         }
     }
@@ -191,21 +205,31 @@ impl RedirectRule {
     }
 }
 
-/// Precomputed certified-tree entry for a single rule.
+/// Precomputed certified-tree entries for a single rule.
+///
+/// `tree_paths` holds every leaf the rule owns — one for a synthetic
+/// (3xx/4xx) response, or one per encoding for a status-200 rewrite that
+/// mirrors a multi-encoding target asset.
 #[derive(Clone, Debug)]
 pub struct CertifiedRuleEntry {
-    /// Full path including the per-response tail — used to insert/remove the
-    /// entry in the asset_hashes tree.
-    pub tree_path: HashTreePath,
+    pub tree_paths: Vec<HashTreePath>,
     /// Location prefix (`["http_expr", segs.., "<$>"|"<*>"]`) — used as the
     /// `expr_path` field of the `IC-Certificate` response header.
     pub location: HashTreePath,
-    /// The certificate expression listing the certified header names.
-    pub expression: CertificateExpression,
+    pub kind: CertifiedRuleEntryKind,
 }
 
-/// Build the certified-tree entry for a non-status-200 rule.
-pub(crate) fn build_certified_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
+#[derive(Clone, Debug)]
+pub enum CertifiedRuleEntryKind {
+    /// 3xx / 4xx rule: response body and headers are synthesized by the rule.
+    Synthetic { expression: CertificateExpression },
+    /// Status-200 rule: response borrows everything from the target asset.
+    AliasOf { target_key: String },
+}
+
+/// Build the certified-tree entries for a non-status-200 rule. The rule's
+/// body and headers come from the rule itself.
+pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
     let headers = rule.certified_headers();
     let header_values: Vec<(String, Value)> = headers
         .iter()
@@ -232,10 +256,25 @@ pub(crate) fn build_certified_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
     full_segs.push(NestedTreeKey::Hash(resp_hash.0));
 
     CertifiedRuleEntry {
-        tree_path: HashTreePath::from(full_segs),
+        tree_paths: vec![HashTreePath::from(full_segs)],
         location,
-        expression,
+        kind: CertifiedRuleEntryKind::Synthetic { expression },
     }
+}
+
+/// Build a tree path slot for the rule's location with the given expression
+/// hash and response hash. Used by the status-200 path to mirror each
+/// encoding of a target asset.
+pub(crate) fn alias_tree_path(
+    location: &HashTreePath,
+    expression_hash: [u8; 32],
+    response_hash: [u8; 32],
+) -> HashTreePath {
+    let mut segs = location.0.clone();
+    segs.push(NestedTreeKey::Hash(expression_hash));
+    segs.push(NestedTreeKey::String(String::new()));
+    segs.push(NestedTreeKey::Hash(response_hash));
+    HashTreePath::from(segs)
 }
 
 #[cfg(test)]
@@ -410,19 +449,38 @@ mod tests {
     }
 
     #[test]
-    fn build_certified_entry_distinct_per_status() {
+    fn build_synthetic_entry_distinct_per_status() {
         // Different status codes must yield different response hashes so the
         // tree can disambiguate identical paths.
         let exact = RulePattern::Exact("/x".into());
-        let e301 = build_certified_entry(&rule(exact.clone(), "/y", 301));
-        let e302 = build_certified_entry(&rule(exact.clone(), "/y", 302));
-        let e404 = build_certified_entry(&rule(exact, "", 404));
+        let e301 = build_synthetic_entry(&rule(exact.clone(), "/y", 301));
+        let e302 = build_synthetic_entry(&rule(exact.clone(), "/y", 302));
+        let e404 = build_synthetic_entry(&rule(exact, "", 404));
         // All three sit at the same tree location prefix.
         assert_eq!(e301.location.0, e302.location.0);
         assert_eq!(e301.location.0, e404.location.0);
         // ...but their full tree paths differ in expr_hash / resp_hash.
-        assert_ne!(e301.tree_path.0, e302.tree_path.0);
-        assert_ne!(e301.tree_path.0, e404.tree_path.0);
+        assert_ne!(e301.tree_paths[0].0, e302.tree_paths[0].0);
+        assert_ne!(e301.tree_paths[0].0, e404.tree_paths[0].0);
+    }
+
+    #[test]
+    fn validate_rejects_status_200_to_external_url() {
+        let r = rule(
+            RulePattern::Exact("/foo".into()),
+            "https://example.com/",
+            200,
+        );
+        let err = validate(&r).unwrap_err();
+        assert!(err.contains("absolute asset path"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_content_type_override_on_200() {
+        let mut r = rule(RulePattern::Exact("/foo".into()), "/target.html", 200);
+        r.headers = Some(vec![("Content-Type".into(), "text/plain".into())]);
+        let err = validate(&r).unwrap_err();
+        assert!(err.contains("content-type"), "got: {err}");
     }
 
     #[test]
