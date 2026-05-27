@@ -85,7 +85,7 @@ fn next_step(
                 content_type: asset.content_type.clone(),
                 max_age: asset.max_age,
                 headers: asset.headers.clone(),
-                enable_aliasing: asset.is_aliased,
+                enable_aliasing: None,
                 allow_raw_access: asset.allow_raw_access,
             };
             hash_create_asset(&mut hasher, &args);
