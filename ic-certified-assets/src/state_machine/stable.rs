@@ -11,19 +11,19 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StableStateV2 {
+pub struct StableState {
     pub(super) authorized: Vec<Principal>, // ignored if permissions is Some(_)
-    pub(super) permissions: Option<StableStatePermissionsV2>,
-    pub(super) stable_assets: HashMap<String, StableAssetV2>,
+    pub(super) permissions: Option<StableStatePermissions>,
+    pub(super) stable_assets: HashMap<String, StableAsset>,
 
     pub(super) next_batch_id: Option<u64>,
-    pub(super) configuration: Option<StableConfigurationV2>,
+    pub(super) configuration: Option<StableConfiguration>,
     pub(super) last_state_update_timestamp: Option<u64>,
 }
 
-impl From<super::State> for StableStateV2 {
+impl From<super::State> for StableState {
     fn from(state: super::State) -> Self {
-        let permissions = StableStatePermissionsV2 {
+        let permissions = StableStatePermissions {
             commit: state.commit_principals,
             prepare: state.prepare_principals,
             manage_permissions: state.manage_permissions_principals,
@@ -44,7 +44,7 @@ impl From<super::State> for StableStateV2 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StableStatePermissionsV2 {
+pub struct StableStatePermissions {
     pub(super) commit: BTreeSet<Principal>,
     pub(super) prepare: BTreeSet<Principal>,
     pub(super) manage_permissions: BTreeSet<Principal>,
@@ -52,13 +52,13 @@ pub struct StableStatePermissionsV2 {
 
 /// Same as [super::Configuration] but serde-serializable
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StableConfigurationV2 {
+pub struct StableConfiguration {
     pub max_batches: Option<u64>,
     pub max_chunks: Option<u64>,
     pub max_bytes: Option<u64>,
 }
 
-impl From<super::Configuration> for StableConfigurationV2 {
+impl From<super::Configuration> for StableConfiguration {
     fn from(configuration: super::Configuration) -> Self {
         Self {
             max_batches: configuration.max_batches,
@@ -68,8 +68,8 @@ impl From<super::Configuration> for StableConfigurationV2 {
     }
 }
 
-impl From<StableConfigurationV2> for super::Configuration {
-    fn from(stable_configuration: StableConfigurationV2) -> Self {
+impl From<StableConfiguration> for super::Configuration {
+    fn from(stable_configuration: StableConfiguration) -> Self {
         Self {
             max_batches: stable_configuration.max_batches,
             max_chunks: stable_configuration.max_chunks,
@@ -80,16 +80,16 @@ impl From<StableConfigurationV2> for super::Configuration {
 
 /// Same as [super::Asset] but serde-serializable
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StableAssetV2 {
+pub struct StableAsset {
     pub content_type: String,
-    pub encodings: HashMap<String, StableAssetEncodingV2>,
+    pub encodings: HashMap<String, StableAssetEncoding>,
     pub max_age: Option<u64>,
     pub headers: Option<BTreeMap<String, String>>,
     pub is_aliased: Option<bool>,
     pub allow_raw_access: Option<bool>,
 }
 
-impl From<super::Asset> for StableAssetV2 {
+impl From<super::Asset> for StableAsset {
     fn from(asset: super::Asset) -> Self {
         Self {
             content_type: asset.content_type,
@@ -106,8 +106,8 @@ impl From<super::Asset> for StableAssetV2 {
     }
 }
 
-impl From<StableAssetV2> for super::Asset {
-    fn from(stable_asset: StableAssetV2) -> Self {
+impl From<StableAsset> for super::Asset {
+    fn from(stable_asset: StableAsset) -> Self {
         Self {
             content_type: stable_asset.content_type,
             encodings: stable_asset
@@ -125,7 +125,7 @@ impl From<StableAssetV2> for super::Asset {
 
 /// Same as [super::AssetEncoding] but serde-serializable
 #[derive(Default, Clone, Debug, Deserialize, Serialize)]
-pub struct StableAssetEncodingV2 {
+pub struct StableAssetEncoding {
     pub modified: u64,
     pub content_chunks: Vec<RcBytes>,
     pub total_length: usize,
@@ -135,7 +135,7 @@ pub struct StableAssetEncodingV2 {
     pub response_hashes: Option<HashMap<u16, [u8; 32]>>,
 }
 
-impl From<super::AssetEncoding> for StableAssetEncodingV2 {
+impl From<super::AssetEncoding> for StableAssetEncoding {
     fn from(asset_encoding: super::AssetEncoding) -> Self {
         Self {
             modified: timestamp_to_u64(asset_encoding.modified),
@@ -149,8 +149,8 @@ impl From<super::AssetEncoding> for StableAssetEncodingV2 {
     }
 }
 
-impl From<StableAssetEncodingV2> for super::AssetEncoding {
-    fn from(stable_asset_encoding: StableAssetEncodingV2) -> Self {
+impl From<StableAssetEncoding> for super::AssetEncoding {
+    fn from(stable_asset_encoding: StableAssetEncoding) -> Self {
         Self {
             modified: Timestamp::from(stable_asset_encoding.modified),
             content_chunks: stable_asset_encoding.content_chunks,

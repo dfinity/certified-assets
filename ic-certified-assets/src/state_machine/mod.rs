@@ -1,8 +1,8 @@
 //! This module contains a pure implementation of the certified assets state machine.
 
-mod v2;
+mod stable;
 
-pub use v2::StableStateV2;
+pub use stable::StableState;
 
 // NB. This module should not depend on ic_cdk, it contains only pure state transition functions.
 // All the environment (time, certificates, etc.) is passed to the state transition functions
@@ -1368,8 +1368,8 @@ impl State {
     }
 }
 
-impl From<StableStateV2> for State {
-    fn from(stable_state: StableStateV2) -> Self {
+impl From<StableState> for State {
+    fn from(stable_state: StableState) -> Self {
         let (commit_principals, prepare_principals, manage_permissions_principals) =
             if let Some(permissions) = stable_state.permissions {
                 (

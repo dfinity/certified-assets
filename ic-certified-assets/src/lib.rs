@@ -10,7 +10,7 @@ mod url;
 #[cfg(test)]
 mod tests;
 
-pub use crate::state_machine::StableStateV2;
+pub use crate::state_machine::StableState;
 use crate::{
     asset_certification::types::http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -358,11 +358,11 @@ pub fn init(args: Option<AssetCanisterArgs>) {
     }
 }
 
-pub fn pre_upgrade() -> StableStateV2 {
+pub fn pre_upgrade() -> StableState {
     STATE.with(|s| s.take().into())
 }
 
-pub fn post_upgrade(stable_state: StableStateV2, args: Option<AssetCanisterArgs>) {
+pub fn post_upgrade(stable_state: StableState, args: Option<AssetCanisterArgs>) {
     let set_permissions = args.and_then(|args| {
         let AssetCanisterArgs::Upgrade(UpgradeArgs { set_permissions }) = args else {ic_cdk::trap("Cannot upgrade the canister with an Init argument. Please provide an Upgrade argument.")};
         set_permissions

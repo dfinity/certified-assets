@@ -1,7 +1,7 @@
 use crate::asset_certification::types::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
-use crate::state_machine::{ComputationStatus, StableStateV2, State, BATCH_EXPIRY_NANOS};
+use crate::state_machine::{ComputationStatus, StableState, State, BATCH_EXPIRY_NANOS};
 use crate::system_context::canister_env::CanisterEnv;
 use crate::system_context::SystemContext;
 use crate::types::{
@@ -716,7 +716,7 @@ fn preserves_state_on_stable_roundtrip() {
             .with_encoding("identity", vec![INDEX_BODY])],
     );
 
-    let stable_state: StableStateV2 = state.into();
+    let stable_state: StableState = state.into();
     let state: State = stable_state.into();
 
     let response = certified_http_request(
@@ -1759,7 +1759,7 @@ fn alias_behavior_persists_through_upgrade() {
         SUBDIR_INDEX_BODY
     );
 
-    let stable_state: StableStateV2 = state.into();
+    let stable_state: StableState = state.into();
     let state: State = stable_state.into();
 
     let alias_stays_turned_off = state.http_request(
@@ -2711,7 +2711,7 @@ mod last_state_update_timestamp {
         assert_eq!(expected_timestamp, system_context.current_timestamp_ns);
 
         // Convert to stable state and back
-        let stable_state: StableStateV2 = state.into();
+        let stable_state: StableState = state.into();
         let restored_state: State = stable_state.into();
 
         // Timestamp should be preserved

@@ -1,12 +1,12 @@
 use ic_cdk::stable;
-use ic_certified_assets::StableStateV2;
+use ic_certified_assets::StableState;
 
-pub fn save_stable_state(stable_state: &StableStateV2) -> Result<(), serde_cbor::Error> {
+pub fn save_stable_state(stable_state: &StableState) -> Result<(), serde_cbor::Error> {
     let mut stable_writer = stable::StableWriter::default();
     serde_cbor::to_writer(&mut stable_writer, stable_state)
 }
 
-pub fn load_stable_state() -> Result<StableStateV2, serde_cbor::Error> {
+pub fn load_stable_state() -> Result<StableState, serde_cbor::Error> {
     let stable_reader = stable::StableReader::default();
     from_reader_ignore_trailing_data(stable_reader)
 }
