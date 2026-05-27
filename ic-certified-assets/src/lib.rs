@@ -52,13 +52,6 @@ pub fn grant_permission(arg: GrantPermissionArguments) {
     with_state_mut(|s| s.grant_permission(arg.to_principal, &arg.permission))
 }
 
-pub async fn validate_grant_permission(arg: GrantPermissionArguments) -> Result<String, String> {
-    Ok(format!(
-        "grant {} permission to principal {}",
-        arg.permission, arg.to_principal
-    ))
-}
-
 pub async fn deauthorize(other: Principal) {
     let check_access_result = if other == msg_caller() {
         // this isn't "ManagePermissions" because these legacy methods only
@@ -85,13 +78,6 @@ pub async fn revoke_permission(arg: RevokePermissionArguments) {
     }
 }
 
-pub async fn validate_revoke_permission(arg: RevokePermissionArguments) -> Result<String, String> {
-    Ok(format!(
-        "revoke {} permission from principal {}",
-        arg.permission, arg.of_principal
-    ))
-}
-
 pub fn list_authorized() -> Vec<Principal> {
     with_state(|s| {
         s.list_permitted(&Permission::Commit)
@@ -108,10 +94,6 @@ pub fn list_permitted(arg: ListPermittedArguments) -> Vec<Principal> {
 pub async fn take_ownership() {
     let caller = msg_caller();
     with_state_mut(|s| s.take_ownership(caller))
-}
-
-pub async fn validate_take_ownership() -> Result<String, String> {
-    Ok("revoke all permissions, then gives the caller Commit permissions".to_string())
 }
 
 pub fn retrieve(key: AssetKey) -> RcBytes {
@@ -296,10 +278,6 @@ pub fn get_configuration() -> ConfigurationResponse {
 
 pub fn configure(arg: ConfigureArguments) {
     with_state_mut(|s| s.configure(arg))
-}
-
-pub fn validate_configure(arg: ConfigureArguments) -> Result<String, String> {
-    Ok(format!("configure: {arg:?}"))
 }
 
 pub fn can(permission: Permission) -> Result<(), String> {

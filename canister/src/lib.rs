@@ -111,11 +111,6 @@ fn grant_permission(arg: GrantPermissionArguments) {
 }
 
 #[update]
-async fn validate_grant_permission(arg: GrantPermissionArguments) -> Result<String, String> {
-    ic_certified_assets::validate_grant_permission(arg).await
-}
-
-#[update]
 async fn deauthorize(other: Principal) {
     ic_certified_assets::deauthorize(other).await
 }
@@ -123,11 +118,6 @@ async fn deauthorize(other: Principal) {
 #[update]
 async fn revoke_permission(arg: RevokePermissionArguments) {
     ic_certified_assets::revoke_permission(arg).await
-}
-
-#[update]
-async fn validate_revoke_permission(arg: RevokePermissionArguments) -> Result<String, String> {
-    ic_certified_assets::validate_revoke_permission(arg).await
 }
 
 #[update]
@@ -143,11 +133,6 @@ fn list_permitted(arg: ListPermittedArguments) -> Vec<Principal> {
 #[update(guard = "is_controller")]
 async fn take_ownership() {
     ic_certified_assets::take_ownership().await
-}
-
-#[update]
-async fn validate_take_ownership() -> Result<String, String> {
-    ic_certified_assets::validate_take_ownership().await
 }
 
 #[update(guard = "can_commit")]
@@ -218,11 +203,6 @@ fn get_configuration() -> ConfigurationResponse {
 #[update(guard = "can_commit")]
 fn configure(arg: ConfigureArguments) {
     ic_certified_assets::configure(arg)
-}
-
-#[update]
-fn validate_configure(arg: ConfigureArguments) -> Result<String, String> {
-    ic_certified_assets::validate_configure(arg)
 }
 
 ic_cdk::export_candid!();

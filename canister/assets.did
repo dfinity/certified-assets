@@ -134,8 +134,6 @@ type RevokePermission = record {
 };
 type ListPermitted = record { permission: Permission };
 
-type ValidationResult = variant { Ok : text; Err : text };
-
 type AssetCanisterArgs = variant {
   Init: InitArgs;
   Upgrade: UpgradeArgs;
@@ -271,12 +269,4 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
 
   get_configuration: () -> (ConfigurationResponse);
   configure: (ConfigureArguments) -> ();
-
-  // ───────── Proposal validation ─────────
-  // Dry-run validators used by SNS / NNS proposal flows.
-
-  validate_grant_permission: (GrantPermission) -> (ValidationResult);
-  validate_revoke_permission: (RevokePermission) -> (ValidationResult);
-  validate_take_ownership: () -> (ValidationResult);
-  validate_configure: (ConfigureArguments) -> (ValidationResult);
 }
