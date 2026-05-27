@@ -103,7 +103,10 @@ pub fn sync<C: CanisterCall>(
     report_security_policy_issues(&sources)?;
 
     let project_rules = load_redirect_rules(dir)?;
-    println!("parsed {} redirect rule(s) from _redirects", project_rules.len());
+    println!(
+        "parsed {} redirect rule(s) from _redirects",
+        project_rules.len()
+    );
 
     let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
         .into_iter()
@@ -432,8 +435,8 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     redirects::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
