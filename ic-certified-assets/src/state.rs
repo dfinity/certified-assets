@@ -63,9 +63,9 @@ pub struct State {
 
     pub(crate) redirect_rules: Vec<crate::redirect::RedirectRule>,
     /// Per-rule certified-tree entries, parallel to `redirect_rules`. A
-    /// `None` slot means the rule has no certified entry — either because it
-    /// is a status-200 rule (step 1.3 will wire those) or because an asset
-    /// shadows an exact rule at the same path.
+    /// `None` slot means the rule has no certified entry — either because an
+    /// asset shadows an exact rule at the same path, or because an alias rule
+    /// (200/4xx) points at a target asset that doesn't exist yet.
     pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
 
     pub(crate) encoded_canister_env: String,
@@ -557,11 +557,9 @@ impl State {
         callback: &CallbackFunc,
         etags: &[Hash],
     ) -> HttpResponse {
-        let cert_header = self.asset_hashes.witness_to_header_with_location(
-            path,
-            &entry.location,
-            certificate,
-        );
+        let cert_header =
+            self.asset_hashes
+                .witness_to_header_with_location(path, &entry.location, certificate);
         match &entry.kind {
             crate::redirect::CertifiedRuleEntryKind::Synthetic { expression } => {
                 // Synthetic entries only cover 3xx redirects — empty body.
@@ -818,14 +816,11 @@ impl State {
             } else {
                 // 4xx custom error page: re-certify with the override status
                 // using the same headers and body the asset would serve at 200.
-                let base_headers: Vec<(String, ic_representation_independent_hash::Value)> =
-                    target
-                        .get_headers_for_asset(enc_name)
-                        .into_iter()
-                        .map(|(k, v)| {
-                            (k, ic_representation_independent_hash::Value::String(v))
-                        })
-                        .collect();
+                let base_headers: Vec<(String, ic_representation_independent_hash::Value)> = target
+                    .get_headers_for_asset(enc_name)
+                    .into_iter()
+                    .map(|(k, v)| (k, ic_representation_independent_hash::Value::String(v)))
+                    .collect();
                 crate::certification::response_hash(&base_headers, status, &enc.sha256).0
             };
             let tp = crate::redirect::alias_tree_path(&location, expr.expression_hash, resp_hash);

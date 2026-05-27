@@ -1,11 +1,4 @@
 //! User-supplied redirect/rewrite/error rules expressed as `_redirects` entries.
-//!
-//! Step 1.1: types, validation, and storage only — rules are accepted by
-//! `commit_batch`, persist across upgrades, and round-trip through
-//! `get_redirect_rules`, but they don't yet affect certification or
-//! `http_request` resolution. Later steps in Part 1 wire the rules into the
-//! certified tree (1.2: 3xx/4xx; 1.3: status-200 rewrites) and remove the
-//! canister's built-in aliasing (1.4).
 
 use crate::certification::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
@@ -55,8 +48,7 @@ const SUPPORTED_STATUS_CODES: &[StatusCode] = &[
     StatusCode::GONE,
 ];
 
-/// Shape-checks a rule. Step 1.1 only checks invariants that don't need rule
-/// semantics — later steps grow this with header/target rules.
+/// Shape-checks a rule.
 pub fn validate(rule: &RedirectRule) -> Result<(), String> {
     let from_path = match &rule.from {
         RulePattern::Exact(p) => p,
@@ -321,8 +313,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_subtree_without_trailing_slash() {
-        let err =
-            validate(&rule(RulePattern::Subtree("/blog".into()), "/b", 301)).unwrap_err();
+        let err = validate(&rule(RulePattern::Subtree("/blog".into()), "/b", 301)).unwrap_err();
         assert!(err.contains("must end with '/'"), "got: {err}");
     }
 
@@ -379,7 +370,10 @@ mod tests {
         let mut r = rule(RulePattern::Exact("/a".into()), "/b", 301);
         r.headers = Some(vec![("Location".into(), "/other".into())]);
         let err = validate(&r).unwrap_err();
-        assert!(err.contains("derives it from the rule's 'to' field"), "got: {err}");
+        assert!(
+            err.contains("derives it from the rule's 'to' field"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -487,10 +481,7 @@ mod tests {
         // `_redirects` always provides a target — empty `to` is a misuse.
         for status in [404, 410] {
             let err = validate(&rule(RulePattern::Exact("/x".into()), "", status)).unwrap_err();
-            assert!(
-                err.contains("must be an absolute asset path"),
-                "got: {err}"
-            );
+            assert!(err.contains("must be an absolute asset path"), "got: {err}");
         }
     }
 
