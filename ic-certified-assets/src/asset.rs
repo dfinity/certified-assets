@@ -189,6 +189,12 @@ impl Asset {
         )
     }
 
+    /// Builds the response for one encoding.
+    ///
+    /// When `status_override` is `None` this serves the normal 200/304 path
+    /// (etag-based not-modified). When it is `Some(s)` — used by redirect
+    /// rules that serve a custom error page — the response always carries
+    /// the body with status `s`, and the etag / 304 logic is skipped.
     #[allow(clippy::too_many_arguments)]
     pub fn build_ok_http_response(
         &self,
@@ -199,6 +205,7 @@ impl Asset {
         certificate_header: Option<&HeaderField>,
         callback: &CallbackFunc,
         etags: &[Hash],
+        status_override: Option<u16>,
     ) -> HttpResponse {
         let mut headers = self.get_headers_for_asset(enc_name);
         if let Some(head) = certificate_header {
@@ -217,7 +224,9 @@ impl Asset {
             token,
         });
 
-        let (status_code, body) = if etags.contains(&enc.sha256) {
+        let (status_code, body) = if let Some(status) = status_override {
+            (status, enc.content_chunks[chunk_index].clone())
+        } else if etags.contains(&enc.sha256) {
             (304, RcBytes::default())
         } else {
             if !headers
@@ -241,6 +250,7 @@ impl Asset {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_http_response_for_encodings(
         &self,
         requested_encodings: &[String],
@@ -249,6 +259,7 @@ impl Asset {
         certificate_header: Option<&HeaderField>,
         callback: &CallbackFunc,
         etags: &[Hash],
+        status_override: Option<u16>,
     ) -> Option<HttpResponse> {
         // Return a requested encoding that is certified
         for enc_name in requested_encodings.iter() {
@@ -262,6 +273,7 @@ impl Asset {
                         certificate_header,
                         callback,
                         etags,
+                        status_override,
                     ));
                 }
             }
@@ -279,6 +291,7 @@ impl Asset {
                         certificate_header,
                         callback,
                         etags,
+                        status_override,
                     ));
                 }
             }

@@ -3602,6 +3602,189 @@ mod redirect_rules {
     }
 
     #[test]
+    fn custom_404_page_serves_target_with_4xx_status() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const PAGE_BODY: &[u8] =
+            b"<!DOCTYPE html><html><body>This page is not found.</body></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![PAGE_BODY])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/legacy/".into()),
+                    to: "/404.html".into(),
+                    status: 404,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+
+        let response =
+            certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response.body.as_ref(), PAGE_BODY);
+        // The target's content-type carries over verbatim.
+        assert_eq!(lookup_header(&response, "Content-Type"), Some("text/html"));
+    }
+
+    #[test]
+    fn custom_410_page_serves_target_with_4xx_status() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const PAGE_BODY: &[u8] =
+            b"<!DOCTYPE html><html><body>The content here has been removed.</body></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/410.html", "text/html")
+                .with_encoding("identity", vec![PAGE_BODY])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/retired".into()),
+                    to: "/410.html".into(),
+                    status: 410,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+
+        let response = certified_http_request(&state, RequestBuilder::get("/retired").build());
+        assert_eq!(response.status_code, 410);
+        assert_eq!(response.body.as_ref(), PAGE_BODY);
+    }
+
+    #[test]
+    fn rule_4xx_without_target_keeps_synthesized_body() {
+        // Backwards-compat: a 4xx rule with empty `to` still produces the
+        // canister-synthesized "Not Found" / "Gone" body.
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/missing".into()),
+                    to: String::new(),
+                    status: 404,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response.body.as_ref(), b"Not Found");
+    }
+
+    #[test]
+    fn rule_4xx_with_missing_target_stays_inert() {
+        // Matches the 200 behavior: pointing `to` at an asset that doesn't
+        // exist yet leaves the rule inert until the asset shows up.
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/missing".into()),
+                    to: "/404.html".into(),
+                    status: 404,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+        // Target doesn't exist → rule inert → built-in fall-through 404.
+        let inert =
+            state.http_request(RequestBuilder::get("/missing").build(), &[], unused_callback());
+        assert_eq!(inert.status_code, 404);
+        // The body is the built-in "not found", not the (missing) /404.html.
+        assert_eq!(inert.body.as_ref(), b"not found");
+
+        // Now create the target — the rule starts firing.
+        const PAGE: &[u8] = b"<html>Custom 404</html>";
+        create_assets(
+            &mut state,
+            &mock_system_context(),
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![PAGE])],
+        );
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response.body.as_ref(), PAGE);
+    }
+
+    #[test]
+    fn custom_4xx_target_updates_refresh_the_rule() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const V1: &[u8] = b"<html>404 v1</html>";
+        const V2: &[u8] = b"<html>404 v2 redesigned</html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![V1])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/old/".into()),
+                    to: "/404.html".into(),
+                    status: 404,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap();
+        let v1 = certified_http_request(&state, RequestBuilder::get("/old/x").build());
+        assert_eq!(v1.body.as_ref(), V1);
+        assert_eq!(v1.status_code, 404);
+
+        // Update the target page — the rule keeps firing with the new content.
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![V2])],
+        );
+        let v2 = certified_http_request(&state, RequestBuilder::get("/old/x").build());
+        assert_eq!(v2.body.as_ref(), V2);
+        assert_eq!(v2.status_code, 404);
+    }
+
+    #[test]
+    fn validate_rejects_4xx_relative_target() {
+        let mut state = State::default();
+        let err = commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/missing".into()),
+                    to: "404.html".into(), // missing leading '/'
+                    status: 404,
+                    headers: None,
+                }],
+            })],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("must be empty or an absolute asset path"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn subtree_200_rule_fires_for_unshadowed_children() {
         let mut state = State::default();
         let system_context = mock_system_context();
