@@ -9,10 +9,11 @@ pub use stable::StableState;
 // as formal arguments.  This approach makes it very easy to test the state machine.
 use crate::{
     asset::{
-        aliased_by, aliases_of, is_html_key, on_asset_change, Asset, AssetDetails, AssetEncoding,
-        AssetEncodingDetails, EncodedAsset, Timestamp, DEFAULT_ALIAS_ENABLED,
+        aliased_by, aliases_of, on_asset_change, Asset, AssetDetails, AssetEncoding,
+        AssetEncodingDetails, EncodedAsset, DEFAULT_ALIAS_ENABLED,
     },
-    certification::{AssetKey, CertifiedResponses, HashTreePath, WitnessResult},
+    batch::{Batch, Chunk, ComputationStatus},
+    certification::{AssetKey, CertifiedResponses, WitnessResult},
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken, FALLBACK_FILE,
@@ -25,8 +26,6 @@ use crate::{
 };
 use candid::{CandidType, Deserialize, Int, Nat, Principal};
 use ic_certification::{AsHashTree, Hash};
-use ic_representation_independent_hash::Value;
-use itertools::fold;
 use num_traits::ToPrimitive;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
@@ -34,87 +33,10 @@ use sha2::Digest;
 use std::collections::{BTreeSet, HashMap};
 use std::convert::TryInto;
 
-/// The amount of time a batch is kept alive. Modifying the batch
-/// delays the expiry further.
-pub const BATCH_EXPIRY_NANOS: u64 = 300_000_000_000;
-
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct CertifiedTree {
     pub certificate: Vec<u8>,
     pub tree: Vec<u8>,
-}
-
-pub struct Chunk {
-    pub batch_id: BatchId,
-    pub content: RcBytes,
-}
-
-pub struct Batch {
-    pub expires_at: Timestamp,
-    pub chunk_content_total_size: usize,
-}
-
-/// Status of an incremental computation
-#[derive(Clone, Debug)]
-pub enum ComputationStatus<D, P, E> {
-    /// Computation completed successfully
-    Done(D),
-    /// Computation in progress, with progress state to resume from
-    InProgress(P),
-    /// Computation failed with an error
-    Error(E),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Default)]
-pub enum CommitBatchProgress {
-    /// Initial state when `commit_batch` is first called.
-    ///
-    /// This phase:
-    /// - Reloads the canister environment
-    /// - Computes and validates batch limits
-    /// - Transitions to `ProcessingOperations` with the first operation
-    #[default]
-    Starting,
-    /// Processing batch operations one at a time.
-    ///
-    /// When a `SetAssetContent` operation is encountered, this transitions to
-    /// `HashingChunks` to hash the asset content incrementally.
-    /// When all operations are processed, this transitions to `UpdatingCookies` to update the HTML assets.
-    ProcessingOperations {
-        batch_id: BatchId,
-        operation_index: usize,
-        needs_cookie_update: bool,
-    },
-    /// Incrementally hashing asset content chunks, one chunk per call.
-    ///
-    /// This phase is entered when processing a `SetAssetContent` operation to avoid
-    /// instruction limits when hashing large assets. The hasher processes one chunk
-    /// per call, allowing the operation to be resumed if interrupted.
-    ///
-    /// After all chunks are hashed, the hash is finalized, the asset encoding is created,
-    /// and processing continues with the next operation in `ProcessingOperations`.
-    HashingChunks {
-        batch_id: BatchId,
-        operation_index: usize,
-        needs_cookie_update: bool,
-        set_asset_content_arg: SetAssetContentArguments,
-        content_chunks: Vec<RcBytes>,
-        chunk_index: usize,
-        dependent_keys: Vec<AssetKey>,
-        hasher: sha2::Sha256,
-    },
-    /// Updating cookies for HTML assets that depend on the canister environment.
-    ///
-    /// This phase is entered after all operations complete if the canister environment
-    /// changed during batch processing. HTML assets need their cookies updated to reflect
-    /// the new environment.
-    ///
-    /// One asset is updated per call until all HTML assets are processed.
-    UpdatingCookies {
-        html_keys: Vec<AssetKey>,
-        operation_index: usize,
-    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -127,26 +49,26 @@ pub struct Configuration {
 #[derive(Default)]
 pub struct State {
     pub(crate) assets: HashMap<AssetKey, Asset>,
-    configuration: Configuration,
+    pub(crate) configuration: Configuration,
 
-    chunks: HashMap<ChunkId, Chunk>,
-    next_chunk_id: ChunkId,
+    pub(crate) chunks: HashMap<ChunkId, Chunk>,
+    pub(crate) next_chunk_id: ChunkId,
 
-    batches: HashMap<BatchId, Batch>,
-    next_batch_id: BatchId,
+    pub(crate) batches: HashMap<BatchId, Batch>,
+    pub(crate) next_batch_id: BatchId,
 
     // permissions
-    commit_principals: BTreeSet<Principal>,
-    prepare_principals: BTreeSet<Principal>,
-    manage_permissions_principals: BTreeSet<Principal>,
+    pub(crate) commit_principals: BTreeSet<Principal>,
+    pub(crate) prepare_principals: BTreeSet<Principal>,
+    pub(crate) manage_permissions_principals: BTreeSet<Principal>,
 
-    asset_hashes: CertifiedResponses,
+    pub(crate) asset_hashes: CertifiedResponses,
 
-    encoded_canister_env: String,
+    pub(crate) encoded_canister_env: String,
 
-    state_hash_computation: Option<StateHashComputation>,
-    last_state_update_timestamp_ns: u64,
-    last_state_hash_timestamp: u64,
+    pub(crate) state_hash_computation: Option<StateHashComputation>,
+    pub(crate) last_state_update_timestamp_ns: u64,
+    pub(crate) last_state_hash_timestamp: u64,
 }
 
 impl State {
@@ -266,7 +188,7 @@ impl State {
         self.complete_set_asset_content(arg, content_chunks, sha256, now, dependent_keys)
     }
 
-    fn complete_set_asset_content(
+    pub(crate) fn complete_set_asset_content(
         &mut self,
         arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
@@ -434,335 +356,6 @@ impl State {
         Ok(())
     }
 
-    pub fn create_batch(&mut self, system_context: &SystemContext) -> Result<BatchId, String> {
-        let now = system_context.current_timestamp_ns;
-        self.batches.retain(|_, b| b.expires_at > now);
-        self.chunks
-            .retain(|_, c| self.batches.contains_key(&c.batch_id));
-
-        if let Some(max_batches) = self.configuration.max_batches {
-            if self.batches.len() as u64 >= max_batches {
-                return Err("batch limit exceeded".to_string());
-            }
-        }
-        let batch_id = self.next_batch_id.clone();
-        self.next_batch_id += 1_u8;
-
-        self.batches.insert(
-            batch_id.clone(),
-            Batch {
-                expires_at: Int::from(now + BATCH_EXPIRY_NANOS),
-                chunk_content_total_size: 0,
-            },
-        );
-
-        Ok(batch_id)
-    }
-
-    pub fn create_chunks(
-        &mut self,
-        CreateChunksArg {
-            batch_id,
-            content: chunks,
-        }: CreateChunksArg,
-        system_context: &SystemContext,
-    ) -> Result<Vec<ChunkId>, String> {
-        self.create_chunks_helper(batch_id, chunks, system_context)
-    }
-
-    /// Post-condition: `chunks.len() == output_chunk_ids.len()`
-    fn create_chunks_helper(
-        &mut self,
-        batch_id: Nat,
-        chunks: Vec<ByteBuf>,
-        system_context: &SystemContext,
-    ) -> Result<Vec<ChunkId>, String> {
-        self.check_batch_limits(chunks.len(), chunks.iter().map(|chunk| chunk.len()).sum())?;
-        let batch = self
-            .batches
-            .get_mut(&batch_id)
-            .ok_or_else(|| "batch not found".to_string())?;
-
-        batch.expires_at = Int::from(system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS);
-
-        let chunks_len = chunks.len();
-
-        let mut chunk_ids = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            let chunk_id = self.next_chunk_id.clone();
-            self.next_chunk_id += 1_u8;
-            batch.chunk_content_total_size += chunk.len();
-            self.chunks.insert(
-                chunk_id.clone(),
-                Chunk {
-                    batch_id: batch_id.clone(),
-                    content: RcBytes::from(chunk),
-                },
-            );
-            chunk_ids.push(chunk_id);
-        }
-
-        debug_assert!(chunks_len == chunk_ids.len());
-        Ok(chunk_ids)
-    }
-
-    fn check_batch_limits(&self, chunks_added: usize, bytes_added: usize) -> Result<(), String> {
-        if let Some(max_chunks) = self.configuration.max_chunks {
-            if self.chunks.len() + chunks_added > max_chunks as usize {
-                return Err("chunk limit exceeded".to_string());
-            }
-        }
-        if let Some(max_bytes) = self.configuration.max_bytes {
-            let current_total_bytes = &self.batches.iter().fold(0, |acc, (_batch_id, batch)| {
-                acc + batch.chunk_content_total_size
-            });
-            if current_total_bytes + bytes_added > max_bytes as usize {
-                return Err("byte limit exceeded".to_string());
-            }
-        }
-        Ok(())
-    }
-
-    /// Computes the data required to perform `self.check_batch_limits` against
-    /// the data carried in `last_chunk` fields.
-    fn compute_last_chunk_data(&self, arg: &CommitBatchArguments) -> (usize, usize) {
-        fold(
-            arg.operations.iter().map(|op| {
-                if let BatchOperation::SetAssetContent(SetAssetContentArguments {
-                    last_chunk: Some(content),
-                    // Chunks defined in `chunk_ids` are already accounted for and can be ignored here
-                    ..
-                }) = op
-                {
-                    Some(content.len())
-                } else {
-                    None
-                }
-            }),
-            (0, 0),
-            |(chunks_added, bytes_added), asset_len| {
-                if let Some(len) = asset_len {
-                    (chunks_added + 1, bytes_added + len)
-                } else {
-                    (chunks_added, bytes_added)
-                }
-            },
-        )
-    }
-
-    pub fn commit_batch(
-        &mut self,
-        arg: &CommitBatchArguments,
-        progress: CommitBatchProgress,
-        system_context: &SystemContext,
-    ) -> ComputationStatus<(), CommitBatchProgress, String> {
-        match progress {
-            CommitBatchProgress::Starting => {
-                // Reload the canister env to get the latest values
-                let old_encoded_canister_env = self.encoded_canister_env.clone();
-                self.encoded_canister_env = system_context.get_canister_env().to_cookie_value();
-
-                let (chunks_added, bytes_added) = self.compute_last_chunk_data(arg);
-                if let Err(e) = self.check_batch_limits(chunks_added, bytes_added) {
-                    return ComputationStatus::Error(e);
-                }
-
-                let needs_cookie_update = old_encoded_canister_env != self.encoded_canister_env;
-                let initial_progress = CommitBatchProgress::ProcessingOperations {
-                    batch_id: arg.batch_id.clone(),
-                    operation_index: 0,
-                    needs_cookie_update,
-                };
-                ComputationStatus::InProgress(initial_progress)
-            }
-            CommitBatchProgress::ProcessingOperations {
-                batch_id,
-                operation_index,
-                needs_cookie_update,
-            } => {
-                // Process one operation per call
-                if operation_index >= arg.operations.len() {
-                    // All operations processed
-                    self.batches.remove(&batch_id);
-                    self.certify_404_if_required();
-
-                    // Move to cookie update phase if needed
-                    if needs_cookie_update {
-                        let html_keys: Vec<_> = self
-                            .assets
-                            .keys()
-                            .filter(|key| is_html_key(key))
-                            .cloned()
-                            .collect();
-
-                        if html_keys.is_empty() {
-                            // No HTML files to update, we're done
-                            self.last_state_update_timestamp_ns =
-                                system_context.current_timestamp_ns;
-                            return ComputationStatus::Done(());
-                        } else {
-                            let progress = CommitBatchProgress::UpdatingCookies {
-                                html_keys,
-                                operation_index: 0,
-                            };
-                            return ComputationStatus::InProgress(progress);
-                        }
-                    } else {
-                        self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
-                        return ComputationStatus::Done(());
-                    }
-                }
-
-                let op = &arg.operations[operation_index];
-                let result = match op {
-                    BatchOperation::CreateAsset(arg) => self.create_asset(arg.clone()),
-                    BatchOperation::SetAssetContent(arg) => {
-                        if !self.assets.contains_key(&arg.key) {
-                            return ComputationStatus::Error("asset not found".to_string());
-                        }
-                        if arg.chunk_ids.is_empty() && arg.last_chunk.is_none() {
-                            return ComputationStatus::Error(
-                                "encoding must have at least one chunk or contain last_chunk"
-                                    .to_string(),
-                            );
-                        }
-
-                        let dependent_keys = self.dependent_keys(&arg.key);
-
-                        // Collect all chunks (removing them from self.chunks)
-                        let mut content_chunks = vec![];
-                        for chunk_id in arg.chunk_ids.iter() {
-                            let chunk = match self.chunks.remove(chunk_id) {
-                                Some(c) => c,
-                                None => {
-                                    return ComputationStatus::Error("chunk not found".to_string());
-                                }
-                            };
-                            content_chunks.push(chunk.content);
-                        }
-                        if let Some(encoding_content) = arg.last_chunk.clone() {
-                            content_chunks.push(encoding_content.into());
-                        }
-
-                        // Start hashing phase with an empty hasher
-                        let progress = CommitBatchProgress::HashingChunks {
-                            batch_id,
-                            operation_index,
-                            needs_cookie_update,
-                            set_asset_content_arg: arg.clone(),
-                            content_chunks,
-                            chunk_index: 0,
-                            dependent_keys,
-                            hasher: sha2::Sha256::new(),
-                        };
-                        return ComputationStatus::InProgress(progress);
-                    }
-                    BatchOperation::UnsetAssetContent(arg) => self.unset_asset_content(arg.clone()),
-                    BatchOperation::DeleteAsset(arg) => {
-                        self.delete_asset(arg.clone());
-                        Ok(())
-                    }
-                    BatchOperation::Clear(_) => {
-                        self.clear();
-                        Ok(())
-                    }
-                    BatchOperation::SetAssetProperties(arg) => {
-                        self.set_asset_properties(arg.clone())
-                    }
-                };
-                if let Err(e) = result {
-                    return ComputationStatus::Error(e);
-                }
-
-                let progress = CommitBatchProgress::ProcessingOperations {
-                    batch_id,
-                    operation_index: operation_index + 1,
-                    needs_cookie_update,
-                };
-                ComputationStatus::InProgress(progress)
-            }
-            CommitBatchProgress::HashingChunks {
-                batch_id,
-                operation_index,
-                needs_cookie_update,
-                set_asset_content_arg,
-                content_chunks,
-                chunk_index,
-                dependent_keys,
-                mut hasher,
-            } => {
-                if chunk_index >= content_chunks.len() {
-                    // All chunks hashed, finalize and complete set_asset_content
-                    let sha256: [u8; 32] = hasher.finalize().into();
-                    let now = Int::from(system_context.current_timestamp_ns);
-
-                    if let Err(e) = self.complete_set_asset_content(
-                        set_asset_content_arg.clone(),
-                        content_chunks,
-                        sha256,
-                        now,
-                        dependent_keys,
-                    ) {
-                        return ComputationStatus::Error(e);
-                    }
-
-                    // Continue with next operation
-                    let progress = CommitBatchProgress::ProcessingOperations {
-                        batch_id,
-                        operation_index: operation_index + 1,
-                        needs_cookie_update,
-                    };
-                    ComputationStatus::InProgress(progress)
-                } else {
-                    // Hash one chunk per iteration
-                    hasher.update(&content_chunks[chunk_index]);
-                    let progress = CommitBatchProgress::HashingChunks {
-                        batch_id,
-                        operation_index,
-                        needs_cookie_update,
-                        set_asset_content_arg,
-                        content_chunks,
-                        chunk_index: chunk_index + 1,
-                        dependent_keys,
-                        hasher,
-                    };
-                    ComputationStatus::InProgress(progress)
-                }
-            }
-            CommitBatchProgress::UpdatingCookies {
-                html_keys,
-                operation_index,
-            } => {
-                // Process one cookie update per call
-                if operation_index >= html_keys.len() {
-                    // All cookies updated, we're done
-                    self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
-                    return ComputationStatus::Done(());
-                }
-
-                // Update one cookie
-                let key = &html_keys[operation_index];
-                let dependent_keys = self.dependent_keys(key);
-                if let Some(asset) = self.assets.get_mut(key) {
-                    on_asset_change(
-                        &mut self.asset_hashes,
-                        key,
-                        asset,
-                        dependent_keys,
-                        Some(&self.encoded_canister_env),
-                    );
-                }
-
-                // Update index and return progress
-                ;
-                let progress = CommitBatchProgress::UpdatingCookies {
-                    html_keys,
-                    operation_index: operation_index + 1,
-                };
-                ComputationStatus::InProgress(progress)
-            }
-        }
-    }
 
     pub fn compute_state_hash(&mut self) -> ComputationStatus<String, (), ()> {
         if self.last_state_hash_timestamp != self.last_state_update_timestamp_ns {
@@ -794,14 +387,6 @@ impl State {
             last_state_update_timestamp: self.last_state_update_timestamp_ns,
             state_hash,
         }
-    }
-
-    pub fn delete_batch(&mut self, arg: DeleteBatchArguments) -> Result<(), String> {
-        if self.batches.remove(&arg.batch_id).is_none() {
-            return Err("batch not found".to_string());
-        }
-        self.chunks.retain(|_, c| c.batch_id != arg.batch_id);
-        Ok(())
     }
 
     pub fn list_assets(&self, request: ListRequest) -> Vec<AssetDetails> {
@@ -1090,7 +675,7 @@ impl State {
     }
 
     // Returns keys that needs to be updated if the supplied key is changed.
-    fn dependent_keys(&self, key: &AssetKey) -> Vec<AssetKey> {
+    pub(crate) fn dependent_keys(&self, key: &AssetKey) -> Vec<AssetKey> {
         if self
             .assets
             .get(key)
@@ -1129,25 +714,6 @@ impl State {
         }
     }
 
-    fn certify_404_if_required(&mut self) {
-        if !self
-            .asset_hashes
-            .contains_path(HashTreePath::not_found_base_path().as_vec())
-        {
-            let response = HttpResponse::uncertified_404();
-            let headers: Vec<_> = response
-                .headers
-                .into_iter()
-                .map(|(k, v)| (k, Value::String(v)))
-                .collect();
-            self.asset_hashes.certify_fallback_response(
-                response.status_code,
-                &headers,
-                &response.body,
-                None,
-            );
-        }
-    }
 }
 
 impl From<StableState> for State {

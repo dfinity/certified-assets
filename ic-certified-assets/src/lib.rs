@@ -1,5 +1,6 @@
 //! This module declares canister methods expected by the assets canister client.
 pub mod asset;
+pub mod batch;
 pub mod certification;
 mod cookies;
 pub mod http;
@@ -17,13 +18,14 @@ mod tests;
 pub use crate::state_machine::StableState;
 use crate::{
     asset::{AssetDetails, EncodedAsset},
+    batch::ComputationStatus,
     certification::AssetKey,
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
     },
     rc_bytes::RcBytes,
-    state_machine::{CertifiedTree, ComputationStatus, State},
+    state_machine::{CertifiedTree, State},
     system_context::SystemContext,
     types::*,
 };
@@ -437,6 +439,7 @@ where
 macro_rules! export_canister_methods {
     () => {
         use $crate::asset;
+        use $crate::batch;
         use $crate::certification;
         use $crate::http;
         use $crate::rc_bytes;
