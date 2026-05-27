@@ -63,6 +63,11 @@ pub struct State {
     pub(crate) asset_hashes: CertifiedResponses,
 
     pub(crate) redirect_rules: Vec<crate::redirect::RedirectRule>,
+    /// Per-rule certified-tree entries, parallel to `redirect_rules`. A
+    /// `None` slot means the rule has no certified entry — either because it
+    /// is a status-200 rule (step 1.3 will wire those) or because an asset
+    /// shadows an exact rule at the same path.
+    pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
 
     pub(crate) encoded_canister_env: String,
 
@@ -516,6 +521,40 @@ impl State {
             }
         }
 
+        // Asset at the requested path wins.
+        if let Ok(asset) = self.get_asset(&path.into()) {
+            let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
+            if let Some(response) = asset.build_http_response_for_encodings(
+                &requested_encodings,
+                path,
+                chunk_index,
+                Some(&cert_header),
+                &callback,
+                &etags,
+            ) {
+                return response;
+            }
+        }
+
+        // Step 1.2: scan non-200 rules in declaration order, first match wins.
+        // Status-200 rules are skipped here (step 1.3 wires them in).
+        for (idx, rule) in self.redirect_rules.iter().enumerate() {
+            if rule.status == 200 {
+                continue;
+            }
+            if !rule.matches(path) {
+                continue;
+            }
+            let Some(entry) = self
+                .rule_certified_entries
+                .get(idx)
+                .and_then(|e| e.as_ref())
+            else {
+                continue;
+            };
+            return self.build_redirect_rule_response(rule, entry, path, certificate);
+        }
+
         let (certificate_header, witness_result) =
             self.asset_hashes.witness_to_header(path, certificate);
 
@@ -532,24 +571,35 @@ impl State {
                     return response;
                 }
             }
-        } else if witness_result == WitnessResult::PathFound {
-            if let Ok(asset) = self.get_asset(&path.into()) {
-                if !asset.allow_raw_access() && req.is_raw_domain() {
-                    return req.redirect_from_raw_to_certified_domain();
-                }
-                if let Some(response) = asset.build_http_response_for_encodings(
-                    &requested_encodings,
-                    path,
-                    chunk_index,
-                    Some(&certificate_header),
-                    &callback,
-                    &etags,
-                ) {
-                    return response;
-                }
-            }
         }
         HttpResponse::build_404(certificate_header)
+    }
+
+    fn build_redirect_rule_response(
+        &self,
+        rule: &crate::redirect::RedirectRule,
+        entry: &crate::redirect::CertifiedRuleEntry,
+        path: &str,
+        certificate: &[u8],
+    ) -> HttpResponse {
+        let cert_header = self.asset_hashes.witness_to_header_with_location(
+            path,
+            &entry.location,
+            certificate,
+        );
+        let cert_expr_header =
+            crate::certification::build_ic_certificate_expression_header(&entry.expression);
+        let mut headers = rule.certified_headers();
+        headers.push((cert_expr_header.0, cert_expr_header.1));
+        headers.push(cert_header);
+
+        HttpResponse {
+            status_code: rule.status,
+            headers,
+            body: RcBytes::from(ByteBuf::from(rule.body())),
+            upgrade: None,
+            streaming_strategy: None,
+        }
     }
 
     pub fn http_request(
@@ -705,6 +755,41 @@ impl State {
         self.redirect_rules.clone()
     }
 
+    /// Rebuild the certified-tree entries for `redirect_rules`. Called whenever
+    /// the rule list changes (in `commit_batch`) or assets are restored from
+    /// stable memory (in `From<StableState>`). Caller must refresh
+    /// `certified_data` after this — `commit_batch` already does so via the
+    /// `certified_data_set(s.root_hash())` it runs after each batch.
+    pub(crate) fn on_redirect_rules_change(&mut self) {
+        for entry in self.rule_certified_entries.drain(..).flatten() {
+            self.asset_hashes
+                .remove_response_precomputed(&entry.tree_path);
+        }
+
+        let mut new_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>> =
+            Vec::with_capacity(self.redirect_rules.len());
+        for rule in &self.redirect_rules {
+            if rule.status == 200 {
+                // TODO(step 1.3): build a certified entry that mirrors the
+                // target asset's response.
+                new_entries.push(None);
+                continue;
+            }
+            if let crate::redirect::RulePattern::Exact(src) = &rule.from {
+                if self.assets.contains_key(src) {
+                    // Asset at the source path shadows the rule.
+                    new_entries.push(None);
+                    continue;
+                }
+            }
+            let entry = crate::redirect::build_certified_entry(rule);
+            self.asset_hashes
+                .certify_response_precomputed(&entry.tree_path);
+            new_entries.push(Some(entry));
+        }
+        self.rule_certified_entries = new_entries;
+    }
+
     pub fn configure(&mut self, args: ConfigureArguments) {
         if let Some(max_batches) = args.max_batches {
             self.configuration.max_batches = max_batches;
@@ -769,6 +854,7 @@ impl From<StableState> for State {
                 // shouldn't reach this
             }
         }
+        state.on_redirect_rules_change();
         state
     }
 }

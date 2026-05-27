@@ -502,6 +502,35 @@ impl CertifiedResponses {
         }
     }
 
+    /// Builds an `IC-Certificate` header for a response served from a specific
+    /// tree location. Unlike `witness_to_header`, which infers `expr_path` from
+    /// the request URL (and only knows about the root `<*>` fallback), this
+    /// helper takes the location explicitly so callers serving a non-root
+    /// subtree response can point the witness at the right `<*>` ancestor.
+    pub fn witness_to_header_with_location(
+        &self,
+        request_path: &str,
+        location: &HashTreePath,
+        certificate: &[u8],
+    ) -> (String, String) {
+        let (witness, _) = self.witness_path(request_path);
+        let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
+        serializer.self_describe().unwrap();
+        witness.serialize(&mut serializer).unwrap();
+
+        (
+            "IC-Certificate".to_string(),
+            String::from("version=2, ")
+                + "certificate=:"
+                + &BASE64.encode(certificate)
+                + ":, tree=:"
+                + &BASE64.encode(serializer.into_inner())
+                + ":, expr_path=:"
+                + &location.expr_path()
+                + ":",
+        )
+    }
+
     /// Same as `witness_path`, but produces a header that can be returned as a `HttpResponse` header instead of a witness `HashTree`.
     pub fn witness_to_header(
         &self,

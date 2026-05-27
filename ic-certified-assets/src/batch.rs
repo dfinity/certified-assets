@@ -256,6 +256,11 @@ impl State {
                     // All operations processed
                     self.batches.remove(&batch_id);
                     self.certify_404_if_required();
+                    // Asset ops in this batch may have clobbered tree entries
+                    // that redirect rules own (any rule whose source path
+                    // collides with an asset's `<$>` slot). Re-cert them so
+                    // the batch ends with a consistent rule tree.
+                    self.on_redirect_rules_change();
 
                     // Move to cookie update phase if needed
                     if needs_cookie_update {
@@ -352,6 +357,7 @@ impl State {
                         }
                         validation.map(|_| {
                             self.redirect_rules = arg.rules.clone();
+                            self.on_redirect_rules_change();
                         })
                     }
                 };
