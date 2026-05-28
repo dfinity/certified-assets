@@ -18,6 +18,7 @@ use crate::canister::{
 };
 use crate::content::{encoders_for, Content, Encoder};
 use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
+use crate::html_handling;
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
 use std::path::Path;
@@ -100,11 +101,42 @@ pub fn sync<C: CanisterCall>(
     let sources = crate::scan::scan(dirs)?;
     println!("found {} file(s) from {:?}", sources.len(), dirs);
 
-    let project_rules = load_redirect_rules(dir)?;
+    // Synthesised CF `auto-trailing-slash` rules first, then the user's
+    // `_redirects`. The canister matches rules in declaration order, so this
+    // makes the html-handling defaults win at the exact paths they cover and
+    // lets user rules catch what's left (e.g. a SPA-style `/* /404.html 404`
+    // catch-all only fires for paths the html_handling defaults don't claim).
+    //
+    // The reason synth must come first is also a certification correctness
+    // requirement: if a user subtree rule like `/*` is declared before the
+    // synthesised Exact rules, the user rule wins at request time and the
+    // canister returns a wildcard expression path (`["http_expr", "<*>"]`),
+    // while the synthesised Exact entries (e.g. `["http_expr", "index", "<$>"]`)
+    // still sit in the certified tree. The HTTP gateway's verifier then
+    // rejects the response with "wildcard expression path provided, but a
+    // potential exact expression path exists in the tree" and returns 503.
+    // Putting synth first keeps responses on the Exact path whenever an Exact
+    // entry exists.
+    //
+    // Synthesis is keyed off the scanned asset keys; nothing in the project
+    // has uploaded yet, so this is the authoritative HTML set.
+    let user_rules = load_redirect_rules(dir)?;
     println!(
         "parsed {} redirect rule(s) from _redirects",
-        project_rules.len()
+        user_rules.len()
     );
+
+    let asset_keys: Vec<String> = sources.iter().map(|s| s.key.clone()).collect();
+    let synthesised = html_handling::synthesize(&asset_keys);
+    if !synthesised.is_empty() {
+        println!(
+            "synthesised {} html-handling rule(s) for {} html asset(s)",
+            synthesised.len(),
+            asset_keys.iter().filter(|k| k.ends_with(".html")).count(),
+        );
+    }
+    let mut project_rules = synthesised;
+    project_rules.extend(user_rules);
 
     let project_header_rules = load_header_rules(dir)?;
     println!(
@@ -1695,8 +1727,10 @@ mod tests {
     fn sync_short_circuits_when_headers_file_only_matches_canister() {
         // The canister already stores the headers a `_headers`-only project
         // would resolve. The "nothing to commit" short-circuit must trigger.
+        // The asset is `.txt`, not `.html`, so the auto-synthesised
+        // html-handling rules don't get in the way of the comparison.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
         std::fs::write(
             dir.path().join("_headers"),
             b"/*\n  X-Frame-Options: DENY\n",
@@ -1704,7 +1738,153 @@ mod tests {
         .unwrap();
 
         use sha2::Digest;
+        let identity_sha = sha2::Sha256::digest(b"hello").to_vec();
+
+        let mock = SyncMock::new();
+        mock.push_ok("api_version", 2u16);
+        mock.push_ok(
+            "list",
+            vec![AssetDetails {
+                key: "/notes.txt".to_string(),
+                content_type: "text/plain".to_string(),
+                encodings: vec![AssetEncodingDetails {
+                    content_encoding: "identity".to_string(),
+                    sha256: Some(identity_sha),
+                }],
+            }],
+        );
+        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok(
+            "get_asset_properties",
+            AssetProperties {
+                max_age: None,
+                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
+                allow_raw_access: Some(true),
+            },
+        );
+
+        let result = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        );
+        // No create_batch / commit_batch programmed — would panic if reached.
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+    }
+
+    // ── html-handling auto-synthesis ────────────────────────────────────────
+
+    #[test]
+    fn sync_synthesises_html_handling_rules_when_html_present() {
+        // No `_redirects` file; an `index.html` asset alone should produce
+        // exactly the three rules from `html_handling::synthesize` (the root
+        // index variant: /, /index, /index.html). The canister has empty
+        // rules and no asset, so the batch contains both the asset upload
+        // and a SetRedirectRules op.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+
+        let mock = SyncMock::new();
+        mock.push_ok("api_version", 2u16);
+        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok(
+            "create_batch",
+            CreateBatchOk {
+                batch_id: Nat::from(1u32),
+            },
+        );
+        mock.push_ok(
+            "create_chunks",
+            MockChunksResponse {
+                chunk_ids: vec![Nat::from(0u32)],
+            },
+        );
+        mock.push_ok("commit_batch", ());
+
+        let result = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        );
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+    }
+
+    #[test]
+    fn synthesised_rules_win_over_user_rule_at_same_from() {
+        // Synthesised rules are emitted **before** the user's `_redirects` —
+        // synth must come first so html-handling Exact rules don't get
+        // shadowed by a broader user subtree (e.g. `/*` catch-all), which
+        // would otherwise make the gateway verifier reject responses on
+        // those paths (wildcard expr_path vs. exact entry in the tree).
+        //
+        // The cost: if the user happens to declare a rule at the exact same
+        // `from` as something synthesis produces, the synthesised rule wins.
+        // To override an HTML asset's default html_handling, remove the
+        // source `.html` and use a non-HTML asset key instead.
+        let user_rules = redirects::parse("/index /elsewhere 301\n").unwrap();
+        let synthesised = crate::html_handling::synthesize(&["/index.html".to_string()]);
+
+        let mut combined = synthesised;
+        combined.extend(user_rules);
+
+        // First rule matching `/index` is the synthesised 307 -> /.
+        let first_at_index = combined
+            .iter()
+            .find(|r| matches!(&r.from, crate::canister::RulePattern::Exact(p) if p == "/index"))
+            .expect("a rule at /index");
+        assert_eq!(first_at_index.status, 307);
+        assert_eq!(first_at_index.to, "/");
+    }
+
+    #[test]
+    fn user_subtree_falls_through_to_paths_synth_doesnt_cover() {
+        // The motivating fix: a user `/*` 404 catch-all must NOT shadow the
+        // synthesised Exact rules — otherwise the cert tree carries Exact
+        // entries that the response (served on the `<*>` subtree witness)
+        // doesn't use, and the gateway verifier returns 503.
+        //
+        // With synth first, the catch-all only fires for paths nothing else
+        // claims. We verify the rule order: synthesised /index Exact comes
+        // before the user's /* Subtree.
+        let user_rules = redirects::parse("/* /404.html 404\n").unwrap();
+        let synthesised = crate::html_handling::synthesize(&["/index.html".to_string()]);
+
+        let mut combined = synthesised;
+        combined.extend(user_rules);
+
+        let index_pos = combined
+            .iter()
+            .position(
+                |r| matches!(&r.from, crate::canister::RulePattern::Exact(p) if p == "/index"),
+            )
+            .expect("a rule at /index");
+        let catchall_pos = combined
+            .iter()
+            .position(|r| matches!(&r.from, crate::canister::RulePattern::Subtree(p) if p == "/"))
+            .expect("the /* catch-all");
+        assert!(
+            index_pos < catchall_pos,
+            "synth Exact must precede user Subtree /*; got index@{index_pos}, /*@{catchall_pos}"
+        );
+    }
+
+    #[test]
+    fn sync_short_circuits_when_synthesised_rules_match_canister() {
+        // The canister already stores the rules synthesis would produce.
+        // No SetRedirectRules op should be emitted, and with the asset
+        // already up to date the sync should short-circuit before
+        // create_batch.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+
+        use sha2::Digest;
         let identity_sha = sha2::Sha256::digest(b"<html></html>").to_vec();
+
+        let canister_rules = crate::html_handling::synthesize(&["/index.html".to_string()]);
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
@@ -1720,12 +1900,12 @@ mod tests {
             }],
         );
         mock.push_ok("list", Vec::<AssetDetails>::new());
-        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok("get_redirect_rules", canister_rules);
         mock.push_ok(
             "get_asset_properties",
             AssetProperties {
                 max_age: None,
-                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
+                headers: None,
                 allow_raw_access: Some(true),
             },
         );

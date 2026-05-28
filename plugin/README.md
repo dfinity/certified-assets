@@ -79,22 +79,41 @@ A real asset at the rule's `from` path always wins — a file at `/about.html` i
 
 Rule order is significant: the plugin sends rules in declaration order, and the canister returns the first match. Replacing the file is a full replace-all operation — if you remove `_redirects` between deploys, the plugin emits an empty `SetRedirectRules` op so the canister clears its ruleset.
 
+### Default HTML handling (auto-synthesised)
+
+Ahead of the user's `_redirects`, the plugin auto-synthesises Cloudflare's [`auto-trailing-slash`](https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/#automatic-trailing-slashes-default) rule set for every `.html` asset in the project. Synthesised rules are prepended **before** the user's rules, so the html-handling defaults claim the exact paths they cover (`/foo`, `/foo/`, `/foo/index`, `/foo/index.html`, `/bar/`, `/bar`, etc.) and user rules apply to whatever paths are left. The most common use of `_redirects` after this — a SPA-style `/* /404.html 404` catch-all — works as expected: it fires only for paths no HTML asset claims.
+
+This ordering is also a correctness requirement: the IC HTTP gateway's response verifier rejects a wildcard expression path response (`["http_expr", "<*>"]`) when a potential exact expression path (`["http_expr", <segments>, "<$>"]`) exists in the certified tree. Putting synth first ensures the canister always returns the Exact-path response for paths the html-handling defaults certify, which keeps the verifier happy. A user rule placed at the same `from` as a synthesised rule (e.g. `/foo /foo.html 200` when `/foo.html` already exists) is therefore dead — the synth rule wins. To override html-handling for a particular page, remove its `.html` source and serve it under a non-HTML key.
+
+Given two assets `/foo.html` and `/bar/index.html`, the synthesised rules behave per Cloudflare's table:
+
+| Request           | Effective response                           |
+|-------------------|----------------------------------------------|
+| `/foo`            | `200`, body of `/foo.html`                   |
+| `/foo.html`       | `200`, body of `/foo.html` (see note)        |
+| `/foo/`           | `307` → `/foo`                               |
+| `/foo/index`      | `307` → `/foo`                               |
+| `/foo/index.html` | `307` → `/foo`                               |
+| `/bar/`           | `200`, body of `/bar/index.html`             |
+| `/bar`            | `307` → `/bar/`                              |
+| `/bar.html`       | `307` → `/bar` (client chains to `/bar/`)    |
+| `/bar/index`      | `307` → `/bar` (client chains to `/bar/`)    |
+| `/bar/index.html` | `200`, body of `/bar/index.html` (see note)  |
+
+**Note on the two inert rows.** Cloudflare emits `307` for both `/foo.html → /foo` and `/bar/index.html → /bar/` (URL canonicalisation). The asset canister matches direct asset lookups before rules, so the asset at those keys wins and the synthesised 307 is shadowed. Requests to the literal `.html` URL still 200-serve the asset rather than redirecting. The synthesised rules are kept in the rule list so the table activates automatically if that precedence ever changes; users who care about strict canonicalisation can omit the `.html` source by other means (e.g. excluding it from the input directory).
+
 ### Migration from built-in aliasing
 
-Earlier versions of this canister implicitly served `/foo.html` at `/foo` and `/foo/index.html` at both `/foo/` and `/foo`. That behaviour has been removed — express the same routing explicitly in `_redirects`:
+Earlier versions of this canister implicitly served `/foo.html` at `/foo` and `/foo/index.html` at both `/foo/` and `/foo`. Equivalent routing is now produced by auto-synthesis (above) for every `.html` asset, so most projects need no migration — the `_redirects` file is optional.
+
+The one pre-existing pattern that is **not** covered by auto-synthesis is the SPA fallback (subtree → single HTML), since it requires a wildcard match across paths that don't correspond to an asset. Declare it explicitly:
 
 ```text
-# Replace "extensionless HTML" aliasing
-/foo             /foo.html              200
-
-# Replace per-directory index aliasing
-/blog/           /blog/index.html       200
-
 # SPA fallback (formerly served implicitly when no other asset matched)
 /*               /index.html            200
 ```
 
-The canister's built-in aliasing (and the `is_aliased` field on `set_asset_properties`) have been retired in favour of `_redirects`. The plugin no longer reads any project-side config file — only `_redirects` at the root of the input directory is consulted. The canister will drop the `is_aliased` field in a follow-up cleanup.
+The canister's built-in aliasing (and the `is_aliased` field on `set_asset_properties`) have been retired in favour of `_redirects` + plugin-side synthesis. The plugin no longer reads any project-side config file — only `_redirects` at the root of the input directory is consulted. The canister will drop the `is_aliased` field in a follow-up cleanup.
 
 ### Unsupported syntax
 
