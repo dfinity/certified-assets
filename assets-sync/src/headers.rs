@@ -34,6 +34,10 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Open block under construction during `parse`:
+/// (line_no of the path line, pattern, headers accumulated so far).
+type OpenBlock = (usize, RulePattern, Vec<(String, String)>);
+
 /// Resolves the per-asset header map for `key` by walking `rules` in
 /// declaration order. All matching rules contribute; same-name values across
 /// rules are concatenated with `, ` per RFC 7230 §3.2.2, with `Set-Cookie`
@@ -71,7 +75,7 @@ pub fn resolve(key: &str, rules: &[HeaderRule]) -> Vec<(String, String)> {
 
     // Stable-sort by lowercased name only — Set-Cookie groups stay together
     // but preserve declaration order within the group.
-    merged.sort_by(|(a, _), (b, _)| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    merged.sort_by_key(|(a, _)| a.to_ascii_lowercase());
     merged
 }
 
@@ -89,7 +93,7 @@ fn pattern_matches(pattern: &RulePattern, key: &str) -> bool {
 pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
     let mut rules = Vec::new();
     // Open block: (line_no of the path line, pattern, headers accumulated so far).
-    let mut current: Option<(usize, RulePattern, Vec<(String, String)>)> = None;
+    let mut current: Option<OpenBlock> = None;
 
     for (i, raw) in content.lines().enumerate() {
         let line_no = i + 1;
@@ -155,7 +159,7 @@ fn strip_comment(line: &str) -> &str {
 }
 
 fn finalize_block(
-    (line_no, pattern, headers): (usize, RulePattern, Vec<(String, String)>),
+    (line_no, pattern, headers): OpenBlock,
 ) -> Result<HeaderRule, ParseError> {
     if headers.is_empty() {
         return Err(ParseError {
