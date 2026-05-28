@@ -108,6 +108,20 @@ impl<K: NestedTreeKeyRequirements, V: NestedTreeValueRequirements> NestedTree<K,
                 NestedTree::Leaf(_) => {}
                 NestedTree::Nested(tree) => {
                     tree.modify(key.as_ref(), |child| child.delete(&path[1..]));
+                    // Prune the child if it's now an empty `Nested` subtree.
+                    // Otherwise a deleted leaf leaves an orphan path that the
+                    // v2 HTTP gateway's response verifier reads as "a
+                    // more-specific Exact expression path might exist for
+                    // this URL" and rejects wildcard `<*>` responses with
+                    // 503. Cascading up the recursion stack means a deep
+                    // delete fully unlinks every now-empty ancestor.
+                    let prune_child = tree.get(key.as_ref()).is_some_and(|c| match c {
+                        NestedTree::Leaf(_) => false,
+                        NestedTree::Nested(rb) => rb.iter().next().is_none(),
+                    });
+                    if prune_child {
+                        tree.delete(key.as_ref());
+                    }
                 }
             }
         } else {
@@ -162,4 +176,41 @@ fn nested_tree_operation() {
     assert_eq!(tree.get(&["one"]), None);
     assert!(!tree.contains_leaf(&["one", "two"]));
     assert!(!tree.contains_leaf(&["one"]));
+}
+
+#[test]
+fn delete_prunes_empty_parent_chain() {
+    // Deleting a deeply-nested leaf must unlink every now-empty ancestor.
+    // Otherwise `contains_path` for the deleted leaf's parents still returns
+    // true (the empty `Nested` subtrees count as "the path exists"), and
+    // the HTTP gateway's response verifier rejects wildcard responses
+    // because a "potential exact expression path" is visible at the
+    // orphaned path.
+    let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
+    tree.insert(&["a", "b", "c"], vec![1]);
+    assert!(tree.contains_path(&["a", "b", "c"]));
+    assert!(tree.contains_path(&["a", "b"]));
+    assert!(tree.contains_path(&["a"]));
+
+    tree.delete(&["a", "b", "c"]);
+    // Every ancestor that has no remaining content must be unlinked.
+    assert!(!tree.contains_path(&["a", "b", "c"]));
+    assert!(!tree.contains_path(&["a", "b"]));
+    assert!(!tree.contains_path(&["a"]));
+}
+
+#[test]
+fn delete_preserves_siblings_in_ancestor_chain() {
+    // Pruning must stop at the first ancestor that still has other
+    // children — we don't want to collapse the whole tree just because
+    // one leaf went away.
+    let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
+    tree.insert(&["a", "b", "c"], vec![1]);
+    tree.insert(&["a", "x"], vec![2]);
+
+    tree.delete(&["a", "b", "c"]);
+    // "a" still has "x" so the chain stops there.
+    assert!(!tree.contains_path(&["a", "b"]));
+    assert!(tree.contains_path(&["a"]));
+    assert_eq!(tree.get(&["a", "x"]), Some(&vec![2]));
 }
