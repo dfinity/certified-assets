@@ -158,9 +158,7 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
-fn finalize_block(
-    (line_no, pattern, headers): OpenBlock,
-) -> Result<HeaderRule, ParseError> {
+fn finalize_block((line_no, pattern, headers): OpenBlock) -> Result<HeaderRule, ParseError> {
     if headers.is_empty() {
         return Err(ParseError {
             line: line_no,
