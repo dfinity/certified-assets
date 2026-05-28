@@ -2,7 +2,6 @@ use assert_cmd::Command as AssertCmd;
 use candid::CandidType;
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -109,7 +108,7 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
 pub struct AssetProperties {
     pub max_age: Option<u64>,
-    pub headers: Option<BTreeMap<String, String>>,
+    pub headers: Option<Vec<(String, String)>>,
     pub allow_raw_access: Option<bool>,
     pub is_aliased: Option<bool>,
 }
