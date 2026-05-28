@@ -7,55 +7,14 @@
 //!
 //! See the "File format" section of HEADERS.md for the full reject list.
 
+use crate::glob::KeyPattern;
 use http::{HeaderName, HeaderValue};
 
 pub const HEADERS_FILENAME: &str = "_headers";
 
-/// Glob pattern matched against asset keys. `*` matches any sequence of
-/// characters, including `/` and empty; every other character matches
-/// literally. No `**`, no `?`, no `:placeholder` — single greedy `*` only,
-/// per Cloudflare Pages / Netlify `_headers` precedent.
-///
-/// Compiled at parse time into literal segments separated by an implicit `*`,
-/// so the matcher is `O(parts * key)` with no per-call allocation. Plugin-side
-/// only — never sent to the canister, so the wire-format `RulePattern` used by
-/// `_redirects` stays unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeaderPattern {
-    /// Original pattern source, kept for Debug output and error reporting.
-    source: String,
-    /// Literal chunks of the pattern. `parts.len() == 1` means no `*` (exact
-    /// match); otherwise consecutive entries are joined by an implicit `*`.
-    parts: Vec<String>,
-}
-
-impl HeaderPattern {
-    pub fn source(&self) -> &str {
-        &self.source
-    }
-
-    pub fn matches(&self, key: &str) -> bool {
-        if self.parts.len() == 1 {
-            return key == self.parts[0];
-        }
-        let Some(mut tail) = key.strip_prefix(self.parts[0].as_str()) else {
-            return false;
-        };
-        let middles = &self.parts[1..self.parts.len() - 1];
-        let last = &self.parts[self.parts.len() - 1];
-        for middle in middles {
-            match tail.find(middle.as_str()) {
-                Some(idx) => tail = &tail[idx + middle.len()..],
-                None => return false,
-            }
-        }
-        tail.len() >= last.len() && tail.ends_with(last.as_str())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderRule {
-    pub pattern: HeaderPattern,
+    pub pattern: KeyPattern,
     /// Headers in declaration order. Multiple entries for the same name are
     /// allowed (e.g. `Set-Cookie`); resolver semantics in `sync.rs`.
     pub headers: Vec<(String, String)>,
@@ -77,7 +36,7 @@ impl std::error::Error for ParseError {}
 
 /// Open block under construction during `parse`:
 /// (line_no of the path line, pattern, headers accumulated so far).
-type OpenBlock = (usize, HeaderPattern, Vec<(String, String)>);
+type OpenBlock = (usize, KeyPattern, Vec<(String, String)>);
 
 /// Resolves the per-asset header map for `key` by walking `rules` in
 /// declaration order. All matching rules contribute; same-name values across
@@ -157,7 +116,7 @@ pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
                 rules.push(finalize_block(block)?);
             }
             let token = stripped.trim();
-            let pattern = parse_pattern(token).map_err(|message| ParseError {
+            let pattern = crate::glob::parse(token).map_err(|message| ParseError {
                 line: line_no,
                 message,
             })?;
@@ -202,29 +161,6 @@ fn finalize_block((line_no, pattern, headers): OpenBlock) -> Result<HeaderRule, 
     Ok(HeaderRule { pattern, headers })
 }
 
-pub(crate) fn parse_pattern(token: &str) -> Result<HeaderPattern, String> {
-    if !token.starts_with('/') {
-        return Err(format!(
-            "'{token}' must be an absolute path (start with '/')"
-        ));
-    }
-    if token.contains(':') {
-        return Err(format!(
-            "':' placeholders in pattern ('{token}') are not supported"
-        ));
-    }
-    if token.contains("**") {
-        return Err(format!(
-            "'**' in pattern ('{token}') is not supported — a single '*' already matches any character sequence including '/'"
-        ));
-    }
-    let parts: Vec<String> = token.split('*').map(String::from).collect();
-    Ok(HeaderPattern {
-        source: token.to_string(),
-        parts,
-    })
-}
-
 fn parse_header(stripped: &str) -> Result<(String, String), String> {
     let trimmed = stripped.trim();
     let Some(colon_idx) = trimmed.find(':') else {
@@ -264,8 +200,8 @@ mod tests {
         parse(content).unwrap_err()
     }
 
-    fn pat(token: &str) -> HeaderPattern {
-        parse_pattern(token).unwrap()
+    fn pat(token: &str) -> KeyPattern {
+        crate::glob::parse(token).unwrap()
     }
 
     // ── happy paths ───────────────────────────────────────────────────────────
@@ -379,53 +315,6 @@ mod tests {
             rules[0].headers,
             vec![("X-Frame-Options".into(), "DENY".into())]
         );
-    }
-
-    #[test]
-    fn trailing_star_matches_subtree() {
-        let rules = parse("/blog/*\n  Cache-Control: public\n").unwrap();
-        assert!(rules[0].pattern.matches("/blog/post"));
-        assert!(rules[0].pattern.matches("/blog/nested/post"));
-        // Trailing-`/*` requires the slash — `/blogger` does not match.
-        assert!(!rules[0].pattern.matches("/blogger"));
-    }
-
-    #[test]
-    fn root_star_matches_everything() {
-        let rules = parse("/*\n  X-Frame-Options: DENY\n").unwrap();
-        assert!(rules[0].pattern.matches("/anywhere"));
-        assert!(rules[0].pattern.matches("/deep/nested/path"));
-    }
-
-    #[test]
-    fn extension_glob_matches_by_suffix() {
-        let rules = parse("/*.md\n  Cache-Control: public, max-age=300\n").unwrap();
-        assert!(rules[0].pattern.matches("/llms.md"));
-        assert!(rules[0].pattern.matches("/docs/intro.md"));
-        assert!(rules[0].pattern.matches("/a/b/c.md"));
-        assert!(!rules[0].pattern.matches("/llms.txt"));
-        assert!(!rules[0].pattern.matches("/index.html"));
-        // The `*` is greedy but the literal prefix `/` and suffix `.md`
-        // are anchored — `.md` in the middle is not a match.
-        assert!(!rules[0].pattern.matches("/a.md.html"));
-    }
-
-    #[test]
-    fn mid_path_wildcard_matches() {
-        let rules = parse("/api/*/v1\n  Cache-Control: no-store\n").unwrap();
-        assert!(rules[0].pattern.matches("/api/users/v1"));
-        assert!(rules[0].pattern.matches("/api/nested/path/v1"));
-        assert!(!rules[0].pattern.matches("/api/v1"));
-        assert!(!rules[0].pattern.matches("/api/users/v2"));
-    }
-
-    #[test]
-    fn exact_match_when_no_star() {
-        let rules = parse("/about\n  X-Frame-Options: DENY\n").unwrap();
-        assert!(rules[0].pattern.matches("/about"));
-        assert!(!rules[0].pattern.matches("/about/"));
-        assert!(!rules[0].pattern.matches("/aboutus"));
-        assert!(!rules[0].pattern.matches("/about/team"));
     }
 
     #[test]
