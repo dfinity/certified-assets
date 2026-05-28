@@ -1294,12 +1294,9 @@ mod tests {
 
     // ── _headers integration ───────────────────────────────────────────────
 
-    fn mk_header_rule(
-        pattern: crate::canister::RulePattern,
-        headers: &[(&str, &str)],
-    ) -> HeaderRule {
+    fn mk_header_rule(pattern_src: &str, headers: &[(&str, &str)]) -> HeaderRule {
         HeaderRule {
-            pattern,
+            pattern: crate::headers::parse_pattern(pattern_src).unwrap(),
             headers: headers
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1314,10 +1311,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Subtree("/".into()),
-            &[("X-Frame-Options", "DENY")],
-        )];
+        let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(
             &project,
             &HashMap::new(),
@@ -1346,10 +1340,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Exact("/private".into()),
-            &[("X-Frame-Options", "DENY")],
-        )];
+        let header_rules = vec![mk_header_rule("/private", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(
             &project,
             &HashMap::new(),
@@ -1388,10 +1379,7 @@ mod tests {
                 allow_raw_access: Some(true),
             },
         )]);
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Subtree("/".into()),
-            &[("X-Frame-Options", "DENY")],
-        )];
+        let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(
             &project,
             &canister,
@@ -1439,10 +1427,7 @@ mod tests {
     fn three_xx_redirect_rule_carries_resolved_headers() {
         // 3xx rules synthesize their response; populate `headers` from any
         // `_headers` rule whose pattern matches the redirect's `from`.
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Subtree("/".into()),
-            &[("X-Robots-Tag", "noindex")],
-        )];
+        let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
         let project_rules = vec![mk_rule(
             crate::canister::RulePattern::Exact("/old".into()),
             "/new",
@@ -1469,10 +1454,7 @@ mod tests {
         // 200 / 4xx rules inherit headers from their target asset, so the
         // plugin must leave `RedirectRule.headers` as `None` even when a
         // matching `_headers` rule exists.
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Subtree("/".into()),
-            &[("X-Robots-Tag", "noindex")],
-        )];
+        let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
         for status in [200u16, 404, 410] {
             let project_rules = vec![mk_rule(
                 crate::canister::RulePattern::Exact("/old".into()),
@@ -1498,10 +1480,7 @@ mod tests {
 
     #[test]
     fn three_xx_redirect_rule_omits_headers_when_no_match() {
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Exact("/other".into()),
-            &[("X-Foo", "bar")],
-        )];
+        let header_rules = vec![mk_header_rule("/other", &[("X-Foo", "bar")])];
         let project_rules = vec![mk_rule(
             crate::canister::RulePattern::Exact("/old".into()),
             "/new",
@@ -1523,10 +1502,7 @@ mod tests {
     fn redirect_rules_match_when_headers_populated_matches_canister() {
         // Canister stores the same rule (with the resolved 3xx headers) — no
         // SetRedirectRules op should be emitted.
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Subtree("/".into()),
-            &[("X-Robots-Tag", "noindex")],
-        )];
+        let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
         let project_rules = vec![mk_rule(
             crate::canister::RulePattern::Exact("/old".into()),
             "/new",
@@ -1572,10 +1548,7 @@ mod tests {
                 allow_raw_access: Some(true),
             },
         )]);
-        let header_rules = vec![mk_header_rule(
-            crate::canister::RulePattern::Subtree("/".into()),
-            &[("X-Frame-Options", "DENY")],
-        )];
+        let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(
             &project,
             &canister,
