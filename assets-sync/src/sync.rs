@@ -413,15 +413,50 @@ fn build_operations(
     //    parsed `_redirects`. Comparison is order-sensitive — rules are
     //    matched in declaration order at request time, so reordering is a
     //    semantic change.
-    if project_rules != canister_rules {
+    //
+    //    3xx rules synthesize their response (no target asset), so the
+    //    canister has no headers to inherit from. Populate `RedirectRule.headers`
+    //    by resolving `_headers` against the rule's `from` pattern. 200/4xx
+    //    rules borrow headers from their target asset, so no plumbing here.
+    let project_rules_with_headers: Vec<RedirectRule> = project_rules
+        .iter()
+        .map(|rule| {
+            let mut rule = rule.clone();
+            if is_3xx(rule.status) {
+                let key = redirect_pattern_to_key(&rule.from);
+                let resolved = headers::resolve(&key, project_header_rules);
+                if !resolved.is_empty() {
+                    rule.headers = Some(resolved);
+                }
+            }
+            rule
+        })
+        .collect();
+    if project_rules_with_headers != canister_rules {
         ops.push(BatchOperationKind::SetRedirectRules(
             SetRedirectRulesArguments {
-                rules: project_rules.to_vec(),
+                rules: project_rules_with_headers,
             },
         ));
     }
 
     ops
+}
+
+fn is_3xx(status: u16) -> bool {
+    (300..400).contains(&status)
+}
+
+/// Returns a path-like key suitable for running the header resolver against a
+/// redirect rule's `from`. Exact patterns yield the path itself; subtree
+/// patterns yield the prefix, so only header rules that subsume the subtree
+/// (the same or a broader subtree) match — narrower or unrelated patterns are
+/// rejected by the resolver's `starts_with` check.
+fn redirect_pattern_to_key(pattern: &crate::canister::RulePattern) -> String {
+    match pattern {
+        crate::canister::RulePattern::Exact(p) => p.clone(),
+        crate::canister::RulePattern::Subtree(prefix) => prefix.clone(),
+    }
 }
 
 /// Reads `_redirects` from the project's input directory, if present. A
@@ -1366,6 +1401,123 @@ mod tests {
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
         assert_eq!(by_key["/index.html"].headers, Some(None));
+    }
+
+    #[test]
+    fn three_xx_redirect_rule_carries_resolved_headers() {
+        // 3xx rules synthesize their response; populate `headers` from any
+        // `_headers` rule whose pattern matches the redirect's `from`.
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Subtree("/".into()),
+            &[("X-Robots-Tag", "noindex")],
+        )];
+        let project_rules = vec![mk_rule(
+            crate::canister::RulePattern::Exact("/old".into()),
+            "/new",
+            301,
+        )];
+        let ops = build_operations(
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &project_rules,
+            &[],
+            &header_rules,
+        );
+        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].headers,
+            Some(vec![("X-Robots-Tag".into(), "noindex".into())])
+        );
+    }
+
+    #[test]
+    fn non_3xx_redirect_rule_does_not_carry_resolved_headers() {
+        // 200 / 4xx rules inherit headers from their target asset, so the
+        // plugin must leave `RedirectRule.headers` as `None` even when a
+        // matching `_headers` rule exists.
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Subtree("/".into()),
+            &[("X-Robots-Tag", "noindex")],
+        )];
+        for status in [200u16, 404, 410] {
+            let project_rules = vec![mk_rule(
+                crate::canister::RulePattern::Exact("/old".into()),
+                "/target.html",
+                status,
+            )];
+            let ops = build_operations(
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &project_rules,
+                &[],
+                &header_rules,
+            );
+            let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
+            assert_eq!(rules.len(), 1);
+            assert!(
+                rules[0].headers.is_none(),
+                "status {status}: expected no headers on non-3xx rule"
+            );
+        }
+    }
+
+    #[test]
+    fn three_xx_redirect_rule_omits_headers_when_no_match() {
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Exact("/other".into()),
+            &[("X-Foo", "bar")],
+        )];
+        let project_rules = vec![mk_rule(
+            crate::canister::RulePattern::Exact("/old".into()),
+            "/new",
+            301,
+        )];
+        let ops = build_operations(
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &project_rules,
+            &[],
+            &header_rules,
+        );
+        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
+        assert!(rules[0].headers.is_none());
+    }
+
+    #[test]
+    fn redirect_rules_match_when_headers_populated_matches_canister() {
+        // Canister stores the same rule (with the resolved 3xx headers) — no
+        // SetRedirectRules op should be emitted.
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Subtree("/".into()),
+            &[("X-Robots-Tag", "noindex")],
+        )];
+        let project_rules = vec![mk_rule(
+            crate::canister::RulePattern::Exact("/old".into()),
+            "/new",
+            301,
+        )];
+        let canister_rules = vec![RedirectRule {
+            from: crate::canister::RulePattern::Exact("/old".into()),
+            to: "/new".to_string(),
+            status: 301,
+            headers: Some(vec![("X-Robots-Tag".into(), "noindex".into())]),
+        }];
+        let ops = build_operations(
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &project_rules,
+            &canister_rules,
+            &header_rules,
+        );
+        assert!(
+            set_rules_op(&ops).is_none(),
+            "no SetRedirectRules op when rules with headers match canister-stored"
+        );
     }
 
     #[test]
