@@ -191,6 +191,28 @@ pub fn http_fetch(project: &Path, path: &str) -> reqwest::blocking::Response {
         .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
 }
 
+/// Like `http_fetch`, but routes the canister via the subdomain syntax that
+/// browsers use (`http://<cid>.localhost:PORT/path`) instead of the
+/// `?canisterId=…` query parameter. The query-string form and the subdomain
+/// form sometimes exercise slightly different code paths in the gateway
+/// (notably around path normalisation), so tests that mirror real browser
+/// behaviour should prefer this helper.
+pub fn http_fetch_subdomain(project: &Path, path: &str) -> reqwest::blocking::Response {
+    let cid = frontend_canister_id(project);
+    let base = gateway_url(project);
+    // base looks like `http://127.0.0.1:PORT` or `http://localhost:PORT`. We
+    // need to splice the canister id in front of the host.
+    let url = base.replacen("://", &format!("://{cid}."), 1);
+    let url = format!("{url}{path}");
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build reqwest client")
+        .get(&url)
+        .send()
+        .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
+}
+
 /// Call `list` on the `frontend` canister and return all asset details.
 pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
     let stdout = icp_cmd(project)

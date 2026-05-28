@@ -4,7 +4,7 @@
 //! HTTP gateway. The gateway validates the response's `IC-Certificate` before
 //! handing it back, so a successful fetch is also proof of certification.
 
-use e2e::{http_fetch, icp_cmd, setup_project, LocalNetwork};
+use e2e::{http_fetch, http_fetch_subdomain, icp_cmd, setup_project, LocalNetwork};
 use reqwest::StatusCode;
 
 /// Deploy the `redirects` fixture and exercise every response kind:
@@ -79,36 +79,149 @@ fn redirect_rules_honoured() {
     }
 }
 
-/// Without `_redirects`, the canister no longer aliases `/foo` → `/foo.html`
-/// or `/blog` → `/blog/index.html`. Literal paths still resolve; the
-/// would-be aliases return 404.
+/// Without a user-supplied `_redirects`, the plugin auto-synthesises
+/// Cloudflare's `auto-trailing-slash` rule set for every HTML asset (see
+/// `assets-sync::html_handling`). This test deploys an HTML-only fixture
+/// and walks the full CF table for each of the three asset shapes:
+/// root index, directory index, and non-index HTML file.
+///
+/// Two rows of CF's table are knowingly inert: the source-URL 307s from
+/// `/foo.html → /foo` and `/blog/index.html → /blog/` (and the root
+/// `/index.html → /`). The asset at those keys shadows the rule, so the
+/// canister returns the asset's body with a 200 instead of redirecting.
+/// The test asserts that observed behaviour rather than CF's strict 307.
 #[test]
-fn no_implicit_aliasing() {
-    let tmp = setup_project("tests/fixture/no-implicit-aliasing");
+fn html_handling_auto_synthesis() {
+    let tmp = setup_project("tests/fixture/html-handling");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
     icp_cmd(project).arg("deploy").assert().success();
 
-    // Literal paths resolve.
-    let r = http_fetch(project, "/foo.html");
-    assert_eq!(r.status(), StatusCode::OK);
-    let body = r.text().expect("read body");
-    assert!(body.contains("foo at literal path"), "body: {body}");
+    // ── /foo.html (non-index): canonical /foo ───────────────────────────────
+    expect_200(project, "/foo", "foo.html body");
+    // /foo.html: inert — asset shadows the synthesised 307.
+    expect_200(project, "/foo.html", "foo.html body");
+    expect_307(project, "/foo/", "/foo");
+    expect_307(project, "/foo/index", "/foo");
+    expect_307(project, "/foo/index.html", "/foo");
 
-    let r = http_fetch(project, "/blog/index.html");
-    assert_eq!(r.status(), StatusCode::OK);
-    let body = r.text().expect("read body");
-    assert!(body.contains("blog index at literal path"), "body: {body}");
+    // ── /blog/index.html (directory index): canonical /blog/ ───────────────
+    expect_200(project, "/blog/", "blog index body");
+    expect_307(project, "/blog", "/blog/");
+    // CF chains: /blog.html -> /blog -> /blog/. The 307 the canister emits
+    // points at the bare form; the client follows it to land on /blog/.
+    expect_307(project, "/blog.html", "/blog");
+    expect_307(project, "/blog/index", "/blog");
+    // /blog/index.html: inert — asset shadows the synthesised 307.
+    expect_200(project, "/blog/index.html", "blog index body");
 
-    // Would-be aliases return 404 — proves the canister no longer synthesises
-    // routes implicitly. `_redirects` is the only mechanism.
-    for path in &["/foo", "/foo/", "/blog", "/blog/"] {
-        let r = http_fetch(project, path);
-        assert_eq!(
-            r.status(),
-            StatusCode::NOT_FOUND,
-            "no-aliasing: GET {path} should 404"
-        );
-    }
+    // ── /index.html (root index): canonical / ───────────────────────────────
+    expect_200(project, "/", "root index body");
+    expect_307(project, "/index", "/");
+    // /index.html: inert — asset shadows the synthesised 307.
+    expect_200(project, "/index.html", "root index body");
+}
+
+fn expect_200(project: &std::path::Path, path: &str, body_marker: &str) {
+    let r = http_fetch(project, path);
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "html-handling: GET {path} expected 200, got {}",
+        r.status()
+    );
+    let body = r.text().expect("read body");
+    assert!(
+        body.contains(body_marker),
+        "html-handling: GET {path} expected body containing {body_marker:?}, got: {body}"
+    );
+}
+
+/// Reproduces the in-the-wild bug report: a user `_redirects` with a SPA-style
+/// `/* /404.html 404` catch-all combined with auto-synthesised html-handling
+/// rules caused the gateway verifier to reject responses with 503
+/// "Response Verification Error" — the wildcard expression path the
+/// canister returned for paths matched by `/*` conflicted with the Exact
+/// expression paths the synthesised rules had certified in the tree.
+///
+/// The fix prepends synth rules before the user's `_redirects`, so the
+/// html-handling defaults claim their paths first and `/* … 404` only fires
+/// for paths no HTML asset covers. The verifier then sees consistent
+/// expression paths on every response.
+///
+/// This test exercises both code paths the gateway differentiates between:
+/// the subdomain-style URL the browser uses (which forces full v2
+/// verification) and the explicit `?canisterId=…` form.
+#[test]
+fn html_handling_with_catchall_redirect() {
+    let tmp = setup_project("tests/fixture/html-handling-with-catchall");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+    icp_cmd(project).arg("deploy").assert().success();
+
+    // The headline regression: `/` via the browser-style subdomain URL must
+    // 200-serve the root index, not 503 with a verification error.
+    let r = http_fetch_subdomain(project, "/");
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "root via subdomain expected 200 (was 503 before the fix), got {}",
+        r.status()
+    );
+    let body = r.text().expect("read body");
+    assert!(
+        body.contains("root index body"),
+        "expected /index.html body, got: {body}"
+    );
+
+    // `/index` is the other failure mode: the synthesised 307 was certified
+    // at `["http_expr", "index", "<$>"]`, but the user's `/*` matched first
+    // at request time and returned a `<*>` wildcard witness. The verifier
+    // then refused the wildcard because the Exact entry existed in the tree.
+    let r = http_fetch_subdomain(project, "/index");
+    assert_eq!(
+        r.status(),
+        StatusCode::TEMPORARY_REDIRECT,
+        "/index expected 307, got {}",
+        r.status()
+    );
+    assert_eq!(
+        r.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/"),
+    );
+
+    // The catch-all still does its job for paths nothing else covers.
+    let r = http_fetch_subdomain(project, "/this-path-does-not-exist");
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "catch-all expected 404, got {}",
+        r.status()
+    );
+    let body = r.text().expect("read body");
+    assert!(
+        body.contains("custom 404"),
+        "expected /404.html body, got: {body}"
+    );
+}
+
+fn expect_307(project: &std::path::Path, path: &str, location: &str) {
+    let r = http_fetch(project, path);
+    assert_eq!(
+        r.status(),
+        StatusCode::TEMPORARY_REDIRECT,
+        "html-handling: GET {path} expected 307, got {}",
+        r.status()
+    );
+    let actual = r
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    assert_eq!(
+        actual.as_deref(),
+        Some(location),
+        "html-handling: GET {path} expected Location {location}, got {actual:?}"
+    );
 }

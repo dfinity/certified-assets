@@ -42,7 +42,7 @@ The canister honours a Netlify-style `_redirects` file at the root of the projec
 /missing         /404.html              404   # custom error page
 ```
 
-The file is consumed by the plugin and lowered to certified canister-side rules — a real asset at the rule's `from` path always wins, and the canister no longer performs implicit `.html` / `index.html` aliasing. See [`plugin/README.md`](plugin/README.md#redirects) for the full reference and migration notes.
+The file is consumed by the plugin and lowered to certified canister-side rules — a real asset at the rule's `from` path always wins. Ahead of the user's `_redirects`, the plugin auto-synthesises Cloudflare's [`auto-trailing-slash`](https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/#automatic-trailing-slashes-default) rule set for every `.html` asset, so `/foo.html` is reachable as `/foo`, `/bar/index.html` is reachable as `/bar/`, and the non-canonical forms (`/foo/`, `/foo/index`, etc.) 307 to the canonical URL. User-declared rules apply to paths the html-handling defaults don't claim — e.g. a SPA-style `/* /404.html 404` catch-all only fires for paths with no matching HTML asset. See [`plugin/README.md`](plugin/README.md#redirects) for the full reference and migration notes.
 
 ## Per-path response headers
 
