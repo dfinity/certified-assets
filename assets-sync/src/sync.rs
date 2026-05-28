@@ -1118,8 +1118,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let mut canister_headers = HashMap::new();
-        canister_headers.insert("X-Frame-Options".to_string(), "DENY".to_string());
+        let canister_headers = vec![("X-Frame-Options".to_string(), "DENY".to_string())];
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
