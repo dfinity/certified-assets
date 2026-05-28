@@ -34,6 +34,54 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Resolves the per-asset header map for `key` by walking `rules` in
+/// declaration order. All matching rules contribute; same-name values across
+/// rules are concatenated with `, ` per RFC 7230 §3.2.2, with `Set-Cookie`
+/// carved out per RFC 6265 §3 (kept as separate entries). The returned Vec is
+/// stable-sorted by lowercased header name so multi-valued headers preserve
+/// their declaration order — see the determinism guarantee in HEADERS.md.
+pub fn resolve(key: &str, rules: &[HeaderRule]) -> Vec<(String, String)> {
+    use std::collections::HashMap;
+
+    let mut merged: Vec<(String, String)> = Vec::new();
+    // index in `merged` for the first occurrence of each non-Set-Cookie name,
+    // keyed by lowercased name.
+    let mut idx_by_lower: HashMap<String, usize> = HashMap::new();
+
+    for rule in rules {
+        if !pattern_matches(&rule.pattern, key) {
+            continue;
+        }
+        for (name, value) in &rule.headers {
+            if name.eq_ignore_ascii_case("set-cookie") {
+                merged.push((name.clone(), value.clone()));
+                continue;
+            }
+            let lower = name.to_ascii_lowercase();
+            if let Some(&i) = idx_by_lower.get(&lower) {
+                let existing = &mut merged[i].1;
+                existing.push_str(", ");
+                existing.push_str(value);
+            } else {
+                idx_by_lower.insert(lower, merged.len());
+                merged.push((name.clone(), value.clone()));
+            }
+        }
+    }
+
+    // Stable-sort by lowercased name only — Set-Cookie groups stay together
+    // but preserve declaration order within the group.
+    merged.sort_by(|(a, _), (b, _)| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    merged
+}
+
+fn pattern_matches(pattern: &RulePattern, key: &str) -> bool {
+    match pattern {
+        RulePattern::Exact(p) => p == key,
+        RulePattern::Subtree(prefix) => key.starts_with(prefix.as_str()),
+    }
+}
+
 /// Parses an entire `_headers` file into a list of [`HeaderRule`]s. Rules are
 /// returned in declaration order — the resolver walks them in order, so order
 /// is semantic. The first malformed line aborts parsing; we want the user to
@@ -454,5 +502,190 @@ mod tests {
     fn rejects_unterminated_path_block_with_no_headers() {
         let e = err("/about\n");
         assert!(e.message.contains("no header lines"), "{}", e.message);
+    }
+
+    // ── resolver ───────────────────────────────────────────────────────────────
+
+    fn rule(pattern: RulePattern, headers: &[(&str, &str)]) -> HeaderRule {
+        HeaderRule {
+            pattern,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_empty_when_no_rules_match() {
+        let rules = vec![rule(
+            RulePattern::Exact("/other".into()),
+            &[("X-Foo", "bar")],
+        )];
+        assert!(resolve("/about", &rules).is_empty());
+    }
+
+    #[test]
+    fn resolve_exact_match() {
+        let rules = vec![rule(
+            RulePattern::Exact("/about".into()),
+            &[("X-Frame-Options", "DENY")],
+        )];
+        assert_eq!(
+            resolve("/about", &rules),
+            vec![("X-Frame-Options".into(), "DENY".into())]
+        );
+    }
+
+    #[test]
+    fn resolve_subtree_match() {
+        let rules = vec![rule(
+            RulePattern::Subtree("/_astro/".into()),
+            &[("Cache-Control", "immutable")],
+        )];
+        assert_eq!(
+            resolve("/_astro/app.js", &rules),
+            vec![("Cache-Control".into(), "immutable".into())]
+        );
+    }
+
+    #[test]
+    fn resolve_root_subtree_matches_everything() {
+        let rules = vec![rule(
+            RulePattern::Subtree("/".into()),
+            &[("X-Frame-Options", "DENY")],
+        )];
+        assert_eq!(
+            resolve("/anywhere", &rules),
+            vec![("X-Frame-Options".into(), "DENY".into())]
+        );
+    }
+
+    #[test]
+    fn resolve_concatenates_same_name_across_rules() {
+        // Per RFC 7230 §3.2.2 — `/* X-Robots-Tag: noindex` + `/admin/* X-Robots-Tag: nofollow`
+        // on `/admin/page` yields `X-Robots-Tag: noindex, nofollow`.
+        let rules = vec![
+            rule(
+                RulePattern::Subtree("/".into()),
+                &[("X-Robots-Tag", "noindex")],
+            ),
+            rule(
+                RulePattern::Subtree("/admin/".into()),
+                &[("X-Robots-Tag", "nofollow")],
+            ),
+        ];
+        assert_eq!(
+            resolve("/admin/page", &rules),
+            vec![("X-Robots-Tag".into(), "noindex, nofollow".into())]
+        );
+    }
+
+    #[test]
+    fn resolve_concatenation_is_case_insensitive_on_name() {
+        let rules = vec![
+            rule(RulePattern::Subtree("/".into()), &[("X-Foo", "a")]),
+            rule(RulePattern::Subtree("/".into()), &[("x-foo", "b")]),
+        ];
+        let out = resolve("/anywhere", &rules);
+        assert_eq!(out.len(), 1);
+        // First occurrence's casing is preserved.
+        assert_eq!(out[0].0, "X-Foo");
+        assert_eq!(out[0].1, "a, b");
+    }
+
+    #[test]
+    fn resolve_set_cookie_stays_separate() {
+        // RFC 6265 §3: Set-Cookie must not be comma-folded.
+        let rules = vec![
+            rule(
+                RulePattern::Subtree("/".into()),
+                &[("Set-Cookie", "session=abc")],
+            ),
+            rule(
+                RulePattern::Subtree("/admin/".into()),
+                &[("Set-Cookie", "admin=1")],
+            ),
+        ];
+        let out = resolve("/admin/page", &rules);
+        let cookies: Vec<&(String, String)> = out
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("set-cookie"))
+            .collect();
+        assert_eq!(cookies.len(), 2);
+        assert_eq!(cookies[0].1, "session=abc");
+        assert_eq!(cookies[1].1, "admin=1");
+    }
+
+    #[test]
+    fn resolve_set_cookie_within_one_rule_stays_separate() {
+        let rules = vec![rule(
+            RulePattern::Exact("/api".into()),
+            &[("Set-Cookie", "a=1"), ("Set-Cookie", "b=2")],
+        )];
+        let out = resolve("/api", &rules);
+        let cookies: Vec<&(String, String)> = out
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("set-cookie"))
+            .collect();
+        assert_eq!(cookies.len(), 2);
+        assert_eq!(cookies[0].1, "a=1");
+        assert_eq!(cookies[1].1, "b=2");
+    }
+
+    #[test]
+    fn resolve_output_is_stable_sorted_by_lowercased_name() {
+        let rules = vec![rule(
+            RulePattern::Subtree("/".into()),
+            &[
+                ("Z-Header", "z"),
+                ("A-Header", "a"),
+                ("Set-Cookie", "first"),
+                ("Set-Cookie", "second"),
+                ("M-Header", "m"),
+            ],
+        )];
+        let out = resolve("/anywhere", &rules);
+        let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+        // Set-Cookie group preserves declaration order; everything else
+        // sorted by lowercased name.
+        assert_eq!(
+            names,
+            vec![
+                "A-Header",
+                "M-Header",
+                "Set-Cookie",
+                "Set-Cookie",
+                "Z-Header"
+            ]
+        );
+        // Set-Cookie entries kept declaration order: first, second.
+        let cookies: Vec<&str> = out
+            .iter()
+            .filter_map(|(n, v)| n.eq_ignore_ascii_case("set-cookie").then_some(v.as_str()))
+            .collect();
+        assert_eq!(cookies, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn resolve_walks_rules_in_declaration_order() {
+        // First match contributes first; concatenation order is rule order.
+        let rules = vec![
+            rule(RulePattern::Subtree("/admin/".into()), &[("X-Foo", "B")]),
+            rule(RulePattern::Subtree("/".into()), &[("X-Foo", "A")]),
+        ];
+        let out = resolve("/admin/page", &rules);
+        // First matching rule's value comes first in the concatenation.
+        assert_eq!(out, vec![("X-Foo".into(), "B, A".into())]);
+    }
+
+    #[test]
+    fn resolve_no_matching_rules_returns_empty() {
+        let rules = vec![rule(
+            RulePattern::Exact("/specific".into()),
+            &[("X-Foo", "bar")],
+        )];
+        assert!(resolve("/different", &rules).is_empty());
+        assert!(resolve("/specific/subpath", &rules).is_empty());
     }
 }

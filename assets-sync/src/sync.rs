@@ -17,6 +17,7 @@ use crate::canister::{
     SetAssetPropertiesArguments, SetRedirectRulesArguments, UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
+use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
 use std::path::Path;
@@ -105,6 +106,12 @@ pub fn sync<C: CanisterCall>(
         project_rules.len()
     );
 
+    let project_header_rules = load_header_rules(dir)?;
+    println!(
+        "parsed {} header rule(s) from _headers",
+        project_header_rules.len()
+    );
+
     let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
         .into_iter()
         .map(|d| (d.key.clone(), d))
@@ -145,6 +152,7 @@ pub fn sync<C: CanisterCall>(
         &canister_asset_properties,
         &project_rules,
         &canister_rules,
+        &project_header_rules,
     )
     .is_empty()
     {
@@ -175,6 +183,7 @@ pub fn sync<C: CanisterCall>(
         &canister_asset_properties,
         &project_rules,
         &canister_rules,
+        &project_header_rules,
     );
     println!("committing {} operation(s)", operations.len());
 
@@ -316,6 +325,7 @@ fn build_operations(
     canister_asset_properties: &HashMap<String, AssetProperties>,
     project_rules: &[RedirectRule],
     canister_rules: &[RedirectRule],
+    project_header_rules: &[HeaderRule],
 ) -> Vec<BatchOperationKind> {
     let mut ops = Vec::new();
     let mut canister_assets = canister_assets.clone();
@@ -340,15 +350,16 @@ fn build_operations(
     }
 
     // 2. Create new assets (those not present after deletions). Per-asset
-    //    properties (max_age, headers, allow_raw_access) come from defaults
-    //    only — no project-side config source exists yet.
+    //    headers come from resolving the project's `_headers` rules against
+    //    each new key; max_age and allow_raw_access fall back to defaults.
     for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
+            let resolved = headers::resolve(key, project_header_rules);
             ops.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: key.clone(),
                 content_type: pa.media_type.to_string(),
                 max_age: None,
-                headers: None,
+                headers: (!resolved.is_empty()).then_some(resolved),
                 allow_raw_access: Some(true),
             }));
         }
@@ -395,6 +406,7 @@ fn build_operations(
         project_assets,
         &canister_assets,
         canister_asset_properties,
+        project_header_rules,
     );
 
     // 6. Replace-all the canister's redirect rules when they differ from the
@@ -428,8 +440,11 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
 
 // For each asset that already exists on the canister, reset any per-asset
 // properties (`max_age`, `headers`, `allow_raw_access`) that drifted from the
-// plugin's defaults. Newly-created assets get the same defaults via
+// project config. Newly-created assets get the same values via
 // `CreateAssetArguments`, so we don't emit `SetAssetProperties` for them.
+//
+// Headers are resolved from `_headers` per-key; everything else falls back to
+// plugin defaults (None / Some(true)).
 //
 // `canister_assets` is the post-deletion view: keys removed in step 1 (missing
 // from the project, or content_type drift forcing delete-then-create) are
@@ -441,6 +456,7 @@ fn update_properties(
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
     canister_asset_properties: &HashMap<String, AssetProperties>,
+    project_header_rules: &[HeaderRule],
 ) {
     for key in project_assets.keys() {
         if !canister_assets.contains_key(key) {
@@ -452,7 +468,13 @@ fn update_properties(
 
         let max_age = canister_props.max_age.is_some().then_some(None);
 
-        let headers = canister_props.headers.is_some().then_some(None);
+        let resolved = headers::resolve(key, project_header_rules);
+        let expected_headers = (!resolved.is_empty()).then_some(resolved);
+        let headers = if canister_props.headers != expected_headers {
+            Some(expected_headers)
+        } else {
+            None
+        };
 
         let allow_raw_access =
             (canister_props.allow_raw_access != Some(true)).then_some(Some(true));
@@ -468,6 +490,19 @@ fn update_properties(
             ));
         }
     }
+}
+
+/// Reads `_headers` from the project's input directory, if present. A missing
+/// file is treated as "no rules"; parse errors carry the file's path and
+/// 1-based line number so users can fix issues without a canister round-trip.
+fn load_header_rules(dir: &str) -> Result<Vec<HeaderRule>, String> {
+    let path = Path::new(dir).join(HEADERS_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    headers::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -668,7 +703,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(ops.len(), 2);
@@ -687,7 +722,7 @@ mod tests {
             "text/html",
             &[("identity", Some(sha))],
         )]);
-        assert!(build_operations(&project, &canister, &HashMap::new(), &[], &[]).is_empty());
+        assert!(build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]).is_empty());
     }
 
     #[test]
@@ -702,7 +737,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
         assert_eq!(count_op(&ops, "DeleteAsset"), 0);
@@ -716,7 +751,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[]);
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(ops.len(), 1);
     }
@@ -733,7 +768,7 @@ mod tests {
             "application/octet-stream",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
@@ -754,7 +789,7 @@ mod tests {
             "text/html",
             &[("identity", Some(sha)), ("gzip", Some(vec![9, 8, 7]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 0);
         assert_eq!(ops.len(), 1);
@@ -777,7 +812,7 @@ mod tests {
             "text/html",
             &[("identity", Some(identity_sha))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 0);
@@ -794,7 +829,7 @@ mod tests {
                 &[("identity", Some(vec![2]))],
             ),
         ]);
-        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[]);
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 2);
         assert_eq!(ops.len(), 2);
     }
@@ -837,7 +872,14 @@ mod tests {
             "/new",
             301,
         )];
-        let ops = build_operations(&project, &canister, &HashMap::new(), &project_rules, &[]);
+        let ops = build_operations(
+            &project,
+            &canister,
+            &HashMap::new(),
+            &project_rules,
+            &[],
+            &[],
+        );
         let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
         assert_eq!(rules, project_rules.as_slice());
         // No asset-side ops should have been emitted.
@@ -862,6 +904,7 @@ mod tests {
             &HashMap::new(),
             &[],
             &canister_rules,
+            &[],
         );
         let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
         assert!(rules.is_empty(), "expected empty-vec replace-all op");
@@ -881,6 +924,7 @@ mod tests {
             &HashMap::new(),
             &rules,
             &rules,
+            &[],
         );
         assert!(
             set_rules_op(&ops).is_none(),
@@ -901,6 +945,7 @@ mod tests {
             &HashMap::new(),
             &[a.clone(), b.clone()],
             &[b, a],
+            &[],
         );
         assert!(
             set_rules_op(&ops).is_some(),
@@ -1007,7 +1052,7 @@ mod tests {
             "text/plain",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert!(!ops.iter().any(|op| matches!(
@@ -1023,7 +1068,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
         let create_op = ops
             .iter()
             .find_map(|op| {
@@ -1071,7 +1116,7 @@ mod tests {
                 allow_raw_access: Some(true),
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
         assert!(
             set_props_ops(&ops).is_empty(),
             "no SetAssetProperties op when canister already matches defaults"
@@ -1098,7 +1143,7 @@ mod tests {
                 allow_raw_access: Some(true),
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
         // canister has Some(60), defaults are None — the op must explicitly
@@ -1127,7 +1172,7 @@ mod tests {
                 allow_raw_access: Some(true),
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
         // The inner None clears the headers map on the canister.
@@ -1158,7 +1203,7 @@ mod tests {
                 allow_raw_access: Some(true),
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert!(
@@ -1176,8 +1221,189 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
         assert!(set_props_ops(&ops).is_empty());
+    }
+
+    // ── _headers integration ───────────────────────────────────────────────
+
+    fn mk_header_rule(
+        pattern: crate::canister::RulePattern,
+        headers: &[(&str, &str)],
+    ) -> HeaderRule {
+        HeaderRule {
+            pattern,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn create_asset_args_carry_resolved_headers() {
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+        )]);
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Subtree("/".into()),
+            &[("X-Frame-Options", "DENY")],
+        )];
+        let ops = build_operations(
+            &project,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &[],
+            &header_rules,
+        );
+        let create_op = ops
+            .iter()
+            .find_map(|op| match op {
+                BatchOperationKind::CreateAsset(a) => Some(a),
+                _ => None,
+            })
+            .expect("CreateAsset op");
+        assert_eq!(
+            create_op.headers,
+            Some(vec![("X-Frame-Options".into(), "DENY".into())])
+        );
+    }
+
+    #[test]
+    fn create_asset_args_omit_headers_when_no_rules_match() {
+        let project = HashMap::from([mk_project_asset(
+            "/public.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+        )]);
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Exact("/private".into()),
+            &[("X-Frame-Options", "DENY")],
+        )];
+        let ops = build_operations(
+            &project,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &[],
+            &header_rules,
+        );
+        let create_op = ops
+            .iter()
+            .find_map(|op| match op {
+                BatchOperationKind::CreateAsset(a) => Some(a),
+                _ => None,
+            })
+            .expect("CreateAsset op");
+        assert!(create_op.headers.is_none());
+    }
+
+    #[test]
+    fn update_properties_sets_headers_when_canister_missing_them() {
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: None,
+                allow_raw_access: Some(true),
+            },
+        )]);
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Subtree("/".into()),
+            &[("X-Frame-Options", "DENY")],
+        )];
+        let ops = build_operations(
+            &project,
+            &canister,
+            &canister_props,
+            &[],
+            &[],
+            &header_rules,
+        );
+        let by_key = set_props_ops(&ops);
+        assert_eq!(by_key.len(), 1);
+        assert_eq!(
+            by_key["/index.html"].headers,
+            Some(Some(vec![("X-Frame-Options".into(), "DENY".into())]))
+        );
+    }
+
+    #[test]
+    fn update_properties_clears_headers_when_no_rules_match() {
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
+                allow_raw_access: Some(true),
+            },
+        )]);
+        // No header rules — canister-stored headers should be cleared.
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
+        let by_key = set_props_ops(&ops);
+        assert_eq!(by_key.len(), 1);
+        assert_eq!(by_key["/index.html"].headers, Some(None));
+    }
+
+    #[test]
+    fn update_properties_no_op_when_canister_headers_match_resolved() {
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
+                allow_raw_access: Some(true),
+            },
+        )]);
+        let header_rules = vec![mk_header_rule(
+            crate::canister::RulePattern::Subtree("/".into()),
+            &[("X-Frame-Options", "DENY")],
+        )];
+        let ops = build_operations(
+            &project,
+            &canister,
+            &canister_props,
+            &[],
+            &[],
+            &header_rules,
+        );
+        assert!(
+            set_props_ops(&ops).is_empty(),
+            "no SetAssetProperties op when resolved headers byte-match canister-stored"
+        );
     }
 
     // ---- Authorization tests ----
@@ -1311,6 +1537,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("got 2"), "got: {err}");
+    }
+
+    #[test]
+    fn sync_short_circuits_when_headers_file_only_matches_canister() {
+        // The canister already stores the headers a `_headers`-only project
+        // would resolve. The "nothing to commit" short-circuit must trigger.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+        std::fs::write(
+            dir.path().join("_headers"),
+            b"/*\n  X-Frame-Options: DENY\n",
+        )
+        .unwrap();
+
+        use sha2::Digest;
+        let identity_sha = sha2::Sha256::digest(b"<html></html>").to_vec();
+
+        let mock = SyncMock::new();
+        mock.push_ok("api_version", 2u16);
+        mock.push_ok(
+            "list",
+            vec![AssetDetails {
+                key: "/index.html".to_string(),
+                content_type: "text/html".to_string(),
+                encodings: vec![AssetEncodingDetails {
+                    content_encoding: "identity".to_string(),
+                    sha256: Some(identity_sha),
+                }],
+            }],
+        );
+        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok(
+            "get_asset_properties",
+            AssetProperties {
+                max_age: None,
+                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
+                allow_raw_access: Some(true),
+            },
+        );
+
+        let result = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        );
+        // No create_batch / commit_batch programmed — would panic if reached.
+        assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
     // Direct mode: canister rejects create_batch with a permission error → sync propagates it.
