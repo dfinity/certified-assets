@@ -8,14 +8,16 @@
 //! Files whose names appear in `CONFIG_FILENAMES` (`_redirects`, etc.) are
 //! consumed by the sync layer and excluded from the upload set.
 
+use crate::headers::HEADERS_FILENAME;
 use crate::redirects::REDIRECTS_FILENAME;
 use std::path::{Path, PathBuf};
 
 const KNOWN_DIRECTORIES: &[&str] = &[".well-known"];
 
 /// Filenames whose presence is configuration, not asset content. Loaded for
-/// their side effects (redirect rules, etc.) and excluded from the upload set.
-const CONFIG_FILENAMES: &[&str] = &[REDIRECTS_FILENAME];
+/// their side effects (redirect rules, header rules, etc.) and excluded from
+/// the upload set.
+const CONFIG_FILENAMES: &[&str] = &[REDIRECTS_FILENAME, HEADERS_FILENAME];
 
 #[derive(Debug)]
 pub struct AssetSource {
