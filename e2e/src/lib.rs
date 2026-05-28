@@ -204,8 +204,24 @@ pub fn http_fetch_subdomain(project: &Path, path: &str) -> reqwest::blocking::Re
     // need to splice the canister id in front of the host.
     let url = base.replacen("://", &format!("://{cid}."), 1);
     let url = format!("{url}{path}");
+
+    // macOS doesn't resolve `*.localhost` to loopback by default (Linux/glibc
+    // does via RFC 6761). Pin DNS for the subdomain host to 127.0.0.1 so the
+    // gateway still routes on the canister-subdomain Host header without
+    // depending on the system resolver.
+    let parsed = reqwest::Url::parse(&url).expect("parse subdomain URL");
+    let host = parsed
+        .host_str()
+        .expect("subdomain URL has host")
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .expect("subdomain URL has port");
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+
     reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .resolve(&host, addr)
         .build()
         .expect("build reqwest client")
         .get(&url)
