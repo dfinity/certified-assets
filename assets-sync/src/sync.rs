@@ -380,7 +380,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
     // First-fit-decreasing: sort descending, then in each pass take every
     // chunk that still fits under MAX_CHUNK_SIZE. Anything that doesn't fit
     // stays in `pending` for the next pass.
-    pending.sort_by(|a, b| b.data.len().cmp(&a.data.len()));
+    pending.sort_by_key(|b| std::cmp::Reverse(b.data.len()));
 
     let total_chunks = pending.len();
     let mut total_calls = 0usize;
@@ -412,7 +412,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
         total_calls += 1;
         total_bytes += batch_size as u64;
 
-        for (p, id) in batch.into_iter().zip(ids.into_iter()) {
+        for (p, id) in batch.into_iter().zip(ids) {
             let asset = project_assets
                 .get_mut(&p.asset_key)
                 .expect("asset present (collected above)");
@@ -424,9 +424,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
         }
     }
 
-    println!(
-        "uploaded {total_chunks} chunk(s) in {total_calls} call(s) ({total_bytes} bytes)"
-    );
+    println!("uploaded {total_chunks} chunk(s) in {total_calls} call(s) ({total_bytes} bytes)");
     Ok(())
 }
 

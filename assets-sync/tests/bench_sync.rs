@@ -148,13 +148,7 @@ fn run_bench(label: &str, count: usize, size_bytes: usize) {
 
     let mock = BenchMock::new();
     let started = std::time::Instant::now();
-    let result = sync(
-        &mock,
-        &dirs,
-        &[],
-        &Principal::anonymous().to_text(),
-        None,
-    );
+    let result = sync(&mock, &dirs, &[], &Principal::anonymous().to_text(), None);
     let elapsed = started.elapsed();
     result.expect("sync failed");
 
