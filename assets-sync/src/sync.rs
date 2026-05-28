@@ -452,14 +452,7 @@ fn update_properties(
 
         let max_age = canister_props.max_age.is_some().then_some(None);
 
-        // The canister auto-injects `Set-Cookie: ic_env=…` on HTML assets via
-        // `on_asset_change`; that header is runtime-managed, not project-managed,
-        // so ignore it when checking for drift.
-        let canister_has_user_headers = canister_props
-            .headers
-            .as_ref()
-            .is_some_and(|h| h.keys().any(|k| !k.eq_ignore_ascii_case("set-cookie")));
-        let headers = canister_has_user_headers.then_some(None);
+        let headers = canister_props.headers.is_some().then_some(None);
 
         let allow_raw_access =
             (canister_props.allow_raw_access != Some(true)).then_some(Some(true));
@@ -1140,41 +1133,6 @@ mod tests {
         assert_eq!(by_key.len(), 1);
         // The inner None clears the headers map on the canister.
         assert_eq!(by_key["/index.html"].headers, Some(None));
-    }
-
-    #[test]
-    fn update_properties_ignores_canister_managed_set_cookie() {
-        // The canister auto-injects `Set-Cookie: ic_env=…` on HTML assets via
-        // `on_asset_change`. Without filtering, a no-op re-sync of an HTML
-        // asset would emit drift every time.
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], true)],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
-        )]);
-        let mut canister_headers = HashMap::new();
-        canister_headers.insert(
-            "Set-Cookie".to_string(),
-            "ic_env=ic%5Froot%5Fkey%3D; SameSite=Lax".to_string(),
-        );
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: None,
-                headers: Some(canister_headers),
-                allow_raw_access: Some(true),
-            },
-        )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
-        assert!(
-            set_props_ops(&ops).is_empty(),
-            "Set-Cookie is canister-managed and must not trigger drift",
-        );
     }
 
     #[test]

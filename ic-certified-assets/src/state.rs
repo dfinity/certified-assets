@@ -68,8 +68,6 @@ pub struct State {
     /// (200/4xx) points at a target asset that doesn't exist yet.
     pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
 
-    pub(crate) encoded_canister_env: String,
-
     pub(crate) state_hash_computation: Option<StateHashComputation>,
     pub(crate) last_state_update_timestamp_ns: u64,
     pub(crate) last_state_hash_timestamp: u64,
@@ -216,13 +214,7 @@ impl State {
         };
         asset.encodings.insert(arg.content_encoding, enc);
 
-        on_asset_change(
-            &mut self.asset_hashes,
-            &arg.key,
-            asset,
-            dependent_keys,
-            Some(&self.encoded_canister_env),
-        );
+        on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
 
         Ok(())
     }
@@ -235,13 +227,7 @@ impl State {
             .ok_or_else(|| "asset not found".to_string())?;
 
         if asset.encodings.remove(&arg.content_encoding).is_some() {
-            on_asset_change(
-                &mut self.asset_hashes,
-                &arg.key,
-                asset,
-                dependent_keys,
-                None,
-            );
+            on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
         }
 
         Ok(())
@@ -324,13 +310,7 @@ impl State {
         encoding.modified = Int::from(system_context.current_timestamp_ns);
         encoding.sha256 = hash;
 
-        on_asset_change(
-            &mut self.asset_hashes,
-            &arg.key,
-            asset,
-            dependent_keys,
-            Some(&self.encoded_canister_env),
-        );
+        on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
         self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
 
         Ok(())
@@ -706,13 +686,7 @@ impl State {
         // `arg.is_aliased` is accepted for backward compatibility but ignored.
         let _ = arg.is_aliased;
 
-        on_asset_change(
-            &mut self.asset_hashes,
-            &arg.key,
-            asset,
-            dependent_keys,
-            Some(&self.encoded_canister_env),
-        );
+        on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
 
         Ok(())
     }
@@ -895,8 +869,7 @@ impl From<StableState> for State {
                 for enc in asset.encodings.values_mut() {
                     enc.certified = false;
                 }
-                // Do not pass the canister env here, because we want to load the assets as they are (with the old cookie value)
-                on_asset_change(&mut state.asset_hashes, &key, asset, dependent_keys, None);
+                on_asset_change(&mut state.asset_hashes, &key, asset, dependent_keys);
             } else {
                 // shouldn't reach this
             }
