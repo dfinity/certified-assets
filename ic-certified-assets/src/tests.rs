@@ -133,7 +133,7 @@ struct AssetBuilder {
     content_type: String,
     encodings: Vec<(String, Vec<ByteBuf>)>,
     max_age: Option<u64>,
-    headers: Option<BTreeMap<String, String>>,
+    headers: Option<Vec<(String, String)>>,
     aliasing: Option<bool>,
     allow_raw_access: Option<bool>,
 }
@@ -168,8 +168,8 @@ impl AssetBuilder {
     }
 
     fn with_header(mut self, header_key: &str, header_value: &str) -> Self {
-        let hm = self.headers.get_or_insert(BTreeMap::new());
-        hm.insert(header_key.to_string(), header_value.to_string());
+        let hm = self.headers.get_or_insert_with(Vec::new);
+        hm.push((header_key.to_string(), header_value.to_string()));
         self
     }
 
@@ -930,7 +930,6 @@ fn check_url_decode() {
     );
 }
 
-
 #[test]
 fn supports_custom_http_headers() {
     let mut state = State::default();
@@ -1019,10 +1018,7 @@ fn supports_getting_and_setting_asset_properties() {
         state.get_asset_properties("/contents.html".into()),
         Ok(AssetProperties {
             max_age: None,
-            headers: Some(BTreeMap::from([(
-                "Access-Control-Allow-Origin".into(),
-                "*".into()
-            )])),
+            headers: Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1031,10 +1027,7 @@ fn supports_getting_and_setting_asset_properties() {
         state.get_asset_properties("/max-age.html".into()),
         Ok(AssetProperties {
             max_age: Some(604800),
-            headers: Some(BTreeMap::from([(
-                "X-Content-Type-Options".into(),
-                "nosniff".into()
-            )])),
+            headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1044,10 +1037,10 @@ fn supports_getting_and_setting_asset_properties() {
         .set_asset_properties(SetAssetPropertiesArguments {
             key: "/max-age.html".into(),
             max_age: Some(Some(1)),
-            headers: Some(Some(BTreeMap::from([(
+            headers: Some(Some(vec![(
                 "X-Content-Type-Options".into(),
                 "nosniff".into()
-            )]))),
+            )])),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1056,10 +1049,7 @@ fn supports_getting_and_setting_asset_properties() {
         state.get_asset_properties("/max-age.html".into()),
         Ok(AssetProperties {
             max_age: Some(1),
-            headers: Some(BTreeMap::from([(
-                "X-Content-Type-Options".into(),
-                "nosniff".into()
-            )])),
+            headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1088,10 +1078,10 @@ fn supports_getting_and_setting_asset_properties() {
         .set_asset_properties(SetAssetPropertiesArguments {
             key: "/max-age.html".into(),
             max_age: Some(Some(1)),
-            headers: Some(Some(BTreeMap::from([(
+            headers: Some(Some(vec![(
                 "X-Content-Type-Options".into(),
                 "nosniff".into()
-            )]))),
+            )])),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1100,10 +1090,7 @@ fn supports_getting_and_setting_asset_properties() {
         state.get_asset_properties("/max-age.html".into()),
         Ok(AssetProperties {
             max_age: Some(1),
-            headers: Some(BTreeMap::from([(
-                "X-Content-Type-Options".into(),
-                "nosniff".into()
-            )])),
+            headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1113,10 +1100,7 @@ fn supports_getting_and_setting_asset_properties() {
         .set_asset_properties(SetAssetPropertiesArguments {
             key: "/max-age.html".into(),
             max_age: None,
-            headers: Some(Some(BTreeMap::from([(
-                "new-header".into(),
-                "value".into()
-            )]))),
+            headers: Some(Some(vec![("new-header".into(), "value".into())])),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1125,7 +1109,7 @@ fn supports_getting_and_setting_asset_properties() {
         state.get_asset_properties("/max-age.html".into()),
         Ok(AssetProperties {
             max_age: Some(1),
-            headers: Some(BTreeMap::from([("new-header".into(), "value".into())])),
+            headers: Some(vec![("new-header".into(), "value".into())]),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1144,7 +1128,7 @@ fn supports_getting_and_setting_asset_properties() {
         state.get_asset_properties("/max-age.html".into()),
         Ok(AssetProperties {
             max_age: Some(2),
-            headers: Some(BTreeMap::from([("new-header".into(), "value".into())])),
+            headers: Some(vec![("new-header".into(), "value".into())]),
             allow_raw_access: None,
             is_aliased: None
         })
@@ -1163,7 +1147,7 @@ fn supports_getting_and_setting_asset_properties() {
         state.get_asset_properties("/max-age.html".into()),
         Ok(AssetProperties {
             max_age: Some(2),
-            headers: Some(BTreeMap::from([("new-header".into(), "value".into())])),
+            headers: Some(vec![("new-header".into(), "value".into())]),
             allow_raw_access: None,
             // `is_aliased` is accepted on the candid surface but ignored —
             // the canister no longer aliases on its own.
@@ -1630,10 +1614,7 @@ mod certificate_expression {
             .set_asset_properties(SetAssetPropertiesArguments {
                 key: "/contents.html".into(),
                 max_age: Some(None),
-                headers: Some(Some(BTreeMap::from([(
-                    "custom-header".into(),
-                    "value".into(),
-                )]))),
+                headers: Some(Some(vec![("custom-header".into(), "value".into())])),
                 allow_raw_access: None,
                 is_aliased: None,
             })
@@ -2189,10 +2170,10 @@ mod last_state_update_timestamp {
                     operations: vec![BatchOperation::SetAssetProperties(
                         SetAssetPropertiesArguments {
                             key: "/test.txt".to_string(),
-                            headers: Some(Some(BTreeMap::from([(
+                            headers: Some(Some(vec![(
                                 "x-custom".to_string(),
                                 "value".to_string(),
-                            )]))),
+                            )])),
                             max_age: None,
                             is_aliased: None,
                             allow_raw_access: None,
