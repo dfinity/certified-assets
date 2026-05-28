@@ -123,6 +123,66 @@ fn html_handling_auto_synthesis() {
     expect_200(project, "/index.html", "root index body");
 }
 
+/// When a rule is removed from `_redirects` between deploys, the canister
+/// must not leave an orphaned cert-tree path behind. The HTTP gateway's
+/// verifier rejects wildcard `<*>` witnesses if a "potential exact
+/// expression path" is visible at the requested URL, so a dangling Exact
+/// entry from a deleted rule will turn the removed path into a 503 for
+/// any subsequent request — including ones the user expected the SPA
+/// catch-all to handle.
+///
+/// This test deploys once with a marker rule, verifies it works, removes
+/// the rule from `_redirects`, redeploys, and verifies the marker path
+/// now falls through cleanly to the catch-all 404 rather than 503-ing.
+#[test]
+fn removed_redirect_rule_clears_cert_tree() {
+    let tmp = setup_project("tests/fixture/html-handling-with-catchall");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    let redirects_path = project.join("dist/_redirects");
+    let original = std::fs::read_to_string(&redirects_path).expect("read original");
+    // Prepend a marker that can't collide with auto-synth (no matching
+    // .html source for this path).
+    std::fs::write(
+        &redirects_path,
+        format!("/marker-path /index.html 307\n{original}"),
+    )
+    .expect("write augmented _redirects");
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let r = http_fetch_subdomain(project, "/marker-path");
+    assert_eq!(
+        r.status(),
+        StatusCode::TEMPORARY_REDIRECT,
+        "before removal: /marker-path expected 307, got {}",
+        r.status()
+    );
+
+    // Remove the marker, leaving only the user's catch-all + synth.
+    std::fs::write(&redirects_path, &original).expect("restore _redirects");
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let r = http_fetch_subdomain(project, "/marker-path");
+    // After the fix, the cert tree no longer has an Exact entry at this
+    // path, so the user's `/* /404.html 404` catch-all takes over cleanly.
+    // Before the fix, the orphaned subtree confused the verifier and the
+    // gateway returned 503 instead.
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "after removal: /marker-path expected 404 from catch-all, got {} \
+         (a 503 here means the cert-tree entry wasn't pruned)",
+        r.status()
+    );
+    let body = r.text().expect("read body");
+    assert!(
+        body.contains("custom 404"),
+        "expected /404.html body from catch-all, got: {body}"
+    );
+}
+
 fn expect_200(project: &std::path::Path, path: &str, body_marker: &str) {
     let r = http_fetch(project, path);
     assert_eq!(
