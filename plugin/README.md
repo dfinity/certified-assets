@@ -40,6 +40,7 @@ The current implementation supports the V2 protocol of the assets canister (tran
 - Detects the MIME type of each file and computes encodings: `gzip` for all `text/*`, `*/javascript`, and `*/html` types (only if the compressed output is smaller), `identity` for everything.
 - Diffs against `list_assets()`: skips encodings already in place (matched by sha256), unsets encodings that are stale, and deletes assets that have been removed or whose `content_type` changed.
 - Reads `_redirects` at the root of the input directory and replaces the canister's ruleset in the same batch (see "Redirects" below).
+- Reads `_headers` at the root of the input directory, resolves per-asset header lists, and routes them through `CreateAssetArguments.headers` and `SetAssetProperties` (see "Headers" below).
 - Opens a transaction (`create_batch`), uploads each content chunk via `create_chunks` (one chunk per call, 1.9 MB max), then commits all operations atomically with a single `commit_batch` call.
 - In normal mode all canister calls use `direct: true`. In proxy mode (when a `proxy_canister_id` is provided by the host) the plugin first ensures the signing identity has `Commit` permission, routing a `grant_permission` call through the proxy (which is the canister's controller) if needed, then proceeds with direct calls.
 
@@ -100,9 +101,67 @@ The canister's built-in aliasing (and the `is_aliased` field on `set_asset_prope
 - `:splat` and `:placeholder` substitution in `<to>` — deferred (see the design plan's tier-3 follow-up).
 - Netlify's `!` force suffix on status codes — files always win over rules at the same path; remove the conflicting asset instead.
 - Country/role conditions and query-string matching — out of scope.
-- Inline headers as a fourth field — headers will arrive via a separate `_headers` file in a later track.
+- Inline headers as a fourth field — headers are configured in a separate `_headers` file (see "Headers" below).
 
 Parse errors abort the sync with the offending file path and 1-based line number, before any canister call is issued.
+
+## Headers
+
+The plugin reads a Netlify-style `_headers` file at the root of the input directory (`dirs:` must list exactly one). The file itself is **not** uploaded as an asset — it's consumed by the plugin and lowered into per-asset header lists. Each non-indented `<pattern>` line opens a block; subsequent indented lines (1+ spaces or tabs) are `Header-Name: value` entries belonging to the block. Blank lines close the block:
+
+```text
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+  X-Content-Type-Options: nosniff
+
+/*
+  X-Frame-Options: DENY
+  X-Robots-Tag: noindex
+
+/api
+  Cache-Control: no-store
+```
+
+- `<pattern>` — absolute path. A trailing `/*` makes it a subtree match (`/*` alone matches every key). Anywhere else, `*` is an error.
+- Header lines must follow a `<pattern>` block; an indented line at the top of the file or after a blank-line boundary is an error.
+- Lines starting with `#` and blank lines are ignored. Inline `# comments` at the end of a line are stripped before parsing.
+
+### Precedence
+
+When multiple rules match the same key, **all** matching rules apply — there is no "more specific overrides" rule, and exact vs subtree patterns are not ranked. Same-name values across matching rules are concatenated with `, ` per [RFC 7230 §3.2.2](https://datatracker.ietf.org/doc/html/rfc7230#section-3.2.2):
+
+```text
+/*
+  X-Robots-Tag: noindex
+
+/admin/*
+  X-Robots-Tag: nofollow
+```
+
+`/admin/page` sees `X-Robots-Tag: noindex, nofollow`. Semantically conflicting concatenations (`Cache-Control: public, no-store`) are the user's responsibility to avoid.
+
+`Set-Cookie` is the one exception per [RFC 6265 §3](https://datatracker.ietf.org/doc/html/rfc6265#section-3) — multiple `Set-Cookie` lines, whether from a single rule or across rules, stay as separate header entries instead of being comma-folded.
+
+The plugin stable-sorts the resolved list by lowercased header name before sending so wire order is a deterministic function of header content. `Set-Cookie` entries get grouped together but preserve declaration order within the group ([RFC 6265 §5.3](https://datatracker.ietf.org/doc/html/rfc6265#section-5.3) makes the *last* same-name cookie win, so the group order is load-bearing).
+
+### What gets touched
+
+- **New assets**: the resolved header list is passed in `CreateAssetArguments.headers`.
+- **Existing assets**: drift is detected byte-for-byte against canister-stored headers; mismatches emit a `SetAssetProperties` op with the new list. A `_headers`-only edit propagates without re-uploading content.
+- **3xx redirects** (rules in `_redirects` with status 301/302/307/308) synthesize their own response, so they don't inherit asset headers. The plugin populates `RedirectRule.headers` for these from any `_headers` rule whose pattern matches the redirect's `from`. 200 / 4xx rules borrow headers from the target asset, so no plumbing is needed there.
+
+### Validation and unsupported syntax
+
+Header names and values are validated via the `http` crate's `HeaderName` / `HeaderValue` (rejects CR/LF, so no header injection). Rejected with a 1-based line number:
+
+- `Content-Type` as a header name — the canister derives it from the asset's media type for certification.
+- Mid-path wildcards in `<pattern>` (e.g. `/foo/*/bar`) — not supported.
+- `:splat` / `:placeholder` substitution in header values — deferred.
+- Patterns like `/*.html` or `/blog/:slug` — deferred (see the design plan's tier-3 follow-up).
+- Missing colon, blank header name, or value containing CR/LF.
+- A `<pattern>` block with no header lines under it (likely a typo).
+
+Parsing aborts at the first bad line so users fix issues one at a time.
 
 ## TODO
 

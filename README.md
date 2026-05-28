@@ -43,3 +43,18 @@ The canister honours a Netlify-style `_redirects` file at the root of the projec
 ```
 
 The file is consumed by the plugin and lowered to certified canister-side rules — a real asset at the rule's `from` path always wins, and the canister no longer performs implicit `.html` / `index.html` aliasing. See [`plugin/README.md`](plugin/README.md#redirects) for the full reference and migration notes.
+
+## Per-path response headers
+
+The canister also honours a Netlify-style `_headers` file at the root of the project's input directory. Each block is a non-indented `<pattern>` line followed by one or more indented `Header-Name: value` lines:
+
+```text
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/*
+  X-Frame-Options: DENY
+  X-Robots-Tag: noindex
+```
+
+`<pattern>` is an absolute path; a trailing `/*` makes it a subtree match. All matching rules apply per the Cloudflare Pages / Netlify semantics — same-name values across rules concatenate with `, ` (RFC 7230), with `Set-Cookie` carved out (RFC 6265). The file is parsed by the plugin and lowered to per-asset header lists; `Content-Type` is reserved (derived from the asset's media type). See [`plugin/README.md`](plugin/README.md#headers) for the full reference and reject list.
