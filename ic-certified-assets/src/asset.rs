@@ -16,7 +16,6 @@ use crate::certification::{
     build_ic_certificate_expression_header, response_hash, AssetKey, AssetPath,
     CertificateExpression, CertifiedResponses, HashTreePath, RequestHash, ResponseHash,
 };
-use crate::cookies::add_ic_env_cookie;
 use crate::http::{
     CallbackFunc, HeaderField, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
@@ -332,7 +331,6 @@ pub(crate) fn on_asset_change(
     key: &str,
     asset: &mut Asset,
     dependent_keys: Vec<AssetKey>,
-    encoded_canister_env: Option<&String>,
 ) {
     let mut affected_keys = dependent_keys;
     affected_keys.push(key.to_string());
@@ -345,14 +343,6 @@ pub(crate) fn on_asset_change(
 
     for enc in asset.encodings.values_mut() {
         enc.certified = false;
-    }
-
-    // Add ic_env cookie for html files, if the cookie value (canister env) is provided
-    if let Some(encoded_canister_env) = encoded_canister_env {
-        if key.ends_with(".html") {
-            let headers = asset.headers.get_or_insert_default();
-            add_ic_env_cookie(headers, encoded_canister_env);
-        }
     }
 
     asset.update_ic_certificate_expressions();
