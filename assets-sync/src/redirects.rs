@@ -34,8 +34,8 @@ pub fn parse(content: &str) -> Result<Vec<RedirectRule>, ParseError> {
     let mut rules = Vec::new();
     for (i, raw) in content.lines().enumerate() {
         let line_no = i + 1;
-        let body = strip_comment(raw).trim();
-        if body.is_empty() {
+        let body = raw.trim();
+        if body.is_empty() || body.starts_with('#') {
             continue;
         }
         let rule = parse_line(body).map_err(|message| ParseError {
@@ -45,13 +45,6 @@ pub fn parse(content: &str) -> Result<Vec<RedirectRule>, ParseError> {
         rules.push(rule);
     }
     Ok(rules)
-}
-
-fn strip_comment(line: &str) -> &str {
-    match line.find('#') {
-        Some(idx) => &line[..idx],
-        None => line,
-    }
 }
 
 fn parse_line(body: &str) -> Result<RedirectRule, String> {
@@ -198,11 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn comment_after_rule_is_stripped() {
-        let r = parse_one("/old /new 301 # inline comment").unwrap();
-        assert_eq!(r.from, RulePattern::Exact("/old".into()));
-        assert_eq!(r.to, "/new");
-        assert_eq!(r.status, 301);
+    fn inline_comment_is_not_stripped() {
+        // A `#` only starts a comment at the beginning of a line, so a trailing
+        // `#` is treated as extra fields rather than a comment.
+        let e = err("/old /new 301 # inline comment");
+        assert_eq!(e.line, 1);
+        assert!(e.message.contains("3 fields"), "got: {}", e.message);
     }
 
     #[test]
