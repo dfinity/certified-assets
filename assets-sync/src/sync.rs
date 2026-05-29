@@ -68,11 +68,9 @@ fn ensure_commit_permission<C: CanisterCall>(
 pub fn sync<C: CanisterCall>(
     canister: &C,
     dirs: &[String],
-    files: &[(String, String)],
     identity_principal: &str,
     proxy_canister_id: Option<&str>,
 ) -> Result<String, String> {
-    let asset_config = crate::asset_config::AssetConfig::from_files(files)?;
     // The assets plugin owns the URL space of its canister: every key starts at
     // `/`, `_redirects` lives at the project root, and the canister has no
     // notion of "merge two trees together". Multiple input directories would
@@ -161,7 +159,7 @@ pub fn sync<C: CanisterCall>(
     // Phase 1: compute metadata only — no batch created yet.
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
     for source in sources {
-        let asset = prepare_asset(source, &asset_config, &canister_assets)?;
+        let asset = prepare_asset(source, &project_header_rules, &canister_assets)?;
         project_assets.insert(asset.source.key.clone(), asset);
     }
 
@@ -229,16 +227,16 @@ pub fn sync<C: CanisterCall>(
 
 fn prepare_asset(
     source: AssetSource,
-    asset_config: &crate::asset_config::AssetConfig,
+    header_rules: &[HeaderRule],
     canister_assets: &HashMap<String, AssetDetails>,
 ) -> Result<ProjectAsset, String> {
     let mut content = Content::load(&source.path)?;
-    // Apply per-glob content-type override from `assets.toml` before deciding
-    // encoders or computing the asset's stored media type. This is what makes
-    // a `.did` file declared as `text/plain` pick up gzip compression and
-    // surface the correct `Content-Type` from the canister's certified
-    // response — see ASSETS-TOML.md "Downstream effects".
-    if let Some(override_mime) = asset_config.content_type_for(&source.key) {
+    // Apply per-glob `Content-Type` override from `_headers` before deciding
+    // encoders or computing the asset's stored media type. Routing through
+    // `content.media_type` is what makes a `.did` file declared as
+    // `text/plain` pick up gzip compression and surface the correct
+    // `Content-Type` from the canister's certified response.
+    if let Some(override_mime) = headers::content_type_for(&source.key, header_rules) {
         content.media_type = override_mime;
     }
     // gzip for text/* and js/html, identity for everything else.
@@ -1207,7 +1205,6 @@ mod tests {
         let result = sync(
             &mock,
             &[dir.path().to_str().unwrap().to_string()],
-            &[],
             &Principal::anonymous().to_text(),
             None,
         );
@@ -1246,7 +1243,6 @@ mod tests {
         let result = sync(
             &mock,
             &[dir.path().to_str().unwrap().to_string()],
-            &[],
             &Principal::anonymous().to_text(),
             None,
         );
@@ -1265,12 +1261,7 @@ mod tests {
             path: f.path().to_path_buf(),
             key: "/test.txt".to_string(),
         };
-        let asset = prepare_asset(
-            source,
-            &crate::asset_config::AssetConfig::empty(),
-            &HashMap::new(),
-        )
-        .unwrap();
+        let asset = prepare_asset(source, &[], &HashMap::new()).unwrap();
         assert!(
             asset.encodings.contains_key("identity"),
             "identity must be present"
@@ -1281,14 +1272,13 @@ mod tests {
         );
     }
 
-    // assets.toml content-type override drives both the stored media type
-    // and the encoder selection. Without the override, a `.did` file is
+    // `_headers` Content-Type override drives both the stored media type and
+    // the encoder selection. Without the override, a `.did` file is
     // `application/octet-stream` (mime_guess has no entry) and gets only the
     // identity encoding; with the override to `text/plain`, encoders_for
     // selects gzip too.
     #[test]
-    fn asset_config_content_type_override_applies_to_prepare_asset() {
-        use crate::asset_config::AssetConfig;
+    fn header_content_type_override_applies_to_prepare_asset() {
         use std::io::Write;
 
         // Highly compressible content so gzip is genuinely smaller and gets
@@ -1306,23 +1296,15 @@ mod tests {
         };
 
         // No override: mime_guess returns octet-stream, gzip is not selected.
-        let without = prepare_asset(mk_source(), &AssetConfig::empty(), &HashMap::new()).unwrap();
+        let without = prepare_asset(mk_source(), &[], &HashMap::new()).unwrap();
         assert_eq!(without.media_type.to_string(), "application/octet-stream");
         assert!(!without.encodings.contains_key("gzip"));
 
-        // With override to text/plain, both the media type and the encoder
-        // pick change.
-        let files = vec![(
-            "assets.toml".to_string(),
-            r#"
-[[asset]]
-match = "/*.did"
-content_type = "text/plain; charset=utf-8"
-"#
-            .to_string(),
-        )];
-        let config = AssetConfig::from_files(&files).unwrap();
-        let with = prepare_asset(mk_source(), &config, &HashMap::new()).unwrap();
+        // With override to text/plain via `_headers`, both the media type
+        // and the encoder pick change.
+        let rules =
+            crate::headers::parse("/*.did\n  Content-Type: text/plain; charset=utf-8\n").unwrap();
+        let with = prepare_asset(mk_source(), &rules, &HashMap::new()).unwrap();
         assert_eq!(with.media_type.to_string(), "text/plain; charset=utf-8");
         assert!(
             with.encodings.contains_key("gzip"),
@@ -1521,6 +1503,7 @@ content_type = "text/plain; charset=utf-8"
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            content_type: None,
         }
     }
 
@@ -1896,7 +1879,7 @@ content_type = "text/plain; charset=utf-8"
     #[test]
     fn sync_rejects_zero_input_dirs() {
         let mock = SyncMock::new();
-        let err = sync(&mock, &[], &[], &Principal::anonymous().to_text(), None).unwrap_err();
+        let err = sync(&mock, &[], &Principal::anonymous().to_text(), None).unwrap_err();
         assert!(
             err.contains("expected exactly one input directory"),
             "got: {err}"
@@ -1909,7 +1892,6 @@ content_type = "text/plain; charset=utf-8"
         let err = sync(
             &mock,
             &["dist-a".to_string(), "dist-b".to_string()],
-            &[],
             &Principal::anonymous().to_text(),
             None,
         )
@@ -1961,7 +1943,6 @@ content_type = "text/plain; charset=utf-8"
         let result = sync(
             &mock,
             &[dir.path().to_str().unwrap().to_string()],
-            &[],
             &Principal::anonymous().to_text(),
             None,
         );
@@ -2002,7 +1983,6 @@ content_type = "text/plain; charset=utf-8"
         let result = sync(
             &mock,
             &[dir.path().to_str().unwrap().to_string()],
-            &[],
             &Principal::anonymous().to_text(),
             None,
         );
@@ -2109,7 +2089,6 @@ content_type = "text/plain; charset=utf-8"
         let result = sync(
             &mock,
             &[dir.path().to_str().unwrap().to_string()],
-            &[],
             &Principal::anonymous().to_text(),
             None,
         );
@@ -2133,7 +2112,6 @@ content_type = "text/plain; charset=utf-8"
         let result = sync(
             &mock,
             &[dir.path().to_str().unwrap().to_string()],
-            &[],
             &Principal::anonymous().to_text(),
             None,
         );

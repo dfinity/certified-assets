@@ -1,4 +1,3 @@
-pub mod asset_config;
 pub mod canister;
 pub mod content;
 pub mod glob;

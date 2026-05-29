@@ -52,15 +52,9 @@ impl Guest for Plugin {
             "sync plugin: starting for canister {} (environment: {})",
             input.canister_id, input.environment
         );
-        let files: Vec<(String, String)> = input
-            .files
-            .into_iter()
-            .map(|f| (f.name, f.content))
-            .collect();
         let summary = assets_sync::sync::sync(
             &WasiCall,
             &input.dirs,
-            &files,
             &input.identity_principal,
             input.proxy_canister_id.as_deref(),
         )?;

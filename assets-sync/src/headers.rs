@@ -5,19 +5,30 @@
 //! blocks. Errors carry a 1-based line number so the plugin can point users
 //! at the offending entry without a canister round-trip.
 //!
-//! See the "File format" section of HEADERS.md for the full reject list.
+//! `Content-Type` is parsed structurally onto [`HeaderRule::content_type`]
+//! instead of accumulating in `headers`: the canister stores it as asset
+//! metadata that drives encoder selection and certification, not as an
+//! appended response header. See HEADERS.md for the full reject list.
 
 use crate::glob::KeyPattern;
 use http::{HeaderName, HeaderValue};
+use mime::Mime;
+use std::str::FromStr;
 
 pub const HEADERS_FILENAME: &str = "_headers";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderRule {
     pub pattern: KeyPattern,
-    /// Headers in declaration order. Multiple entries for the same name are
-    /// allowed (e.g. `Set-Cookie`); resolver semantics in `sync.rs`.
+    /// Response headers in declaration order. Multiple entries for the same
+    /// name are allowed (e.g. `Set-Cookie`); resolver semantics in `sync.rs`.
+    /// `Content-Type` is never stored here — it routes to [`Self::content_type`].
     pub headers: Vec<(String, String)>,
+    /// `Content-Type` value if the block declared one. The plugin feeds this
+    /// into `CreateAssetArguments.content_type`, overriding `mime_guess`
+    /// before encoder selection runs. At most one per block; a duplicate
+    /// `Content-Type:` line within the same block is a parse error.
+    pub content_type: Option<Mime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +46,15 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Open block under construction during `parse`:
-/// (line_no of the path line, pattern, headers accumulated so far).
-type OpenBlock = (usize, KeyPattern, Vec<(String, String)>);
+/// line_no of the path line, pattern, headers accumulated so far,
+/// and the block's `Content-Type` value (if a `Content-Type:` line has
+/// been seen yet — used to detect duplicates).
+struct OpenBlock {
+    line_no: usize,
+    pattern: KeyPattern,
+    headers: Vec<(String, String)>,
+    content_type: Option<Mime>,
+}
 
 /// Resolves the per-asset header map for `key` by walking `rules` in
 /// declaration order. All matching rules contribute; same-name values across
@@ -44,6 +62,9 @@ type OpenBlock = (usize, KeyPattern, Vec<(String, String)>);
 /// carved out per RFC 6265 §3 (kept as separate entries). The returned Vec is
 /// stable-sorted by lowercased header name so multi-valued headers preserve
 /// their declaration order — see the determinism guarantee in HEADERS.md.
+///
+/// `Content-Type` is never present in the output — it routes through
+/// [`content_type_for`] into the asset's stored `content_type` metadata.
 pub fn resolve(key: &str, rules: &[HeaderRule]) -> Vec<(String, String)> {
     use std::collections::HashMap;
 
@@ -79,13 +100,24 @@ pub fn resolve(key: &str, rules: &[HeaderRule]) -> Vec<(String, String)> {
     merged
 }
 
+/// Returns the `Content-Type` override for `key`, walking `rules` in
+/// declaration order — first-match-wins, because `Content-Type` is
+/// single-valued and accumulation semantics make no sense for it. Returns
+/// `None` if no matching rule declared a `Content-Type:`, in which case the
+/// caller falls back to `mime_guess`.
+pub fn content_type_for(key: &str, rules: &[HeaderRule]) -> Option<Mime> {
+    rules
+        .iter()
+        .find(|r| r.pattern.matches(key) && r.content_type.is_some())
+        .and_then(|r| r.content_type.clone())
+}
+
 /// Parses an entire `_headers` file into a list of [`HeaderRule`]s. Rules are
 /// returned in declaration order — the resolver walks them in order, so order
 /// is semantic. The first malformed line aborts parsing; we want the user to
 /// fix issues one at a time rather than wade through cascading errors.
 pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
     let mut rules = Vec::new();
-    // Open block: (line_no of the path line, pattern, headers accumulated so far).
     let mut current: Option<OpenBlock> = None;
 
     for (i, raw) in content.lines().enumerate() {
@@ -120,22 +152,40 @@ pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
                 line: line_no,
                 message,
             })?;
-            current = Some((line_no, pattern, Vec::new()));
+            current = Some(OpenBlock {
+                line_no,
+                pattern,
+                headers: Vec::new(),
+                content_type: None,
+            });
             continue;
         }
 
         // Indented line: must be a `Header-Name: value` inside an open block.
-        let Some((_, _, headers)) = current.as_mut() else {
+        let Some(block) = current.as_mut() else {
             return Err(ParseError {
                 line: line_no,
                 message: "indented header line outside a path block".to_string(),
             });
         };
-        let (name, value) = parse_header(stripped).map_err(|message| ParseError {
+        let parsed = parse_header(stripped).map_err(|message| ParseError {
             line: line_no,
             message,
         })?;
-        headers.push((name, value));
+        match parsed {
+            ParsedHeader::ContentType(mime) => {
+                if block.content_type.is_some() {
+                    return Err(ParseError {
+                        line: line_no,
+                        message: "duplicate `Content-Type` in the same block".to_string(),
+                    });
+                }
+                block.content_type = Some(mime);
+            }
+            ParsedHeader::Other(name, value) => {
+                block.headers.push((name, value));
+            }
+        }
     }
 
     if let Some(block) = current.take() {
@@ -151,17 +201,26 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
-fn finalize_block((line_no, pattern, headers): OpenBlock) -> Result<HeaderRule, ParseError> {
-    if headers.is_empty() {
+fn finalize_block(block: OpenBlock) -> Result<HeaderRule, ParseError> {
+    if block.headers.is_empty() && block.content_type.is_none() {
         return Err(ParseError {
-            line: line_no,
+            line: block.line_no,
             message: "path block has no header lines under it".to_string(),
         });
     }
-    Ok(HeaderRule { pattern, headers })
+    Ok(HeaderRule {
+        pattern: block.pattern,
+        headers: block.headers,
+        content_type: block.content_type,
+    })
 }
 
-fn parse_header(stripped: &str) -> Result<(String, String), String> {
+enum ParsedHeader {
+    ContentType(Mime),
+    Other(String, String),
+}
+
+fn parse_header(stripped: &str) -> Result<ParsedHeader, String> {
     let trimmed = stripped.trim();
     let Some(colon_idx) = trimmed.find(':') else {
         return Err(format!(
@@ -174,10 +233,12 @@ fn parse_header(stripped: &str) -> Result<(String, String), String> {
         return Err("header name is empty".to_string());
     }
     if name.eq_ignore_ascii_case("content-type") {
-        return Err(
-            "'Content-Type' is derived from the asset's media type and cannot be overridden"
-                .to_string(),
-        );
+        if value.is_empty() {
+            return Err("'Content-Type' value is empty".to_string());
+        }
+        let mime = Mime::from_str(value)
+            .map_err(|e| format!("invalid `Content-Type` value '{value}': {e}"))?;
+        return Ok(ParsedHeader::ContentType(mime));
     }
     if value.contains(":splat") || value.contains(":placeholder") {
         return Err(format!(
@@ -189,7 +250,7 @@ fn parse_header(stripped: &str) -> Result<(String, String), String> {
     HeaderName::from_bytes(name.as_bytes())
         .map_err(|e| format!("invalid header name '{name}': {e}"))?;
     HeaderValue::from_str(value).map_err(|e| format!("invalid header value '{value}': {e}"))?;
-    Ok((name.to_string(), value.to_string()))
+    Ok(ParsedHeader::Other(name.to_string(), value.to_string()))
 }
 
 #[cfg(test)]
@@ -385,15 +446,89 @@ mod tests {
     }
 
     #[test]
-    fn rejects_content_type_header() {
-        let e = err("/about\n  Content-Type: text/plain\n");
+    fn content_type_routes_to_dedicated_field_not_headers() {
+        // `Content-Type` is asset metadata, not a response header — it must
+        // not appear in `headers` (otherwise the canister would append it
+        // alongside its own derived value, producing duplicates on the wire).
+        let rules = parse("/llms.txt\n  Content-Type: text/markdown; charset=utf-8\n").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(
+            rules[0].headers.is_empty(),
+            "Content-Type leaked into headers: {:?}",
+            rules[0].headers
+        );
+        assert_eq!(
+            rules[0].content_type.as_ref().unwrap().to_string(),
+            "text/markdown; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn content_type_is_case_insensitive() {
+        let rules = parse("/llms.txt\n  content-type: text/plain\n").unwrap();
+        assert_eq!(
+            rules[0].content_type.as_ref().unwrap().to_string(),
+            "text/plain"
+        );
+    }
+
+    #[test]
+    fn content_type_coexists_with_other_headers() {
+        let input = "\
+/llms.txt
+  Content-Type: text/markdown; charset=utf-8
+  Cache-Control: max-age=3600
+  X-Robots-Tag: noindex
+";
+        let rules = parse(input).unwrap();
+        assert_eq!(
+            rules[0].content_type.as_ref().unwrap().to_string(),
+            "text/markdown; charset=utf-8"
+        );
+        assert_eq!(
+            rules[0].headers,
+            vec![
+                ("Cache-Control".into(), "max-age=3600".into()),
+                ("X-Robots-Tag".into(), "noindex".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn block_with_only_content_type_is_valid() {
+        // `Content-Type` alone counts as a non-empty block — finalize must
+        // not reject it as "no header lines under it".
+        let rules = parse("/llms.txt\n  Content-Type: text/markdown\n").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].headers.is_empty());
+        assert_eq!(
+            rules[0].content_type.as_ref().unwrap().to_string(),
+            "text/markdown"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_content_type_in_same_block() {
+        let input = "\
+/llms.txt
+  Content-Type: text/markdown
+  Content-Type: text/plain
+";
+        let e = err(input);
+        assert!(e.message.contains("duplicate"), "{}", e.message);
+        assert_eq!(e.line, 3);
+    }
+
+    #[test]
+    fn rejects_invalid_content_type_value() {
+        let e = err("/llms.txt\n  Content-Type: not a mime\n");
         assert!(e.message.contains("Content-Type"), "{}", e.message);
     }
 
     #[test]
-    fn rejects_content_type_case_insensitive() {
-        let e = err("/about\n  content-type: text/plain\n");
-        assert!(e.message.contains("Content-Type"), "{}", e.message);
+    fn rejects_empty_content_type_value() {
+        let e = err("/llms.txt\n  Content-Type:\n");
+        assert!(e.message.contains("empty"), "{}", e.message);
     }
 
     #[test]
@@ -467,6 +602,15 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            content_type: None,
+        }
+    }
+
+    fn rule_with_content_type(pattern_src: &str, mime: &str) -> HeaderRule {
+        HeaderRule {
+            pattern: pat(pattern_src),
+            headers: Vec::new(),
+            content_type: Some(mime.parse().unwrap()),
         }
     }
 
@@ -622,5 +766,54 @@ mod tests {
         let rules = vec![rule("/specific", &[("X-Foo", "bar")])];
         assert!(resolve("/different", &rules).is_empty());
         assert!(resolve("/specific/subpath", &rules).is_empty());
+    }
+
+    // ── content_type_for ──────────────────────────────────────────────────────
+
+    #[test]
+    fn content_type_for_returns_none_when_no_rule_matches() {
+        let rules = vec![rule_with_content_type("/*.md", "text/markdown")];
+        assert!(content_type_for("/index.html", &rules).is_none());
+    }
+
+    #[test]
+    fn content_type_for_returns_none_when_matching_rule_has_no_content_type() {
+        // A pure response-headers block must not produce a Content-Type override.
+        let rules = vec![rule("/*", &[("X-Robots-Tag", "noindex")])];
+        assert!(content_type_for("/anywhere", &rules).is_none());
+    }
+
+    #[test]
+    fn content_type_for_first_matching_rule_wins() {
+        // First-match-wins (Content-Type is single-valued — accumulation
+        // semantics make no sense).
+        let rules = vec![
+            rule_with_content_type("/legacy/oldstyle.md", "text/plain"),
+            rule_with_content_type("/*.md", "text/markdown"),
+        ];
+        assert_eq!(
+            content_type_for("/legacy/oldstyle.md", &rules)
+                .unwrap()
+                .to_string(),
+            "text/plain"
+        );
+        assert_eq!(
+            content_type_for("/other.md", &rules).unwrap().to_string(),
+            "text/markdown"
+        );
+    }
+
+    #[test]
+    fn content_type_for_skips_matching_rules_without_content_type() {
+        // A broader header-only rule before a narrower Content-Type rule
+        // must not shadow the override.
+        let rules = vec![
+            rule("/*", &[("X-Robots-Tag", "noindex")]),
+            rule_with_content_type("/*.md", "text/markdown"),
+        ];
+        assert_eq!(
+            content_type_for("/intro.md", &rules).unwrap().to_string(),
+            "text/markdown"
+        );
     }
 }

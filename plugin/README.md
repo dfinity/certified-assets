@@ -169,11 +169,28 @@ The plugin stable-sorts the resolved list by lowercased header name before sendi
 - **Existing assets**: drift is detected byte-for-byte against canister-stored headers; mismatches emit a `SetAssetProperties` op with the new list. A `_headers`-only edit propagates without re-uploading content.
 - **3xx redirects** (rules in `_redirects` with status 301/302/307/308) synthesize their own response, so they don't inherit asset headers. The plugin populates `RedirectRule.headers` for these from any `_headers` rule whose pattern matches the redirect's `from`. 200 / 4xx rules borrow headers from the target asset, so no plumbing is needed there.
 
+### `Content-Type` overrides
+
+`Content-Type` is recognised inside a `_headers` block, but it routes to the asset's stored media type instead of the appended response headers. This is the only way to override the `mime_guess::from_path` default (or to add a `charset` parameter) — the canister always derives a single, certified `Content-Type` for every asset, and an appended header would produce a duplicate on the wire.
+
+```text
+/*.md
+  Content-Type: text/markdown; charset=utf-8
+  Cache-Control: public, max-age=300
+```
+
+The plugin extracts `Content-Type` and feeds it into `CreateAssetArguments.content_type`; other headers in the block continue to flow through `headers` as usual. `Content-Type` is single-valued, so when multiple blocks match the same asset the first matching `Content-Type` wins (other matching rules still contribute their non-`Content-Type` headers). Editing a `Content-Type` and redeploying triggers delete-then-recreate on the canister to keep the certified type in sync.
+
+Validation:
+
+- The value must parse as a MIME type via the `mime` crate.
+- A duplicate `Content-Type:` line within the same block is rejected.
+- Empty value is rejected.
+
 ### Validation and unsupported syntax
 
 Header names and values are validated via the `http` crate's `HeaderName` / `HeaderValue` (rejects CR/LF, so no header injection). Rejected with a 1-based line number:
 
-- `Content-Type` as a header name — the canister derives it from the asset's media type for certification.
 - Mid-path wildcards in `<pattern>` (e.g. `/foo/*/bar`) — not supported.
 - `:splat` / `:placeholder` substitution in header values — deferred.
 - Patterns like `/*.html` or `/blog/:slug` — deferred (see the design plan's tier-3 follow-up).

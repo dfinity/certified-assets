@@ -15,7 +15,6 @@ mime_guess.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 sha2.workspace = true
-toml.workspace = true
 url = "2"
 
 [dev-dependencies]

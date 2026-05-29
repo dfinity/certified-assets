@@ -1,5 +1,5 @@
-//! Glob pattern matched against asset keys, shared by `_headers` and the
-//! `assets.toml` content-type overrides.
+//! Glob pattern matched against asset keys, used by `_headers` to attach
+//! both response headers and Content-Type overrides to assets.
 //!
 //! Syntax: leading `/`, then literal characters and a single greedy `*`.
 //! `*` matches any sequence of characters including `/` and empty; every
