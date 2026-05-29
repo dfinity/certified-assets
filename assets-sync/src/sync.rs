@@ -2,7 +2,6 @@
 //!
 //! V2-only port of `ic-asset`'s `sync` flow, simplified:
 //! - synchronous (drives the host's sync `canister-call` import)
-//! - uploads one chunk per `create_chunks` call (no client-side batching)
 //! - no proposal mode
 
 use candid::{Nat, Principal};
@@ -211,13 +210,7 @@ pub fn sync<C: CanisterCall>(
     );
     println!("committing {} operation(s)", operations.len());
 
-    commit_batch(
-        canister,
-        CommitBatchArguments {
-            batch_id,
-            operations,
-        },
-    )?;
+    commit_in_stages(canister, batch_id, operations)?;
 
     Ok(format!(
         "synced {} asset(s) to canister",
@@ -424,6 +417,147 @@ fn pack_and_upload_chunks<C: CanisterCall>(
 
     println!("uploaded {total_chunks} chunk(s) in {total_calls} call(s) ({total_bytes} bytes)");
     Ok(())
+}
+
+/// Commits `operations` to the canister, splitting them across multiple
+/// `commit_batch` ingress calls when a single payload would exceed the IC's
+/// 2 MiB per-message ingress limit on application subnets
+/// (`MAX_INGRESS_BYTES_PER_MESSAGE_APP_SUBNET` in `dfinity/ic`). The local
+/// replica's HTTP boundary accepts up to 4 MiB, but mainnet app subnets cap
+/// the inner ingress message at 2 MiB — so we target the tighter limit.
+///
+/// Intermediate calls use `batch_id = 0` as a placeholder; the canister's
+/// `commit_batch` does not validate that `batch_id` refers to a live batch
+/// — it just consumes `chunk_ids` referenced by `SetAssetContent` ops and
+/// removes `batch_id` from its batch table at the very end. The chunks
+/// uploaded under the real `batch_id` survive between calls because the
+/// canister only GCs orphaned chunks at `create_batch` time, never inside
+/// `commit_batch`. The trailing call uses the real `batch_id` with empty
+/// operations purely to release that batch entry.
+///
+/// Trade-off: splitting forfeits cross-batch atomicity. A failure
+/// mid-deploy leaves the canister with the operations from previously
+/// successful calls applied; the next sync run diffs against the canister
+/// and resumes from there.
+fn commit_in_stages<C: CanisterCall>(
+    canister: &C,
+    batch_id: Nat,
+    operations: Vec<BatchOperationKind>,
+) -> Result<(), String> {
+    let groups = create_commit_batches(operations);
+    if groups.len() <= 1 {
+        // Everything fits in one ingress message: skip the placeholder
+        // dance and commit directly under the real `batch_id`, which also
+        // releases the batch entry in the same call.
+        let ops = groups.into_iter().next().unwrap_or_default();
+        return commit_batch(
+            canister,
+            CommitBatchArguments {
+                batch_id,
+                operations: ops,
+            },
+        );
+    }
+    let total = groups.len();
+    for (i, ops) in groups.into_iter().enumerate() {
+        println!(
+            "committing group {}/{} ({} operation(s))",
+            i + 1,
+            total,
+            ops.len()
+        );
+        commit_batch(
+            canister,
+            CommitBatchArguments {
+                batch_id: Nat::from(0u32),
+                operations: ops,
+            },
+        )?;
+    }
+    // Empty-ops commit on the real batch_id: the canister's
+    // "all operations processed" branch removes the batch entry.
+    commit_batch(
+        canister,
+        CommitBatchArguments {
+            batch_id,
+            operations: vec![],
+        },
+    )
+}
+
+/// Splits `operations` into groups, each small enough that a single
+/// `commit_batch` ingress call stays under the IC's 2 MiB per-message
+/// limit on application subnets. Greedy in declaration order: walks
+/// operations once, starting a new group whenever the running totals
+/// would exceed either budget.
+///
+/// Budgets per group:
+/// - **500 operations** — bounds the certified-tree work each
+///   `commit_batch` does and limits the blast radius of a mid-deploy
+///   failure.
+/// - **1.5 MiB of inlined header bytes** — leaves ~500 KiB of headroom
+///   under the 2 MiB ingress cap for fixed per-op overhead (keys,
+///   chunk_ids, sha256s, variant tags, request envelope). Header bytes
+///   are the only variable-sized per-op field and are where real-world
+///   overruns come from — a multi-kilobyte `Content-Security-Policy`
+///   from `_headers` gets attached to every asset's `CreateAsset` and
+///   to every 3xx rule inside `SetRedirectRules`.
+///
+/// An operation whose own header size exceeds the budget gets a group
+/// to itself — better to ship it alone than to drop it on the floor.
+fn create_commit_batches(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchOperationKind>> {
+    const MAX_OPERATIONS_PER_GROUP: usize = 500;
+    const MAX_HEADER_BYTES_PER_GROUP: usize = 1_500_000;
+
+    let mut groups: Vec<Vec<BatchOperationKind>> = Vec::new();
+    let mut current: Vec<BatchOperationKind> = Vec::new();
+    let mut header_bytes: usize = 0;
+
+    for op in operations {
+        let op_header_bytes = header_bytes_of(&op);
+        let would_overflow = current.len() >= MAX_OPERATIONS_PER_GROUP
+            || header_bytes + op_header_bytes > MAX_HEADER_BYTES_PER_GROUP;
+        if would_overflow && !current.is_empty() {
+            groups.push(std::mem::take(&mut current));
+            header_bytes = 0;
+        }
+        current.push(op);
+        header_bytes += op_header_bytes;
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
+/// Returns the total byte size of header name/value pairs inlined in `op`,
+/// or 0 for op kinds that carry no header data.
+///
+/// Kinds with inlined headers:
+/// - `CreateAsset` — the per-key resolution of `_headers`.
+/// - `SetAssetProperties` — same, when properties drift.
+/// - `SetRedirectRules` — each 3xx rule inlines its resolved headers
+///   (3xx rules synthesise their own response, so there's no target
+///   asset to inherit headers from). Summed across all rules.
+fn header_bytes_of(op: &BatchOperationKind) -> usize {
+    fn sum(headers: &[(String, String)]) -> usize {
+        headers.iter().map(|(k, v)| k.len() + v.len()).sum()
+    }
+    match op {
+        BatchOperationKind::CreateAsset(a) => a.headers.as_deref().map_or(0, sum),
+        BatchOperationKind::SetAssetProperties(a) => {
+            a.headers.as_ref().and_then(|h| h.as_deref()).map_or(0, sum)
+        }
+        BatchOperationKind::SetRedirectRules(a) => a
+            .rules
+            .iter()
+            .map(|r| r.headers.as_deref().map_or(0, sum))
+            .sum(),
+        BatchOperationKind::Clear(_)
+        | BatchOperationKind::DeleteAsset(_)
+        | BatchOperationKind::UnsetAssetContent(_)
+        | BatchOperationKind::SetAssetContent(_) => 0,
+    }
 }
 
 fn build_operations(
@@ -848,6 +982,221 @@ mod tests {
         let mock = ChunkBatchRecorder::new();
         pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
         assert!(mock.batches.borrow().is_empty());
+    }
+
+    // ── commit_batch splitting ──────────────────────────────────────────────
+
+    fn create_asset_with_headers(key: &str, hdr_bytes: usize) -> BatchOperationKind {
+        // One header whose name+value bytes sum to `hdr_bytes`.
+        let name = "X-Pad".to_string();
+        let value = "a".repeat(hdr_bytes.saturating_sub(name.len()));
+        BatchOperationKind::CreateAsset(CreateAssetArguments {
+            key: key.to_string(),
+            content_type: "text/plain".to_string(),
+            max_age: None,
+            headers: Some(vec![(name, value)]),
+            allow_raw_access: Some(true),
+        })
+    }
+
+    fn set_content_op(key: &str) -> BatchOperationKind {
+        BatchOperationKind::SetAssetContent(SetAssetContentArguments {
+            key: key.to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids: vec![Nat::from(0u32)],
+            last_chunk: None,
+            sha256: Some(vec![0u8; 32]),
+        })
+    }
+
+    #[test]
+    fn header_bytes_of_counts_create_asset_headers() {
+        let op = create_asset_with_headers("/k", 1000);
+        assert_eq!(header_bytes_of(&op), 1000);
+    }
+
+    #[test]
+    fn header_bytes_of_returns_zero_for_headerless_kinds() {
+        assert_eq!(header_bytes_of(&set_content_op("/k")), 0);
+        assert_eq!(
+            header_bytes_of(&BatchOperationKind::DeleteAsset(DeleteAssetArguments {
+                key: "/k".to_string(),
+            })),
+            0
+        );
+        assert_eq!(
+            header_bytes_of(&BatchOperationKind::UnsetAssetContent(
+                UnsetAssetContentArguments {
+                    key: "/k".to_string(),
+                    content_encoding: "identity".to_string(),
+                }
+            )),
+            0
+        );
+    }
+
+    #[test]
+    fn header_bytes_of_sums_redirect_rule_headers() {
+        // SetRedirectRules: only 3xx rules carry inlined headers; sum across rules.
+        let rules = vec![
+            RedirectRule {
+                from: crate::canister::RulePattern::Exact("/a".into()),
+                to: "/b".into(),
+                status: 301,
+                headers: Some(vec![("X-A".into(), "1".into())]), // 4 bytes
+            },
+            RedirectRule {
+                from: crate::canister::RulePattern::Exact("/c".into()),
+                to: "/d".into(),
+                status: 200,
+                headers: None,
+            },
+            RedirectRule {
+                from: crate::canister::RulePattern::Exact("/e".into()),
+                to: "/f".into(),
+                status: 307,
+                headers: Some(vec![("X-B".into(), "22".into())]), // 5 bytes
+            },
+        ];
+        let op = BatchOperationKind::SetRedirectRules(SetRedirectRulesArguments { rules });
+        assert_eq!(header_bytes_of(&op), 9);
+    }
+
+    #[test]
+    fn create_commit_batches_empty_input_returns_empty() {
+        assert!(create_commit_batches(vec![]).is_empty());
+    }
+
+    #[test]
+    fn create_commit_batches_small_input_stays_single_group() {
+        // 100 small ops with tiny headers → fits both budgets in one group.
+        let ops: Vec<BatchOperationKind> = (0..100)
+            .map(|i| create_asset_with_headers(&format!("/f{i}"), 10))
+            .collect();
+        let groups = create_commit_batches(ops);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 100);
+    }
+
+    #[test]
+    fn create_commit_batches_splits_at_500_ops() {
+        // 1200 headerless ops should split into 500/500/200 — three groups
+        // driven purely by the operation-count cap.
+        let ops: Vec<BatchOperationKind> = (0..1200)
+            .map(|i| set_content_op(&format!("/f{i}")))
+            .collect();
+        let groups = create_commit_batches(ops);
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![500, 500, 200]
+        );
+    }
+
+    #[test]
+    fn create_commit_batches_splits_at_header_budget() {
+        // 4 ops × 500 KB headers = 2 MB > 1.5 MB cap. Split happens before
+        // the 500-op cap could kick in.
+        let ops: Vec<BatchOperationKind> = (0..4)
+            .map(|i| create_asset_with_headers(&format!("/f{i}"), 500_000))
+            .collect();
+        let groups = create_commit_batches(ops);
+        // 3 ops × 500 KB = 1.5 MB fits exactly; the 4th would push over → split.
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 3);
+        assert_eq!(groups[1].len(), 1);
+    }
+
+    #[test]
+    fn create_commit_batches_oversized_op_gets_own_group() {
+        // One op alone exceeds the header budget. The greedy loop must still
+        // emit it (in its own group) rather than skip it.
+        let ops = vec![
+            create_asset_with_headers("/small", 10),
+            create_asset_with_headers("/huge", 2_000_000),
+            create_asset_with_headers("/small2", 10),
+        ];
+        let groups = create_commit_batches(ops);
+        // First group flushes when /huge would overflow it → [/small], then
+        // /huge alone (oversized but emitted), then /small2 alone (since /huge
+        // already pushed header_bytes way over budget).
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].len(), 1);
+        assert_eq!(groups[1].len(), 1);
+        assert_eq!(groups[2].len(), 1);
+    }
+
+    // Mock that records every `commit_batch` call's `(batch_id, op_count)`.
+    // Used to verify that `commit_in_stages` issues the right shape of
+    // call sequence (placeholder batch_id for splits, real batch_id for
+    // cleanup).
+    struct CommitRecorder {
+        calls: RefCell<Vec<(Nat, usize)>>,
+    }
+
+    impl CommitRecorder {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    #[derive(CandidType, serde::Deserialize)]
+    struct CommitArgsMirror {
+        batch_id: Nat,
+        operations: Vec<candid::Reserved>,
+    }
+
+    impl CanisterCall for CommitRecorder {
+        fn call<A, R>(&self, method: &str, arg: A, _: CallType, _: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            assert_eq!(method, "commit_batch");
+            let bytes = candid::encode_one(&arg).map_err(|e| e.to_string())?;
+            let req: CommitArgsMirror = candid::decode_one(&bytes).map_err(|e| e.to_string())?;
+            self.calls
+                .borrow_mut()
+                .push((req.batch_id, req.operations.len()));
+            let reply = candid::encode_one(()).map_err(|e| e.to_string())?;
+            candid::decode_one(&reply).map_err(|e| e.to_string())
+        }
+    }
+
+    #[test]
+    fn commit_in_stages_single_group_uses_real_batch_id() {
+        // Small enough to fit in one group → one commit_batch call carrying
+        // the real batch_id, no placeholder dance.
+        let ops: Vec<BatchOperationKind> =
+            (0..10).map(|i| set_content_op(&format!("/f{i}"))).collect();
+        let mock = CommitRecorder::new();
+        commit_in_stages(&mock, Nat::from(42u32), ops).unwrap();
+        let calls = mock.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (Nat::from(42u32), 10));
+    }
+
+    #[test]
+    fn commit_in_stages_multi_group_uses_placeholder_then_real_cleanup() {
+        // 1200 ops → three 500/500/200 splits using placeholder batch_id 0,
+        // then a final empty-ops call on the real batch_id to release the
+        // canister-side batch entry.
+        let ops: Vec<BatchOperationKind> = (0..1200)
+            .map(|i| set_content_op(&format!("/f{i}")))
+            .collect();
+        let mock = CommitRecorder::new();
+        commit_in_stages(&mock, Nat::from(42u32), ops).unwrap();
+        let calls = mock.calls.borrow().clone();
+        assert_eq!(
+            calls,
+            vec![
+                (Nat::from(0u32), 500),
+                (Nat::from(0u32), 500),
+                (Nat::from(0u32), 200),
+                (Nat::from(42u32), 0),
+            ]
+        );
     }
 
     fn mk_project_asset(
