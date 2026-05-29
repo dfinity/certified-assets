@@ -35,23 +35,30 @@ pub struct HeaderRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub line: usize,
+    pub source: String,
     pub message: String,
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "_headers: line {}: {}", self.line, self.message)
+        write!(
+            f,
+            "_headers: line {}: {} (source: `{}`)",
+            self.line, self.message, self.source
+        )
     }
 }
 
 impl std::error::Error for ParseError {}
 
 /// Open block under construction during `parse`:
-/// line_no of the path line, pattern, headers accumulated so far,
-/// and the block's `Content-Type` value (if a `Content-Type:` line has
-/// been seen yet — used to detect duplicates).
+/// line_no of the path line, the raw path line (for error reporting),
+/// pattern, headers accumulated so far, and the block's `Content-Type`
+/// value (if a `Content-Type:` line has been seen yet — used to detect
+/// duplicates).
 struct OpenBlock {
     line_no: usize,
+    source: String,
     pattern: KeyPattern,
     headers: Vec<(String, String)>,
     content_type: Option<Mime>,
@@ -143,6 +150,7 @@ pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
             .next()
             .is_some_and(|c| c == ' ' || c == '\t');
 
+        let source = raw.trim_end().to_string();
         if !is_indented {
             // Path line. If a block is open, close it (must have headers).
             if let Some(block) = current.take() {
@@ -151,10 +159,12 @@ pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
             let token = stripped.trim();
             let pattern = crate::glob::parse(token).map_err(|message| ParseError {
                 line: line_no,
+                source: source.clone(),
                 message,
             })?;
             current = Some(OpenBlock {
                 line_no,
+                source,
                 pattern,
                 headers: Vec::new(),
                 content_type: None,
@@ -166,11 +176,13 @@ pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
         let Some(block) = current.as_mut() else {
             return Err(ParseError {
                 line: line_no,
+                source,
                 message: "indented header line outside a path block".to_string(),
             });
         };
         let parsed = parse_header(stripped).map_err(|message| ParseError {
             line: line_no,
+            source: source.clone(),
             message,
         })?;
         match parsed {
@@ -178,6 +190,7 @@ pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
                 if block.content_type.is_some() {
                     return Err(ParseError {
                         line: line_no,
+                        source,
                         message: "duplicate `Content-Type` in the same block".to_string(),
                     });
                 }
@@ -199,6 +212,7 @@ fn finalize_block(block: OpenBlock) -> Result<HeaderRule, ParseError> {
     if block.headers.is_empty() && block.content_type.is_none() {
         return Err(ParseError {
             line: block.line_no,
+            source: block.source,
             message: "path block has no header lines under it".to_string(),
         });
     }
