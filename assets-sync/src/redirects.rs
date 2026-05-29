@@ -191,6 +191,14 @@ mod tests {
     }
 
     #[test]
+    fn lines_with_fragments_work() {
+        let input = "/from /to#topic 301";
+        let rules = parse(input).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].status, 301);
+    }
+
+    #[test]
     fn inline_comment_is_not_stripped() {
         // A `#` only starts a comment at the beginning of a line, so a trailing
         // `#` is treated as extra fields rather than a comment.
