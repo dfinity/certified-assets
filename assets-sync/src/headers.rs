@@ -11,6 +11,7 @@
 //! appended response header. See HEADERS.md for the full reject list.
 
 use crate::glob::KeyPattern;
+use crate::strip_comment;
 use http::{HeaderName, HeaderValue};
 use mime::Mime;
 use std::str::FromStr;
@@ -194,13 +195,6 @@ pub fn parse(content: &str) -> Result<Vec<HeaderRule>, ParseError> {
     Ok(rules)
 }
 
-fn strip_comment(line: &str) -> &str {
-    match line.find('#') {
-        Some(idx) => &line[..idx],
-        None => line,
-    }
-}
-
 fn finalize_block(block: OpenBlock) -> Result<HeaderRule, ParseError> {
     if block.headers.is_empty() && block.content_type.is_none() {
         return Err(ParseError {
@@ -375,6 +369,23 @@ mod tests {
         assert_eq!(
             rules[0].headers,
             vec![("X-Frame-Options".into(), "DENY".into())]
+        );
+    }
+
+    #[test]
+    fn hash_inside_header_value_token_is_preserved() {
+        // `#` only begins a comment after whitespace — a fragment embedded in
+        // a header-value token stays attached.
+        let rules = parse(
+            "/api\n  Content-Security-Policy: default-src 'self'; report-uri /csp#endpoint\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rules[0].headers,
+            vec![(
+                "Content-Security-Policy".into(),
+                "default-src 'self'; report-uri /csp#endpoint".into()
+            )]
         );
     }
 
