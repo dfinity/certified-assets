@@ -17,5 +17,3 @@ canisters:
           path: wasms/plugin.wasm
           dirs:
             - dist
-          files:
-            - assets.toml

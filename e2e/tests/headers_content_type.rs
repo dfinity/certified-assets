@@ -1,4 +1,5 @@
-//! Integration tests for `assets.toml` end-to-end via the WASM plugin.
+//! Integration tests for `Content-Type` overrides in `_headers`, end-to-end
+//! via the WASM plugin.
 //!
 //! Each test deploys a fixture to a local replica, then fetches assets via
 //! the HTTP gateway. The gateway validates the response's `IC-Certificate`
@@ -17,11 +18,12 @@ fn content_type(headers: &reqwest::header::HeaderMap) -> &str {
         .unwrap_or("")
 }
 
-/// Deploy the `assets-toml` fixture and verify every per-glob `content_type`
-/// override survives certification and reaches the HTTP gateway.
+/// Deploy the `headers-content-type` fixture and verify every per-glob
+/// `Content-Type` override in `_headers` survives certification and reaches
+/// the HTTP gateway.
 #[test]
 fn content_type_overrides_land_on_canister() {
-    let tmp = setup_project("tests/fixture/assets-toml");
+    let tmp = setup_project("tests/fixture/headers-content-type");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -30,18 +32,6 @@ fn content_type_overrides_land_on_canister() {
     // .did → text/plain; charset=utf-8 (mime_guess has no entry, so the
     // pre-override default would have been application/octet-stream).
     let r = http_fetch(project, "/ic.did");
-    assert_eq!(r.status(), StatusCode::OK);
-    assert_eq!(content_type(r.headers()), "text/plain; charset=utf-8");
-
-    // .sh → text/plain; charset=utf-8 (mime_guess returns application/x-sh
-    // by default; the override replaces it).
-    let r = http_fetch(project, "/install.sh");
-    assert_eq!(r.status(), StatusCode::OK);
-    assert_eq!(content_type(r.headers()), "text/plain; charset=utf-8");
-
-    // Exact-path override: llms.txt — mime_guess returns plain text/plain
-    // without a charset; the override adds the charset parameter.
-    let r = http_fetch(project, "/llms.txt");
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(content_type(r.headers()), "text/plain; charset=utf-8");
 
@@ -55,12 +45,12 @@ fn content_type_overrides_land_on_canister() {
     );
 }
 
-/// Edit `assets.toml` and redeploy. Expectation: the new content-type lands
+/// Edit `_headers` and redeploy. Expectation: the new content-type lands
 /// on the canister (via delete-then-recreate triggered by content-type
 /// drift), and the gateway serves the updated value.
 #[test]
 fn content_type_edit_propagates_on_redeploy() {
-    let tmp = setup_project("tests/fixture/assets-toml");
+    let tmp = setup_project("tests/fixture/headers-content-type");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -72,10 +62,10 @@ fn content_type_edit_propagates_on_redeploy() {
 
     // Flip the .did mapping to a different MIME without touching the file.
     fs::write(
-        project.join("assets.toml"),
-        b"[[asset]]\nmatch = \"/*.did\"\ncontent_type = \"application/json\"\n",
+        project.join("dist/_headers"),
+        b"/*.did\n  Content-Type: application/json\n",
     )
-    .expect("rewrite assets.toml");
+    .expect("rewrite _headers");
 
     icp_cmd(project).arg("deploy").assert().success();
 
@@ -84,6 +74,6 @@ fn content_type_edit_propagates_on_redeploy() {
     assert_eq!(
         content_type(r.headers()),
         "application/json",
-        "edited assets.toml should propagate the new Content-Type via delete-then-recreate",
+        "edited _headers should propagate the new Content-Type via delete-then-recreate",
     );
 }

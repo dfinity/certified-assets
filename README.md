@@ -57,40 +57,21 @@ The canister also honours a Netlify-style `_headers` file at the root of the pro
   X-Robots-Tag: noindex
 ```
 
-`<pattern>` is an absolute path with optional `*` wildcards — `/about` is exact, `/_astro/*` is a subtree, `/*.md` matches any `.md` file at any depth. A single `*` matches any sequence including `/` and empty; `**` is not supported (redundant) and neither is `:placeholder`. All matching rules apply per the Cloudflare Pages / Netlify semantics — same-name values across rules concatenate with `, ` (RFC 7230), with `Set-Cookie` carved out (RFC 6265). The file is parsed by the plugin and lowered to per-asset header lists; `Content-Type` is reserved (set via `assets.toml`, see below). See [`plugin/README.md`](plugin/README.md#headers) for the full reference and reject list.
+`<pattern>` is an absolute path with optional `*` wildcards — `/about` is exact, `/_astro/*` is a subtree, `/*.md` matches any `.md` file at any depth. A single `*` matches any sequence including `/` and empty; `**` is not supported (redundant) and neither is `:placeholder`. All matching rules apply per the Cloudflare Pages / Netlify semantics — same-name values across rules concatenate with `, ` (RFC 7230), with `Set-Cookie` carved out (RFC 6265). `Content-Type` is recognised but routed to the asset's stored media type instead of the appended response headers — see below. See [`plugin/README.md`](plugin/README.md#headers) for the full reference and reject list.
 
-## Per-glob content-type overrides
+### `Content-Type` overrides
 
-`Content-Type` is intentionally not a `_headers` field — the canister derives it from the asset's media type and certifies it as part of the response. To override what `mime_guess::from_path` picks (or to add a `charset` parameter), declare blocks in an `assets.toml` passed to the plugin via the manifest's `files:` field:
+The canister derives a `Content-Type` for every asset from its media type and certifies it as part of the response. To override what `mime_guess::from_path` picks (or to add a `charset` parameter), set `Content-Type:` inside any `_headers` block:
 
-```yaml
-# icp.yaml (excerpt)
-canisters:
-  - name: frontend
-    sync:
-      steps:
-        - type: plugin
-          path: ./plugins/assets-sync.wasm
-          dirs:
-            - dist
-          files:
-            - assets.toml
+```text
+/*.md
+  Content-Type: text/markdown; charset=utf-8
+
+/*.did
+  Content-Type: text/plain; charset=utf-8
+
+/llms.txt
+  Content-Type: text/plain; charset=utf-8
 ```
 
-```toml
-# assets.toml
-
-[[asset]]
-match = "/*.md"
-content_type = "text/markdown; charset=utf-8"
-
-[[asset]]
-match = "/*.did"
-content_type = "text/plain; charset=utf-8"
-
-[[asset]]
-match = "/llms.txt"
-content_type = "text/plain; charset=utf-8"
-```
-
-`match` uses the same glob dialect as `_headers`. Blocks are walked in declaration order; the first matching `content_type` wins, with `mime_guess` as the fallback. The override feeds `CreateAssetArguments.content_type`, so the canister emits exactly one `Content-Type` per response — no duplicates from layering with response headers. See [`ASSETS-TOML.md`](ASSETS-TOML.md) for the full design and validation rules.
+The plugin extracts `Content-Type` and feeds it into `CreateAssetArguments.content_type` rather than appending it as a response header — so the canister emits exactly one `Content-Type` per response, no duplicates. Other headers in the same block continue to flow through `headers` as usual. `Content-Type` is single-valued, so when multiple blocks match the same asset the first matching `Content-Type` wins (other matching rules still contribute their non-`Content-Type` headers as normal).
