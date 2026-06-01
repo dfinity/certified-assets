@@ -201,15 +201,7 @@ pub fn sync<C: CanisterCall>(
     let batch_id = create_batch(canister)?;
     println!("created batch {batch_id}");
 
-    for asset in project_assets.values_mut() {
-        let key = asset.source.key.clone();
-        for (encoding_name, enc) in &mut asset.encodings {
-            if !enc.already_in_place {
-                let data = std::mem::take(&mut enc.data);
-                enc.chunk_ids = upload_chunks(canister, &batch_id, &key, encoding_name, &data)?;
-            }
-        }
-    }
+    pack_and_upload_chunks(canister, &batch_id, &mut project_assets)?;
 
     let operations = build_operations(
         &project_assets,
@@ -323,43 +315,117 @@ fn is_already_in_place(
         .is_some_and(|s| s == sha256)
 }
 
-fn upload_chunks<C: CanisterCall>(
-    canister: &C,
-    batch_id: &Nat,
-    key: &str,
-    encoding: &str,
-    data: &[u8],
-) -> Result<Vec<Nat>, String> {
-    if data.is_empty() {
-        let ids = create_chunks(canister, batch_id, &[&[]])?;
-        println!("  {key}{} 1/1 (0 bytes)", encoding_suffix(encoding));
-        return Ok(ids);
-    }
-    let total = data.len().div_ceil(MAX_CHUNK_SIZE);
-    let mut ids = Vec::with_capacity(total);
-    for (i, chunk) in data.chunks(MAX_CHUNK_SIZE).enumerate() {
-        let mut got = create_chunks(canister, batch_id, &[chunk])?;
-        let id = got
-            .pop()
-            .ok_or_else(|| "create_chunks returned no chunk id".to_string())?;
-        println!(
-            "  {key}{} {}/{} ({} bytes)",
-            encoding_suffix(encoding),
-            i + 1,
-            total,
-            chunk.len()
-        );
-        ids.push(id);
-    }
-    Ok(ids)
-}
-
 fn encoding_suffix(encoding: &str) -> String {
     if encoding == "identity" {
         String::new()
     } else {
         format!(" ({encoding})")
     }
+}
+
+/// Pack-and-upload pass: collect every chunk from every not-yet-uploaded
+/// encoding across all assets, then ship them in `create_chunks` calls of up
+/// to `MAX_CHUNK_SIZE` total bytes each.
+///
+/// This is where the wall-clock win lives versus the old "one chunk per call"
+/// pattern: a project of 100 small files used to make 100 round-trips; now
+/// they ride in a single call (≈1.9 MB budget).
+///
+/// Routing is by `(asset_key, encoding, chunk_index)`: each `PendingChunk`
+/// remembers where its eventual canister id should land in
+/// `enc.chunk_ids[chunk_index]`.
+fn pack_and_upload_chunks<C: CanisterCall>(
+    canister: &C,
+    batch_id: &Nat,
+    project_assets: &mut HashMap<String, ProjectAsset>,
+) -> Result<(), String> {
+    struct PendingChunk {
+        asset_key: String,
+        encoding: String,
+        chunk_index: usize,
+        data: Vec<u8>,
+    }
+
+    let mut pending: Vec<PendingChunk> = Vec::new();
+    for asset in project_assets.values_mut() {
+        let key = asset.source.key.clone();
+        for (encoding_name, enc) in &mut asset.encodings {
+            if enc.already_in_place {
+                continue;
+            }
+            let data = std::mem::take(&mut enc.data);
+            // Slice into MAX_CHUNK_SIZE-sized pieces. An empty encoding still
+            // needs one zero-byte chunk so SetAssetContent has a chunk_id.
+            let chunks: Vec<Vec<u8>> = if data.is_empty() {
+                vec![Vec::new()]
+            } else {
+                data.chunks(MAX_CHUNK_SIZE).map(|c| c.to_vec()).collect()
+            };
+            enc.chunk_ids = vec![Nat::from(0u32); chunks.len()];
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                pending.push(PendingChunk {
+                    asset_key: key.clone(),
+                    encoding: encoding_name.clone(),
+                    chunk_index: i,
+                    data: chunk,
+                });
+            }
+        }
+    }
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    // First-fit-decreasing: sort descending, then in each pass take every
+    // chunk that still fits under MAX_CHUNK_SIZE. Anything that doesn't fit
+    // stays in `pending` for the next pass.
+    pending.sort_by_key(|b| std::cmp::Reverse(b.data.len()));
+
+    let total_chunks = pending.len();
+    let mut total_calls = 0usize;
+    let mut total_bytes = 0u64;
+
+    while !pending.is_empty() {
+        let mut batch: Vec<PendingChunk> = Vec::new();
+        let mut leftovers: Vec<PendingChunk> = Vec::new();
+        let mut batch_size = 0usize;
+        for chunk in std::mem::take(&mut pending) {
+            if batch_size + chunk.data.len() <= MAX_CHUNK_SIZE {
+                batch_size += chunk.data.len();
+                batch.push(chunk);
+            } else {
+                leftovers.push(chunk);
+            }
+        }
+        pending = leftovers;
+
+        let chunk_refs: Vec<&[u8]> = batch.iter().map(|p| p.data.as_slice()).collect();
+        let ids = create_chunks(canister, batch_id, &chunk_refs)?;
+        if ids.len() != batch.len() {
+            return Err(format!(
+                "create_chunks returned {} ids for {} chunks",
+                ids.len(),
+                batch.len()
+            ));
+        }
+        total_calls += 1;
+        total_bytes += batch_size as u64;
+
+        for (p, id) in batch.into_iter().zip(ids) {
+            let asset = project_assets
+                .get_mut(&p.asset_key)
+                .expect("asset present (collected above)");
+            let enc = asset
+                .encodings
+                .get_mut(&p.encoding)
+                .expect("encoding present (collected above)");
+            enc.chunk_ids[p.chunk_index] = id;
+        }
+    }
+
+    println!("uploaded {total_chunks} chunk(s) in {total_calls} call(s) ({total_bytes} bytes)");
+    Ok(())
 }
 
 fn build_operations(
@@ -601,102 +667,189 @@ mod tests {
         chunk_ids: Vec<Nat>,
     }
 
-    struct ChunkCounter(Cell<u32>);
+    // Counts each `create_chunks` call, returns one fresh id per chunk in the
+    // request, and records the batch sizes the packer produced. Used to verify
+    // that `pack_and_upload_chunks` collapses many small chunks into single
+    // calls and assigns canister ids to the right encoding slots.
+    struct ChunkBatchRecorder {
+        next_id: Cell<u64>,
+        batches: RefCell<Vec<usize>>, // chunks-per-batch
+    }
 
-    impl CanisterCall for ChunkCounter {
-        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
+    impl ChunkBatchRecorder {
+        fn new() -> Self {
+            Self {
+                next_id: Cell::new(0),
+                batches: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    // Mirror of CreateChunksRequest so the mock can introspect arg.content.len().
+    #[derive(CandidType, serde::Deserialize)]
+    struct ChunksReqMirror {
+        #[allow(dead_code)]
+        batch_id: Nat,
+        content: Vec<serde_bytes::ByteBuf>,
+    }
+
+    impl CanisterCall for ChunkBatchRecorder {
+        fn call<A, R>(&self, method: &str, arg: A, _: CallType, _: bool) -> Result<R, String>
         where
             A: CandidType,
             R: CandidType + DeserializeOwned,
         {
             assert_eq!(method, "create_chunks");
-            let id = self.0.get();
-            self.0.set(id + 1);
-            let bytes = candid::encode_one(MockChunksResponse {
-                chunk_ids: vec![Nat::from(id)],
-            })
-            .map_err(|e| e.to_string())?;
-            candid::decode_one(&bytes).map_err(|e| e.to_string())
+            let bytes = candid::encode_one(&arg).map_err(|e| e.to_string())?;
+            let req: ChunksReqMirror = candid::decode_one(&bytes).map_err(|e| e.to_string())?;
+            let n = req.content.len();
+            self.batches.borrow_mut().push(n);
+            let start = self.next_id.get();
+            self.next_id.set(start + n as u64);
+            let ids: Vec<Nat> = (0..n as u64).map(|i| Nat::from(start + i)).collect();
+            let reply = candid::encode_one(MockChunksResponse { chunk_ids: ids })
+                .map_err(|e| e.to_string())?;
+            candid::decode_one(&reply).map_err(|e| e.to_string())
         }
     }
 
-    #[test]
-    fn upload_chunks_empty_data_creates_one_chunk() {
-        let mock = ChunkCounter(Cell::new(0));
-        let ids = upload_chunks(&mock, &Nat::from(1u32), "/f", "identity", &[]).unwrap();
-        assert_eq!(ids.len(), 1);
-    }
-
-    #[test]
-    fn upload_chunks_small_data_creates_one_chunk() {
-        let mock = ChunkCounter(Cell::new(0));
-        let ids = upload_chunks(&mock, &Nat::from(1u32), "/f", "identity", &[0u8; 100]).unwrap();
-        assert_eq!(ids.len(), 1);
-    }
-
-    #[test]
-    fn upload_chunks_at_boundary_creates_one_chunk() {
-        let mock = ChunkCounter(Cell::new(0));
-        let ids = upload_chunks(
-            &mock,
-            &Nat::from(1u32),
-            "/f",
-            "identity",
-            &[0u8; MAX_CHUNK_SIZE],
-        )
-        .unwrap();
-        assert_eq!(ids.len(), 1);
-    }
-
-    #[test]
-    fn upload_chunks_one_over_boundary_creates_two_chunks() {
-        let mock = ChunkCounter(Cell::new(0));
-        let ids = upload_chunks(
-            &mock,
-            &Nat::from(1u32),
-            "/f",
-            "identity",
-            &[0u8; MAX_CHUNK_SIZE + 1],
-        )
-        .unwrap();
-        assert_eq!(ids.len(), 2);
-    }
-
-    #[test]
-    fn upload_chunks_double_boundary_creates_two_chunks() {
-        let mock = ChunkCounter(Cell::new(0));
-        let ids = upload_chunks(
-            &mock,
-            &Nat::from(1u32),
-            "/f",
-            "identity",
-            &[0u8; MAX_CHUNK_SIZE * 2],
-        )
-        .unwrap();
-        assert_eq!(ids.len(), 2);
-    }
-
-    #[test]
-    fn upload_chunks_returns_sequential_ids() {
-        let mock = ChunkCounter(Cell::new(7));
-        // MAX_CHUNK_SIZE * 3 + 1 → div_ceil = 4 chunks.
-        let ids = upload_chunks(
-            &mock,
-            &Nat::from(1u32),
-            "/f",
-            "identity",
-            &[0u8; MAX_CHUNK_SIZE * 3 + 1],
-        )
-        .unwrap();
-        assert_eq!(
-            ids,
-            vec![
-                Nat::from(7u32),
-                Nat::from(8u32),
-                Nat::from(9u32),
-                Nat::from(10u32),
-            ]
+    fn mk_pending_asset(key: &str, encoding: &str, data: Vec<u8>) -> (String, ProjectAsset) {
+        let mut enc_map = HashMap::new();
+        enc_map.insert(
+            encoding.to_string(),
+            ProjectAssetEncoding {
+                chunk_ids: Vec::new(),
+                sha256: vec![0; 32],
+                already_in_place: false,
+                data,
+            },
         );
+        (
+            key.to_string(),
+            ProjectAsset {
+                source: AssetSource {
+                    path: PathBuf::from(key.trim_start_matches('/')),
+                    key: key.to_string(),
+                },
+                media_type: "application/octet-stream".parse().unwrap(),
+                encodings: enc_map,
+            },
+        )
+    }
+
+    #[test]
+    fn pack_uploads_one_full_chunk_per_call() {
+        // A single MAX-sized encoding ships in one call carrying one chunk.
+        let mut assets = HashMap::from([mk_pending_asset(
+            "/f",
+            "identity",
+            vec![0u8; MAX_CHUNK_SIZE],
+        )]);
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        assert_eq!(*mock.batches.borrow(), vec![1]);
+        assert_eq!(assets["/f"].encodings["identity"].chunk_ids.len(), 1);
+    }
+
+    #[test]
+    fn pack_splits_oversized_encoding_into_max_chunks() {
+        // MAX*3 + 1 bytes → 4 chunks: three at MAX, one at 1 byte. Each MAX
+        // chunk fills its own call; the trailing 1-byte chunk gets its own
+        // call too because nothing else is left to share with it.
+        let mut assets = HashMap::from([mk_pending_asset(
+            "/big",
+            "identity",
+            vec![0u8; MAX_CHUNK_SIZE * 3 + 1],
+        )]);
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        assert_eq!(*mock.batches.borrow(), vec![1, 1, 1, 1]);
+        assert_eq!(assets["/big"].encodings["identity"].chunk_ids.len(), 4);
+    }
+
+    #[test]
+    fn pack_collapses_many_small_chunks_into_one_call() {
+        // 100 × 1KB chunks fit comfortably under MAX_CHUNK_SIZE (~1.9 MB) →
+        // one call carrying all 100 chunks. This is the optimisation.
+        let mut assets: HashMap<String, ProjectAsset> = (0..100)
+            .map(|i| mk_pending_asset(&format!("/f{i}"), "identity", vec![0u8; 1024]))
+            .collect();
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        assert_eq!(*mock.batches.borrow(), vec![100]);
+    }
+
+    #[test]
+    fn pack_packs_full_chunk_alone_then_packs_remaining_smalls() {
+        // One MAX-sized asset + many tiny assets. FFD puts the MAX chunk in
+        // its own call (nothing else fits), then packs the small chunks
+        // together.
+        let mut assets: HashMap<String, ProjectAsset> = HashMap::new();
+        assets.extend([mk_pending_asset(
+            "/big",
+            "identity",
+            vec![0u8; MAX_CHUNK_SIZE],
+        )]);
+        for i in 0..10 {
+            assets.extend([mk_pending_asset(
+                &format!("/tiny{i}"),
+                "identity",
+                vec![0u8; 1024],
+            )]);
+        }
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        // Two calls total: one for the big chunk, one for the ten tinies.
+        let batches = mock.batches.borrow().clone();
+        assert_eq!(batches.len(), 2);
+        assert!(batches.contains(&1)); // big chunk on its own
+        assert!(batches.contains(&10)); // 10 tinies packed together
+    }
+
+    #[test]
+    fn pack_routes_chunk_ids_to_correct_encoding_slot() {
+        // Two assets, multi-chunk each. After upload, every encoding's
+        // chunk_ids vec must be filled (no default zeros remaining) and
+        // ids must be distinct.
+        let mut assets = HashMap::from([
+            mk_pending_asset("/a", "identity", vec![0u8; MAX_CHUNK_SIZE + 100]), // 2 chunks
+            mk_pending_asset("/b", "identity", vec![0u8; 500]),                  // 1 chunk
+        ]);
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        let a_ids = &assets["/a"].encodings["identity"].chunk_ids;
+        let b_ids = &assets["/b"].encodings["identity"].chunk_ids;
+        assert_eq!(a_ids.len(), 2);
+        assert_eq!(b_ids.len(), 1);
+        let mut all: Vec<&Nat> = a_ids.iter().chain(b_ids.iter()).collect();
+        all.sort_by(|x, y| {
+            // Nat doesn't impl Ord; compare textually.
+            x.to_string().cmp(&y.to_string())
+        });
+        all.dedup();
+        assert_eq!(all.len(), 3, "ids must be distinct");
+    }
+
+    #[test]
+    fn pack_empty_encoding_still_gets_one_chunk_id() {
+        // A zero-byte encoding still needs a chunk_id so SetAssetContent
+        // has something to reference.
+        let mut assets = HashMap::from([mk_pending_asset("/empty", "identity", vec![])]);
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        assert_eq!(assets["/empty"].encodings["identity"].chunk_ids.len(), 1);
+    }
+
+    #[test]
+    fn pack_skips_already_in_place_encodings() {
+        // Nothing to upload → no calls made.
+        let (k, mut pa) = mk_pending_asset("/skip", "identity", vec![0u8; 100]);
+        pa.encodings.get_mut("identity").unwrap().already_in_place = true;
+        pa.encodings.get_mut("identity").unwrap().data = Vec::new();
+        let mut assets = HashMap::from([(k, pa)]);
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        assert!(mock.batches.borrow().is_empty());
     }
 
     fn mk_project_asset(
