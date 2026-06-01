@@ -6,6 +6,7 @@
 //! plugin can point users at the offending entry without a canister round-trip.
 
 use crate::canister::{RedirectRule, RulePattern};
+use crate::strip_comment;
 use http::StatusCode;
 use url::Url;
 
@@ -16,12 +17,17 @@ const SUPPORTED_STATUSES: &[u16] = &[200, 301, 302, 307, 308, 404, 410];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub line: usize,
+    pub source: String,
     pub message: String,
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "_redirects: line {}: {}", self.line, self.message)
+        write!(
+            f,
+            "_redirects: line {}: {} (source: `{}`)",
+            self.line, self.message, self.source
+        )
     }
 }
 
@@ -40,18 +46,12 @@ pub fn parse(content: &str) -> Result<Vec<RedirectRule>, ParseError> {
         }
         let rule = parse_line(body).map_err(|message| ParseError {
             line: line_no,
+            source: raw.trim_end().to_string(),
             message,
         })?;
         rules.push(rule);
     }
     Ok(rules)
-}
-
-fn strip_comment(line: &str) -> &str {
-    match line.find('#') {
-        Some(idx) => &line[..idx],
-        None => line,
-    }
 }
 
 fn parse_line(body: &str) -> Result<RedirectRule, String> {
@@ -203,6 +203,27 @@ mod tests {
         assert_eq!(r.from, RulePattern::Exact("/old".into()));
         assert_eq!(r.to, "/new");
         assert_eq!(r.status, 301);
+    }
+
+    #[test]
+    fn hash_inside_token_is_preserved_as_fragment() {
+        // `#` only begins a comment after whitespace — a fragment in the `to`
+        // token stays attached to the URL.
+        let r = parse_one("/from-topic /to/#topic 301").unwrap();
+        assert_eq!(r.from, RulePattern::Exact("/from-topic".into()));
+        assert_eq!(r.to, "/to/#topic");
+        assert_eq!(r.status, 301);
+    }
+
+    #[test]
+    fn hash_after_tab_starts_a_comment() {
+        // Tab counts as whitespace for the purposes of comment detection, so
+        // `\t#trailing` is a comment regardless of which whitespace char
+        // preceded it.
+        let r = parse_one("/old /new 301\t#trailing").unwrap();
+        assert_eq!(r.to, "/new");
+        let r = parse_one("/old\t/new\t301\t#trailing").unwrap();
+        assert_eq!(r.to, "/new");
     }
 
     #[test]
@@ -364,5 +385,21 @@ mod tests {
 ";
         let e = err(input);
         assert_eq!(e.line, 3);
+    }
+
+    #[test]
+    fn error_carries_source_line_for_display() {
+        // The plugin echoes parse errors verbatim to the user; the source line
+        // must be embedded so a line-number alone isn't the only hint.
+        let input = "\
+/good /good 301
+/incomplete /target
+";
+        let e = err(input);
+        assert_eq!(e.line, 2);
+        assert_eq!(e.source, "/incomplete /target");
+        let rendered = format!("{e}");
+        assert!(rendered.contains("/incomplete /target"), "{rendered}");
+        assert!(rendered.contains("line 2"), "{rendered}");
     }
 }
