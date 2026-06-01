@@ -35,13 +35,74 @@ The output WASM lands at `../target/wasm32-wasip2/release/plugin.wasm` — the p
 ## Scope
 
 The current implementation supports the V2 protocol of the assets canister (transactional batch API):
-- Walks each directory passed via the manifest's `dirs:` setting; dotfiles are skipped.
+- The manifest's `dirs:` setting must list **exactly one** directory. The plugin rejects the sync before any canister call if zero or multiple entries are given — the assets canister owns the URL space below `/`, and a single tree keeps key collisions and `_redirects` precedence unambiguous.
+- Walks that directory; dotfiles are skipped.
 - Detects the MIME type of each file and computes encodings: `gzip` for all `text/*`, `*/javascript`, and `*/html` types (only if the compressed output is smaller), `identity` for everything.
 - Diffs against `list_assets()`: skips encodings already in place (matched by sha256), unsets encodings that are stale, and deletes assets that have been removed or whose `content_type` changed.
+- Reads `_redirects` at the root of the input directory and replaces the canister's ruleset in the same batch (see "Redirects" below).
 - Opens a transaction (`create_batch`), uploads each content chunk via `create_chunks` (one chunk per call, 1.9 MB max), then commits all operations atomically with a single `commit_batch` call.
 - In normal mode all canister calls use `direct: true`. In proxy mode (when a `proxy_canister_id` is provided by the host) the plugin first ensures the signing identity has `Commit` permission, routing a `grant_permission` call through the proxy (which is the canister's controller) if needed, then proceeds with direct calls.
 
 The plugin calls `api_version` first and aborts if the canister advertises anything below 2.
+
+## Redirects
+
+The plugin reads a Netlify-style `_redirects` file at the root of the input directory (`dirs:` must list exactly one). The file itself is **not** uploaded as an asset — it's consumed by the plugin and lowered into canister-side rules. Each non-empty, non-comment line:
+
+```
+<from>  <to>  <status>
+```
+
+- `<from>` — absolute path. A trailing `/*` makes the rule match every URL whose path starts with the prefix (subtree). Anywhere else, `*` is an error.
+- `<to>` — absolute path for `200` rewrites and `4xx` custom error pages. For `3xx` rules it may also be a fully-qualified URL (sent in the `Location` header).
+- `<status>` — required integer, one of `{200, 301, 302, 307, 308, 404, 410}`. Unlike Netlify, there is no default; the explicit number keeps the intent (rewrite vs. redirect vs. error) unambiguous.
+- Lines starting with `#` and blank lines are ignored. Inline `# comments` at the end of a rule line are stripped before parsing.
+
+### Examples
+
+```text
+# 3xx — issue a Location-header redirect
+/old-page        /new-page              301
+/external        https://example.com/   302
+
+# 200 — rewrite: serve the target asset's body at the source URL
+/about           /about.html            200
+/blog/*          /blog/index.html       200
+
+# 4xx — custom error page (serves the target asset's body with the override status)
+/missing         /404.html              404
+/gone            /tombstone.html        410
+```
+
+A real asset at the rule's `from` path always wins — a file at `/about.html` is served at `/about.html` regardless of any rule. For 200 rewrites and 4xx error pages, the target asset's existing `Content-Type` and certified headers are inherited verbatim; the rule itself can't override them.
+
+Rule order is significant: the plugin sends rules in declaration order, and the canister returns the first match. Replacing the file is a full replace-all operation — if you remove `_redirects` between deploys, the plugin emits an empty `SetRedirectRules` op so the canister clears its ruleset.
+
+### Migration from built-in aliasing
+
+Earlier versions of this canister implicitly served `/foo.html` at `/foo` and `/foo/index.html` at both `/foo/` and `/foo`. That behaviour has been removed — express the same routing explicitly in `_redirects`:
+
+```text
+# Replace "extensionless HTML" aliasing
+/foo             /foo.html              200
+
+# Replace per-directory index aliasing
+/blog/           /blog/index.html       200
+
+# SPA fallback (formerly served implicitly when no other asset matched)
+/*               /index.html            200
+```
+
+The `enable_aliasing` field in `.ic-assets.json5` and `is_aliased` on `set_asset_properties` are no longer honoured by the plugin; the canister will drop them in a follow-up cleanup. If your config still sets `enable_aliasing`, the plugin emits a warning pointing you at `_redirects`.
+
+### Unsupported syntax
+
+- `:splat` and `:placeholder` substitution in `<to>` — deferred (see the design plan's tier-3 follow-up).
+- Netlify's `!` force suffix on status codes — files always win over rules at the same path; remove the conflicting asset instead.
+- Country/role conditions and query-string matching — out of scope.
+- Inline headers as a fourth field — headers will arrive via a separate `_headers` file in a later track.
+
+Parse errors abort the sync with the offending file path and 1-based line number, before any canister call is issued.
 
 ## TODO
 
@@ -58,7 +119,7 @@ The plugin calls `api_version` first and aborts if the canister advertises anyth
   - Wire it into `AssetConfig::combined_headers()` so that `security_policy` entries in `.ic-assets.json5` expand into the corresponding `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, etc. headers before the headers map is passed to `CreateAssetArguments`.
   - Emit the same warnings as `ic-asset/src/sync.rs` (`gather_asset_descriptors`): warn when no security policy is set for any asset, warn when `standard` policy is in use (suggesting hardening), and error when `hardened` is declared but no custom headers are provided.
 
-- [x] **Asset properties update** — emit `SetAssetProperties` ops for assets whose properties drifted on the canister. `get_asset_properties` is called after `list_assets` to collect the current `AssetProperties` for every canister asset, and `update_properties` compares `max_age`, `headers`, `allow_raw_access`, and `is_aliased` field-by-field against the resolved project config (headers compared order-insensitively). Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`.
+- [x] **Asset properties update** — emit `SetAssetProperties` ops for assets whose properties drifted on the canister. `get_asset_properties` is called after `list_assets` to collect the current `AssetProperties` for every canister asset, and `update_properties` compares `max_age`, `headers`, and `allow_raw_access` field-by-field against the resolved project config (headers compared order-insensitively). Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`. (`is_aliased` is no longer carried; the canister will drop it in a follow-up cleanup PR.)
 
 - [ ] **Header representation: `Map` → `Vec<(name, value)>`** — replace `Option<BTreeMap<String, String>>` / `Option<HashMap<String, String>>` with a list of pairs across `ic-certified-assets` (`Asset`, `AssetProperties`, `CreateAssetArguments`, `SetAssetPropertiesArguments`, `build_headers`, `evidence::hash_headers`) and `assets-sync` (`canister::AssetProperties`, `config::HeadersConfig`, `combined_headers`, `update_properties`). Wire type `vec record { text; text }` is already a list, so this is a Rust-only change — no Candid breaking change, no stable-storage migration. Lets users have multiple `Set-Cookie` values (and removes the tactical Set-Cookie filter in `update_properties` once the canister appends rather than overwrites `ic_env`). Sort by `(name, value)` for deterministic certification/evidence hashing; for `combined_headers` merging, "custom overrides policy" stays a case-insensitive name-set dedupe.
 

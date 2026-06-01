@@ -14,9 +14,15 @@
 //! after the sync step completes.
 
 use crate::config::{AssetConfig, AssetSourceDirectoryConfiguration};
+use crate::redirects::REDIRECTS_FILENAME;
 use std::path::{Path, PathBuf};
 
 const KNOWN_DIRECTORIES: &[&str] = &[".well-known"];
+
+/// Filenames whose presence is configuration, not asset content. Loaded for
+/// their side effects (redirect rules, etc.) and excluded from the upload set.
+/// `.ic-assets.json[5]` are already filtered by the dotfile rule above.
+const CONFIG_FILENAMES: &[&str] = &[REDIRECTS_FILENAME];
 
 #[derive(Debug)]
 pub struct AssetSource {
@@ -63,6 +69,12 @@ fn walk(
 
         // Skip dotfiles / dotdirs (except known dirs like .well-known).
         if name_str.starts_with('.') && !(ft.is_dir() && KNOWN_DIRECTORIES.contains(&&*name_str)) {
+            continue;
+        }
+
+        // Skip config files (`_redirects` etc.) regardless of where they sit
+        // in the tree — they're consumed by the sync layer, not uploaded.
+        if ft.is_file() && CONFIG_FILENAMES.contains(&&*name_str) {
             continue;
         }
 
@@ -170,6 +182,15 @@ mod tests {
     fn ic_assets_json5_config_file_skipped() {
         let dir = tmp();
         fs::write(dir.path().join(ASSETS_CONFIG_FILENAME_JSON5), b"[]").unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+        let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
+        assert_eq!(keys, vec!["/index.html"]);
+    }
+
+    #[test]
+    fn redirects_file_skipped() {
+        let dir = tmp();
+        fs::write(dir.path().join(crate::redirects::REDIRECTS_FILENAME), b"").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
         let keys = sorted_keys(scan_sources(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);

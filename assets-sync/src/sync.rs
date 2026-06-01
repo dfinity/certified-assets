@@ -11,14 +11,16 @@ use std::collections::HashMap;
 
 use crate::canister::{
     api_version, commit_batch, create_batch, create_chunks, get_asset_properties,
-    grant_permission_via_proxy, list_assets, list_permitted, AssetDetails, AssetProperties,
-    BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
-    DeleteAssetArguments, Permission, SetAssetContentArguments, SetAssetPropertiesArguments,
-    UnsetAssetContentArguments,
+    get_redirect_rules, grant_permission_via_proxy, list_assets, list_permitted, AssetDetails,
+    AssetProperties, BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
+    DeleteAssetArguments, Permission, RedirectRule, SetAssetContentArguments,
+    SetAssetPropertiesArguments, SetRedirectRulesArguments, UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
+use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
 use crate::security_policy::report_security_policy_issues;
+use std::path::Path;
 
 // Stay safely under the canister's ingress message limit (~2 MB).
 const MAX_CHUNK_SIZE: usize = 1_900_000;
@@ -68,6 +70,21 @@ pub fn sync<C: CanisterCall>(
     identity_principal: &str,
     proxy_canister_id: Option<&str>,
 ) -> Result<String, String> {
+    // The assets plugin owns the URL space of its canister: every key starts at
+    // `/`, `_redirects` lives at the project root, and the canister has no
+    // notion of "merge two trees together". Multiple input directories would
+    // produce ambiguous redirect-file precedence and quietly hide key
+    // collisions, so the contract is exactly one directory.
+    let dir = match dirs {
+        [d] => d,
+        _ => {
+            return Err(format!(
+                "assets sync plugin: expected exactly one input directory, got {}",
+                dirs.len()
+            ))
+        }
+    };
+
     if let Some(_proxy) = proxy_canister_id {
         ensure_commit_permission(canister, identity_principal)?;
     }
@@ -85,11 +102,23 @@ pub fn sync<C: CanisterCall>(
 
     report_security_policy_issues(&sources)?;
 
+    let project_rules = load_redirect_rules(dir)?;
+    println!(
+        "parsed {} redirect rule(s) from _redirects",
+        project_rules.len()
+    );
+
     let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
         .into_iter()
         .map(|d| (d.key.clone(), d))
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
+
+    let canister_rules = get_redirect_rules(canister)?;
+    println!(
+        "canister currently has {} redirect rule(s)",
+        canister_rules.len()
+    );
 
     // Phase 1: compute metadata only — no batch created yet.
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
@@ -117,6 +146,8 @@ pub fn sync<C: CanisterCall>(
         &project_assets,
         &canister_assets,
         &canister_asset_properties,
+        &project_rules,
+        &canister_rules,
     )
     .is_empty()
     {
@@ -145,6 +176,8 @@ pub fn sync<C: CanisterCall>(
         &project_assets,
         &canister_assets,
         &canister_asset_properties,
+        &project_rules,
+        &canister_rules,
     );
     println!("committing {} operation(s)", operations.len());
 
@@ -293,6 +326,8 @@ fn build_operations(
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
     canister_asset_properties: &HashMap<String, AssetProperties>,
+    project_rules: &[RedirectRule],
+    canister_rules: &[RedirectRule],
 ) -> Vec<BatchOperationKind> {
     let mut ops = Vec::new();
     let mut canister_assets = canister_assets.clone();
@@ -328,7 +363,6 @@ fn build_operations(
                     .config
                     .combined_headers()
                     .map(|h| h.into_iter().collect()),
-                enable_aliasing: pa.source.config.enable_aliasing,
                 allow_raw_access: pa.source.config.allow_raw_access,
             }));
         }
@@ -377,14 +411,40 @@ fn build_operations(
         canister_asset_properties,
     );
 
+    // 6. Replace-all the canister's redirect rules when they differ from the
+    //    parsed `_redirects`. Comparison is order-sensitive — rules are
+    //    matched in declaration order at request time, so reordering is a
+    //    semantic change.
+    if project_rules != canister_rules {
+        ops.push(BatchOperationKind::SetRedirectRules(
+            SetRedirectRulesArguments {
+                rules: project_rules.to_vec(),
+            },
+        ));
+    }
+
     ops
 }
 
+/// Reads `_redirects` from the project's input directory, if present. A
+/// missing file is treated as "no rules"; parse errors carry the file's
+/// path and 1-based line number so users can fix issues without a canister
+/// round-trip.
+fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
+    let path = Path::new(dir).join(REDIRECTS_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    redirects::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 // Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`: for each
-// asset that already exists on the canister, compare `max_age`, `headers`,
-// `allow_raw_access`, and `is_aliased` against the project config and push a
-// `SetAssetProperties` op only when at least one field differs. Newly-created
-// assets already get their properties from `CreateAssetArguments`.
+// asset that already exists on the canister, compare `max_age`, `headers`, and
+// `allow_raw_access` against the project config and push a `SetAssetProperties`
+// op only when at least one field differs. Newly-created assets already get
+// their properties from `CreateAssetArguments`.
 //
 // `canister_assets` is the post-deletion view: keys removed in step 1 (missing
 // from the project, or content_type drift forcing delete-then-create) are
@@ -425,24 +485,16 @@ fn update_properties(
         });
         let headers = (project_headers != canister_headers).then_some(project_headers);
 
-        let is_aliased =
-            (config.enable_aliasing != canister_props.is_aliased).then_some(config.enable_aliasing);
-
         let allow_raw_access = (config.allow_raw_access != canister_props.allow_raw_access)
             .then_some(config.allow_raw_access);
 
-        if max_age.is_some()
-            || headers.is_some()
-            || is_aliased.is_some()
-            || allow_raw_access.is_some()
-        {
+        if max_age.is_some() || headers.is_some() || allow_raw_access.is_some() {
             ops.push(BatchOperationKind::SetAssetProperties(
                 SetAssetPropertiesArguments {
                     key: key.clone(),
                     max_age,
                     headers,
                     allow_raw_access,
-                    is_aliased,
                 },
             ));
         }
@@ -669,7 +721,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(ops.len(), 2);
@@ -688,7 +740,7 @@ mod tests {
             "text/html",
             &[("identity", Some(sha))],
         )]);
-        assert!(build_operations(&project, &canister, &HashMap::new()).is_empty());
+        assert!(build_operations(&project, &canister, &HashMap::new(), &[], &[]).is_empty());
     }
 
     #[test]
@@ -703,7 +755,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new());
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
         assert_eq!(count_op(&ops, "DeleteAsset"), 0);
@@ -717,7 +769,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new());
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(ops.len(), 1);
     }
@@ -734,7 +786,7 @@ mod tests {
             "application/octet-stream",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new());
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
@@ -755,7 +807,7 @@ mod tests {
             "text/html",
             &[("identity", Some(sha)), ("gzip", Some(vec![9, 8, 7]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new());
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 0);
         assert_eq!(ops.len(), 1);
@@ -778,7 +830,7 @@ mod tests {
             "text/html",
             &[("identity", Some(identity_sha))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new());
+        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 0);
@@ -795,9 +847,185 @@ mod tests {
                 &[("identity", Some(vec![2]))],
             ),
         ]);
-        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new());
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 2);
         assert_eq!(ops.len(), 2);
+    }
+
+    // ── redirect-rule diff ──────────────────────────────────────────────────
+
+    fn mk_rule(from: crate::canister::RulePattern, to: &str, status: u16) -> RedirectRule {
+        RedirectRule {
+            from,
+            to: to.to_string(),
+            status,
+            headers: None,
+        }
+    }
+
+    fn set_rules_op(ops: &[BatchOperationKind]) -> Option<&[RedirectRule]> {
+        ops.iter().find_map(|op| match op {
+            BatchOperationKind::SetRedirectRules(args) => Some(args.rules.as_slice()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn rule_only_edit_emits_set_redirect_rules() {
+        // No asset changes, but the project has a new rule the canister
+        // doesn't — sync must emit the rules op.
+        let sha = vec![1u8, 2, 3];
+        let project = HashMap::from([mk_project_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", sha.clone(), true)],
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(sha))],
+        )]);
+        let project_rules = vec![mk_rule(
+            crate::canister::RulePattern::Exact("/old".into()),
+            "/new",
+            301,
+        )];
+        let ops = build_operations(&project, &canister, &HashMap::new(), &project_rules, &[]);
+        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
+        assert_eq!(rules, project_rules.as_slice());
+        // No asset-side ops should have been emitted.
+        assert_eq!(count_op(&ops, "CreateAsset"), 0);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 0);
+        assert_eq!(count_op(&ops, "DeleteAsset"), 0);
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn redirects_file_removed_emits_empty_vec_op() {
+        // Canister has rules, project no longer does — sync emits an
+        // explicit empty-vec op so the canister clears its ruleset.
+        let canister_rules = vec![mk_rule(
+            crate::canister::RulePattern::Exact("/old".into()),
+            "/new",
+            301,
+        )];
+        let ops = build_operations(
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &canister_rules,
+        );
+        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
+        assert!(rules.is_empty(), "expected empty-vec replace-all op");
+    }
+
+    #[test]
+    fn unchanged_rules_emit_no_op() {
+        // Same rules on both sides — no SetRedirectRules op emitted.
+        let rules = vec![mk_rule(
+            crate::canister::RulePattern::Subtree("/blog/".into()),
+            "/blog/index.html",
+            200,
+        )];
+        let ops = build_operations(
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &rules,
+            &rules,
+        );
+        assert!(
+            set_rules_op(&ops).is_none(),
+            "no SetRedirectRules op expected when rules match"
+        );
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn reordered_rules_emit_op() {
+        // Order matters semantically — first matching rule wins at request
+        // time. A swap is a real change even with identical entries.
+        let a = mk_rule(crate::canister::RulePattern::Exact("/a".into()), "/x", 301);
+        let b = mk_rule(crate::canister::RulePattern::Exact("/b".into()), "/y", 301);
+        let ops = build_operations(
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &[a.clone(), b.clone()],
+            &[b, a],
+        );
+        assert!(
+            set_rules_op(&ops).is_some(),
+            "rule reorder must emit a replace-all op"
+        );
+    }
+
+    #[test]
+    fn sync_short_circuits_when_redirects_file_only_matches_canister() {
+        // Drive sync() end-to-end with a _redirects file that matches what
+        // the canister already has. The "nothing to commit" short-circuit
+        // must trigger, with no create_batch / commit_batch calls.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
+
+        let mock = SyncMock::new();
+        mock.push_ok("api_version", 2u16);
+        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok(
+            "get_redirect_rules",
+            vec![mk_rule(
+                crate::canister::RulePattern::Exact("/old".into()),
+                "/new",
+                301,
+            )],
+        );
+
+        let result = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        );
+        // No create_batch / commit_batch programmed — if sync reached them
+        // SyncMock would panic with "no programmed response".
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+    }
+
+    // Mirrors the private `CreateBatchResponse` in canister.rs — same field
+    // name gives the same Candid encoding, so the test mock can decode it.
+    #[derive(CandidType)]
+    struct CreateBatchOk {
+        batch_id: Nat,
+    }
+
+    #[test]
+    fn sync_emits_rules_op_when_redirects_file_only_changed() {
+        // _redirects has a rule; canister has none. The asset list is also
+        // empty so no asset ops are produced — the only operation must be
+        // SetRedirectRules, exercising the early "nothing to commit" check.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
+
+        let mock = SyncMock::new();
+        mock.push_ok("api_version", 2u16);
+        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok(
+            "create_batch",
+            CreateBatchOk {
+                batch_id: Nat::from(1u32),
+            },
+        );
+        mock.push_ok("commit_batch", ());
+
+        let result = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        );
+        assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
     // prepare_asset itself skips gzip when the compressed output is not smaller
@@ -833,7 +1061,7 @@ mod tests {
             "text/plain",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert!(!ops.iter().any(|op| matches!(
@@ -854,7 +1082,6 @@ mod tests {
                 max_age: Some(86400),
             }),
             headers: Some(headers),
-            enable_aliasing: Some(true),
             allow_raw_access: Some(false),
             ..Default::default()
         };
@@ -864,7 +1091,7 @@ mod tests {
             &[("identity", vec![1, 2, 3], false)],
             config,
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
         let create_op = ops
             .iter()
             .find_map(|op| {
@@ -881,7 +1108,6 @@ mod tests {
             create_op.headers.as_ref().unwrap()["X-Frame-Options"],
             "DENY"
         );
-        assert_eq!(create_op.enable_aliasing, Some(true));
         assert_eq!(create_op.allow_raw_access, Some(false));
     }
 
@@ -922,17 +1148,15 @@ mod tests {
                 max_age: Some(60),
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
         let set = by_key["/index.html"];
         assert_eq!(set.max_age, Some(Some(3600)));
         assert_eq!(set.headers, None);
         assert_eq!(set.allow_raw_access, None);
-        assert_eq!(set.is_aliased, None);
     }
 
     #[test]
@@ -942,7 +1166,6 @@ mod tests {
             cache: Some(CacheConfig {
                 max_age: Some(3600),
             }),
-            enable_aliasing: Some(true),
             allow_raw_access: Some(true),
             ..AssetConfig::default()
         };
@@ -963,10 +1186,9 @@ mod tests {
                 max_age: Some(3600),
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: Some(true),
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         assert!(
             set_props_ops(&ops).is_empty(),
             "no SetAssetProperties op when properties match"
@@ -992,10 +1214,9 @@ mod tests {
                 headers: None,
                 // mk_project_asset uses AssetConfig::default() → allow_raw_access: Some(true).
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
         // Project has no max_age, canister has Some(60) — the op must explicitly
@@ -1036,10 +1257,9 @@ mod tests {
                 max_age: None,
                 headers: Some(canister_headers),
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         assert!(
             set_props_ops(&ops).is_empty(),
             "headers match (order-insensitive); no SetAssetProperties op expected"
@@ -1078,11 +1298,10 @@ mod tests {
                 max_age: None,
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
 
-        let ops = build_operations(&project, &canister, &canister_props);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
 
         // The asset content must not be touched (no Create/Set/Unset/Delete).
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
@@ -1135,10 +1354,9 @@ mod tests {
                 max_age: None,
                 headers: Some(canister_headers),
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         assert!(
             set_props_ops(&ops).is_empty(),
             "Set-Cookie is canister-managed and must not trigger drift",
@@ -1177,10 +1395,9 @@ mod tests {
                 max_age: Some(60),
                 headers: None,
                 allow_raw_access: Some(true),
-                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props);
+        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert!(
@@ -1198,7 +1415,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
         assert!(set_props_ops(&ops).is_empty());
     }
 
@@ -1338,6 +1555,29 @@ mod tests {
         assert!(mock.grant_calls.borrow().is_empty());
     }
 
+    #[test]
+    fn sync_rejects_zero_input_dirs() {
+        let mock = SyncMock::new();
+        let err = sync(&mock, &[], &Principal::anonymous().to_text(), None).unwrap_err();
+        assert!(
+            err.contains("expected exactly one input directory"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn sync_rejects_multiple_input_dirs() {
+        let mock = SyncMock::new();
+        let err = sync(
+            &mock,
+            &["dist-a".to_string(), "dist-b".to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("got 2"), "got: {err}");
+    }
+
     // Direct mode: canister rejects create_batch with a permission error → sync propagates it.
     #[test]
     fn sync_propagates_permission_error_from_create_batch() {
@@ -1348,6 +1588,7 @@ mod tests {
         mock.push_ok("api_version", 2u16);
         // Empty canister → build_operations will produce work → create_batch is called.
         mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_err("create_batch", "Caller does not have Commit permission");
 
         let result = sync(

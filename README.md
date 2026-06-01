@@ -29,3 +29,17 @@ A thin `icp-cli` sync plugin. Delegates all sync logic to `assets-sync`.
 ### [`assets-sync/`](assets-sync/)
 
 Platform-agnostic library implementing the asset sync logic: directory scanning, MIME detection, content encoding, canister diffing, and the `CanisterCall` trait that abstracts the transport layer.
+
+## Redirects, rewrites, and custom error pages
+
+The canister honours a Netlify-style `_redirects` file at the root of the project's input directory. (The sync plugin only accepts one source directory — see [`plugin/README.md`](plugin/README.md#scope) for why.) Each line is `<from> <to> <status>`, where `<status>` is one of `{200, 301, 302, 307, 308, 404, 410}`:
+
+```text
+/old-page        /new-page              301   # 3xx redirect (Location header)
+/external        https://example.com/   302
+/about           /about.html            200   # 200 rewrite (serve target's body)
+/blog/*          /blog/index.html       200   # subtree rewrite
+/missing         /404.html              404   # custom error page
+```
+
+The file is consumed by the plugin and lowered to certified canister-side rules — a real asset at the rule's `from` path always wins, and the canister no longer performs implicit `.html` / `index.html` aliasing. See [`plugin/README.md`](plugin/README.md#redirects) for the full reference and migration notes.
