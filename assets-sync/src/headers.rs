@@ -7,14 +7,55 @@
 //!
 //! See the "File format" section of HEADERS.md for the full reject list.
 
-use crate::canister::RulePattern;
 use http::{HeaderName, HeaderValue};
 
 pub const HEADERS_FILENAME: &str = "_headers";
 
+/// Glob pattern matched against asset keys. `*` matches any sequence of
+/// characters, including `/` and empty; every other character matches
+/// literally. No `**`, no `?`, no `:placeholder` — single greedy `*` only,
+/// per Cloudflare Pages / Netlify `_headers` precedent.
+///
+/// Compiled at parse time into literal segments separated by an implicit `*`,
+/// so the matcher is `O(parts * key)` with no per-call allocation. Plugin-side
+/// only — never sent to the canister, so the wire-format `RulePattern` used by
+/// `_redirects` stays unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderPattern {
+    /// Original pattern source, kept for Debug output and error reporting.
+    source: String,
+    /// Literal chunks of the pattern. `parts.len() == 1` means no `*` (exact
+    /// match); otherwise consecutive entries are joined by an implicit `*`.
+    parts: Vec<String>,
+}
+
+impl HeaderPattern {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn matches(&self, key: &str) -> bool {
+        if self.parts.len() == 1 {
+            return key == self.parts[0];
+        }
+        let Some(mut tail) = key.strip_prefix(self.parts[0].as_str()) else {
+            return false;
+        };
+        let middles = &self.parts[1..self.parts.len() - 1];
+        let last = &self.parts[self.parts.len() - 1];
+        for middle in middles {
+            match tail.find(middle.as_str()) {
+                Some(idx) => tail = &tail[idx + middle.len()..],
+                None => return false,
+            }
+        }
+        tail.len() >= last.len() && tail.ends_with(last.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderRule {
-    pub pattern: RulePattern,
+    pub pattern: HeaderPattern,
     /// Headers in declaration order. Multiple entries for the same name are
     /// allowed (e.g. `Set-Cookie`); resolver semantics in `sync.rs`.
     pub headers: Vec<(String, String)>,
@@ -36,7 +77,7 @@ impl std::error::Error for ParseError {}
 
 /// Open block under construction during `parse`:
 /// (line_no of the path line, pattern, headers accumulated so far).
-type OpenBlock = (usize, RulePattern, Vec<(String, String)>);
+type OpenBlock = (usize, HeaderPattern, Vec<(String, String)>);
 
 /// Resolves the per-asset header map for `key` by walking `rules` in
 /// declaration order. All matching rules contribute; same-name values across
@@ -53,7 +94,7 @@ pub fn resolve(key: &str, rules: &[HeaderRule]) -> Vec<(String, String)> {
     let mut idx_by_lower: HashMap<String, usize> = HashMap::new();
 
     for rule in rules {
-        if !pattern_matches(&rule.pattern, key) {
+        if !rule.pattern.matches(key) {
             continue;
         }
         for (name, value) in &rule.headers {
@@ -77,13 +118,6 @@ pub fn resolve(key: &str, rules: &[HeaderRule]) -> Vec<(String, String)> {
     // but preserve declaration order within the group.
     merged.sort_by_key(|(a, _)| a.to_ascii_lowercase());
     merged
-}
-
-fn pattern_matches(pattern: &RulePattern, key: &str) -> bool {
-    match pattern {
-        RulePattern::Exact(p) => p == key,
-        RulePattern::Subtree(prefix) => key.starts_with(prefix.as_str()),
-    }
 }
 
 /// Parses an entire `_headers` file into a list of [`HeaderRule`]s. Rules are
@@ -168,7 +202,7 @@ fn finalize_block((line_no, pattern, headers): OpenBlock) -> Result<HeaderRule, 
     Ok(HeaderRule { pattern, headers })
 }
 
-fn parse_pattern(token: &str) -> Result<RulePattern, String> {
+pub(crate) fn parse_pattern(token: &str) -> Result<HeaderPattern, String> {
     if !token.starts_with('/') {
         return Err(format!(
             "'{token}' must be an absolute path (start with '/')"
@@ -179,26 +213,16 @@ fn parse_pattern(token: &str) -> Result<RulePattern, String> {
             "':' placeholders in pattern ('{token}') are not supported"
         ));
     }
-    if let Some(prefix) = token.strip_suffix("/*") {
-        // Subtree. `/*` alone matches the entire site (subtree at `/`).
-        if prefix.contains('*') {
-            return Err(format!(
-                "wildcards in pattern ('{token}') are only supported as a trailing '/*'"
-            ));
-        }
-        let subtree = if prefix.is_empty() {
-            "/".to_string()
-        } else {
-            format!("{prefix}/")
-        };
-        return Ok(RulePattern::Subtree(subtree));
-    }
-    if token.contains('*') {
+    if token.contains("**") {
         return Err(format!(
-            "wildcards in pattern ('{token}') are only supported as a trailing '/*'"
+            "'**' in pattern ('{token}') is not supported — a single '*' already matches any character sequence including '/'"
         ));
     }
-    Ok(RulePattern::Exact(token.to_string()))
+    let parts: Vec<String> = token.split('*').map(String::from).collect();
+    Ok(HeaderPattern {
+        source: token.to_string(),
+        parts,
+    })
 }
 
 fn parse_header(stripped: &str) -> Result<(String, String), String> {
@@ -240,6 +264,10 @@ mod tests {
         parse(content).unwrap_err()
     }
 
+    fn pat(token: &str) -> HeaderPattern {
+        parse_pattern(token).unwrap()
+    }
+
     // ── happy paths ───────────────────────────────────────────────────────────
 
     #[test]
@@ -252,7 +280,7 @@ mod tests {
     fn single_rule_with_single_header() {
         let rules = parse("/about\n  X-Frame-Options: DENY\n").unwrap();
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].pattern, RulePattern::Exact("/about".into()));
+        assert_eq!(rules[0].pattern.source(), "/about");
         assert_eq!(
             rules[0].headers,
             vec![("X-Frame-Options".into(), "DENY".into())]
@@ -279,7 +307,7 @@ mod tests {
 ";
         let rules = parse(input).unwrap();
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].pattern, RulePattern::Exact("/api".into()));
+        assert_eq!(rules[0].pattern.source(), "/api");
         assert_eq!(
             rules[0].headers,
             vec![
@@ -305,9 +333,9 @@ mod tests {
 ";
         let rules = parse(input).unwrap();
         assert_eq!(rules.len(), 3);
-        assert_eq!(rules[0].pattern, RulePattern::Subtree("/_astro/".into()));
-        assert_eq!(rules[1].pattern, RulePattern::Subtree("/".into()));
-        assert_eq!(rules[2].pattern, RulePattern::Exact("/api".into()));
+        assert_eq!(rules[0].pattern.source(), "/_astro/*");
+        assert_eq!(rules[1].pattern.source(), "/*");
+        assert_eq!(rules[2].pattern.source(), "/api");
     }
 
     #[test]
@@ -321,9 +349,9 @@ mod tests {
 ";
         let rules = parse(input).unwrap();
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].pattern, RulePattern::Exact("/a".into()));
+        assert_eq!(rules[0].pattern.source(), "/a");
         assert_eq!(rules[0].headers, vec![("X-A".into(), "1".into())]);
-        assert_eq!(rules[1].pattern, RulePattern::Exact("/b".into()));
+        assert_eq!(rules[1].pattern.source(), "/b");
         assert_eq!(rules[1].headers, vec![("X-B".into(), "2".into())]);
     }
 
@@ -354,15 +382,50 @@ mod tests {
     }
 
     #[test]
-    fn trailing_star_lowers_to_subtree() {
+    fn trailing_star_matches_subtree() {
         let rules = parse("/blog/*\n  Cache-Control: public\n").unwrap();
-        assert_eq!(rules[0].pattern, RulePattern::Subtree("/blog/".into()));
+        assert!(rules[0].pattern.matches("/blog/post"));
+        assert!(rules[0].pattern.matches("/blog/nested/post"));
+        // Trailing-`/*` requires the slash — `/blogger` does not match.
+        assert!(!rules[0].pattern.matches("/blogger"));
     }
 
     #[test]
-    fn root_star_lowers_to_root_subtree() {
+    fn root_star_matches_everything() {
         let rules = parse("/*\n  X-Frame-Options: DENY\n").unwrap();
-        assert_eq!(rules[0].pattern, RulePattern::Subtree("/".into()));
+        assert!(rules[0].pattern.matches("/anywhere"));
+        assert!(rules[0].pattern.matches("/deep/nested/path"));
+    }
+
+    #[test]
+    fn extension_glob_matches_by_suffix() {
+        let rules = parse("/*.md\n  Cache-Control: public, max-age=300\n").unwrap();
+        assert!(rules[0].pattern.matches("/llms.md"));
+        assert!(rules[0].pattern.matches("/docs/intro.md"));
+        assert!(rules[0].pattern.matches("/a/b/c.md"));
+        assert!(!rules[0].pattern.matches("/llms.txt"));
+        assert!(!rules[0].pattern.matches("/index.html"));
+        // The `*` is greedy but the literal prefix `/` and suffix `.md`
+        // are anchored — `.md` in the middle is not a match.
+        assert!(!rules[0].pattern.matches("/a.md.html"));
+    }
+
+    #[test]
+    fn mid_path_wildcard_matches() {
+        let rules = parse("/api/*/v1\n  Cache-Control: no-store\n").unwrap();
+        assert!(rules[0].pattern.matches("/api/users/v1"));
+        assert!(rules[0].pattern.matches("/api/nested/path/v1"));
+        assert!(!rules[0].pattern.matches("/api/v1"));
+        assert!(!rules[0].pattern.matches("/api/users/v2"));
+    }
+
+    #[test]
+    fn exact_match_when_no_star() {
+        let rules = parse("/about\n  X-Frame-Options: DENY\n").unwrap();
+        assert!(rules[0].pattern.matches("/about"));
+        assert!(!rules[0].pattern.matches("/about/"));
+        assert!(!rules[0].pattern.matches("/aboutus"));
+        assert!(!rules[0].pattern.matches("/about/team"));
     }
 
     #[test]
@@ -421,9 +484,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mid_path_wildcard() {
-        let e = err("/foo/*/bar\n  X-Frame-Options: DENY\n");
-        assert!(e.message.contains("trailing '/*'"), "{}", e.message);
+    fn rejects_double_star() {
+        let e = err("/foo/**/bar\n  X-Frame-Options: DENY\n");
+        assert!(e.message.contains("'**'"), "{}", e.message);
     }
 
     #[test]
@@ -508,9 +571,9 @@ mod tests {
 
     // ── resolver ───────────────────────────────────────────────────────────────
 
-    fn rule(pattern: RulePattern, headers: &[(&str, &str)]) -> HeaderRule {
+    fn rule(pattern_src: &str, headers: &[(&str, &str)]) -> HeaderRule {
         HeaderRule {
-            pattern,
+            pattern: pat(pattern_src),
             headers: headers
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -520,19 +583,13 @@ mod tests {
 
     #[test]
     fn resolve_empty_when_no_rules_match() {
-        let rules = vec![rule(
-            RulePattern::Exact("/other".into()),
-            &[("X-Foo", "bar")],
-        )];
+        let rules = vec![rule("/other", &[("X-Foo", "bar")])];
         assert!(resolve("/about", &rules).is_empty());
     }
 
     #[test]
     fn resolve_exact_match() {
-        let rules = vec![rule(
-            RulePattern::Exact("/about".into()),
-            &[("X-Frame-Options", "DENY")],
-        )];
+        let rules = vec![rule("/about", &[("X-Frame-Options", "DENY")])];
         assert_eq!(
             resolve("/about", &rules),
             vec![("X-Frame-Options".into(), "DENY".into())]
@@ -541,10 +598,7 @@ mod tests {
 
     #[test]
     fn resolve_subtree_match() {
-        let rules = vec![rule(
-            RulePattern::Subtree("/_astro/".into()),
-            &[("Cache-Control", "immutable")],
-        )];
+        let rules = vec![rule("/_astro/*", &[("Cache-Control", "immutable")])];
         assert_eq!(
             resolve("/_astro/app.js", &rules),
             vec![("Cache-Control".into(), "immutable".into())]
@@ -552,11 +606,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_root_subtree_matches_everything() {
-        let rules = vec![rule(
-            RulePattern::Subtree("/".into()),
-            &[("X-Frame-Options", "DENY")],
-        )];
+    fn resolve_root_star_matches_everything() {
+        let rules = vec![rule("/*", &[("X-Frame-Options", "DENY")])];
         assert_eq!(
             resolve("/anywhere", &rules),
             vec![("X-Frame-Options".into(), "DENY".into())]
@@ -564,18 +615,23 @@ mod tests {
     }
 
     #[test]
+    fn resolve_extension_glob() {
+        // Tier-3 glob: `/*.md` matches any `.md` file at any depth.
+        let rules = vec![rule("/*.md", &[("Cache-Control", "public, max-age=300")])];
+        assert_eq!(
+            resolve("/docs/intro.md", &rules),
+            vec![("Cache-Control".into(), "public, max-age=300".into())]
+        );
+        assert!(resolve("/docs/intro.html", &rules).is_empty());
+    }
+
+    #[test]
     fn resolve_concatenates_same_name_across_rules() {
         // Per RFC 7230 §3.2.2 — `/* X-Robots-Tag: noindex` + `/admin/* X-Robots-Tag: nofollow`
         // on `/admin/page` yields `X-Robots-Tag: noindex, nofollow`.
         let rules = vec![
-            rule(
-                RulePattern::Subtree("/".into()),
-                &[("X-Robots-Tag", "noindex")],
-            ),
-            rule(
-                RulePattern::Subtree("/admin/".into()),
-                &[("X-Robots-Tag", "nofollow")],
-            ),
+            rule("/*", &[("X-Robots-Tag", "noindex")]),
+            rule("/admin/*", &[("X-Robots-Tag", "nofollow")]),
         ];
         assert_eq!(
             resolve("/admin/page", &rules),
@@ -585,10 +641,7 @@ mod tests {
 
     #[test]
     fn resolve_concatenation_is_case_insensitive_on_name() {
-        let rules = vec![
-            rule(RulePattern::Subtree("/".into()), &[("X-Foo", "a")]),
-            rule(RulePattern::Subtree("/".into()), &[("x-foo", "b")]),
-        ];
+        let rules = vec![rule("/*", &[("X-Foo", "a")]), rule("/*", &[("x-foo", "b")])];
         let out = resolve("/anywhere", &rules);
         assert_eq!(out.len(), 1);
         // First occurrence's casing is preserved.
@@ -600,14 +653,8 @@ mod tests {
     fn resolve_set_cookie_stays_separate() {
         // RFC 6265 §3: Set-Cookie must not be comma-folded.
         let rules = vec![
-            rule(
-                RulePattern::Subtree("/".into()),
-                &[("Set-Cookie", "session=abc")],
-            ),
-            rule(
-                RulePattern::Subtree("/admin/".into()),
-                &[("Set-Cookie", "admin=1")],
-            ),
+            rule("/*", &[("Set-Cookie", "session=abc")]),
+            rule("/admin/*", &[("Set-Cookie", "admin=1")]),
         ];
         let out = resolve("/admin/page", &rules);
         let cookies: Vec<&(String, String)> = out
@@ -622,7 +669,7 @@ mod tests {
     #[test]
     fn resolve_set_cookie_within_one_rule_stays_separate() {
         let rules = vec![rule(
-            RulePattern::Exact("/api".into()),
+            "/api",
             &[("Set-Cookie", "a=1"), ("Set-Cookie", "b=2")],
         )];
         let out = resolve("/api", &rules);
@@ -638,7 +685,7 @@ mod tests {
     #[test]
     fn resolve_output_is_stable_sorted_by_lowercased_name() {
         let rules = vec![rule(
-            RulePattern::Subtree("/".into()),
+            "/*",
             &[
                 ("Z-Header", "z"),
                 ("A-Header", "a"),
@@ -673,8 +720,8 @@ mod tests {
     fn resolve_walks_rules_in_declaration_order() {
         // First match contributes first; concatenation order is rule order.
         let rules = vec![
-            rule(RulePattern::Subtree("/admin/".into()), &[("X-Foo", "B")]),
-            rule(RulePattern::Subtree("/".into()), &[("X-Foo", "A")]),
+            rule("/admin/*", &[("X-Foo", "B")]),
+            rule("/*", &[("X-Foo", "A")]),
         ];
         let out = resolve("/admin/page", &rules);
         // First matching rule's value comes first in the concatenation.
@@ -683,10 +730,7 @@ mod tests {
 
     #[test]
     fn resolve_no_matching_rules_returns_empty() {
-        let rules = vec![rule(
-            RulePattern::Exact("/specific".into()),
-            &[("X-Foo", "bar")],
-        )];
+        let rules = vec![rule("/specific", &[("X-Foo", "bar")])];
         assert!(resolve("/different", &rules).is_empty());
         assert!(resolve("/specific/subpath", &rules).is_empty());
     }
