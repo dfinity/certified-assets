@@ -2,6 +2,7 @@ use std::{env, path::Path, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=../canister/src");
+    println!("cargo:rerun-if-changed=../ic-certified-assets/src");
     println!("cargo:rerun-if-changed=../plugin/src");
     println!("cargo:rerun-if-changed=../assets-sync/src");
 
