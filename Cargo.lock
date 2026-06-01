@@ -378,9 +378,9 @@ dependencies = [
 
 [[package]]
 name = "candid_parser"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50e7b872ea5d7b8b445b7b15134ccb7d71e53882c4b5db62e706f9f8a8637c50"
+checksum = "470a4cf0c110e217e54ab3d21c4a9c290736c4a70ab6263d65155522d4b93fb6"
 dependencies = [
  "anyhow",
  "candid",
@@ -403,6 +403,7 @@ name = "canister"
 version = "0.0.0"
 dependencies = [
  "candid",
+ "candid_parser",
  "ic-cdk",
  "ic-certified-assets",
  "serde",
@@ -996,9 +997,9 @@ checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
 
 [[package]]
 name = "handlebars"
-version = "6.4.0"
+version = "6.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b3f9296c208515b87bd915a2f5d1163d4b3f863ba83337d7713cf478055948e"
+checksum = "d43ccdfe15a81ab0a8af639e90254227c9a46afd9c5f5b6ec7efaa345c4b0f00"
 dependencies = [
  "derive_builder",
  "log",
@@ -1269,7 +1270,6 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "candid",
- "candid_parser",
  "hex",
  "ic-cdk",
  "ic-certification 3.2.0",
@@ -1868,9 +1868,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.16"
+version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
+checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
 dependencies = [
  "libc",
 ]

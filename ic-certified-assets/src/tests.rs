@@ -1,14 +1,14 @@
-use crate::asset_certification::types::http::{
+use crate::batch::{ComputationStatus, BATCH_EXPIRY_NANOS};
+use crate::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
-use crate::state_machine::{ComputationStatus, StableStateV2, State, BATCH_EXPIRY_NANOS};
-use crate::system_context::canister_env::CanisterEnv;
-use crate::system_context::SystemContext;
+use crate::stable::StableState;
+use crate::state::State;
+use crate::system_context::{CanisterEnv, SystemContext};
 use crate::types::{
-    AssetProperties, BatchId, BatchOperation, CommitBatchArguments, CommitProposedBatchArguments,
-    ComputeEvidenceArguments, CreateAssetArguments, CreateChunkArg, DeleteAssetArguments,
-    DeleteBatchArguments, GetArg, GetChunkArg, ListRequest, SetAssetContentArguments,
-    SetAssetPropertiesArguments,
+    AssetProperties, BatchId, BatchOperation, CommitBatchArguments, CreateAssetArguments,
+    DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg, ListRequest,
+    SetAssetContentArguments, SetAssetPropertiesArguments,
 };
 use crate::url::{url_decode, url_encode, UrlDecodeError};
 use crate::CreateChunksArg;
@@ -77,7 +77,7 @@ pub fn verify_response(
     let mut response = response.clone();
     let current_time = get_current_timestamp();
     let canister_id = create_canister_id("rdmx6-jaaaa-aaaaa-aaadq-cai");
-    let min_requested_verification_version = request.get_certificate_version();
+    let min_requested_verification_version: u16 = 2;
 
     // inject certificate into IC-Certificate header with 'certificate=::'
     let data = CertificateBuilder::new(
@@ -208,7 +208,7 @@ impl RequestBuilder {
             method: "GET".to_string(),
             headers: vec![],
             body: ByteBuf::new(),
-            certificate_version: None,
+            certificate_version: Some(2),
         }
     }
 
@@ -263,50 +263,6 @@ fn create_assets(
     batch_id
 }
 
-fn create_assets_by_proposal(
-    state: &mut State,
-    system_context: &SystemContext,
-    assets: Vec<AssetBuilder>,
-) -> BatchId {
-    let batch_id = state.create_batch(system_context).unwrap();
-
-    let operations = assemble_create_assets_and_set_contents_operations(
-        state,
-        system_context,
-        assets,
-        &batch_id,
-    );
-
-    state
-        .propose_commit_batch(CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations,
-        })
-        .unwrap();
-
-    let evidence = run_computation_until_completion(|_progress| {
-        state.compute_evidence(&ComputeEvidenceArguments {
-            batch_id: batch_id.clone(),
-            max_iterations: Some(100),
-        })
-    })
-    .unwrap();
-
-    run_computation_until_completion(|progress| {
-        state.commit_proposed_batch(
-            &CommitProposedBatchArguments {
-                batch_id: batch_id.clone(),
-                evidence: evidence.clone(),
-            },
-            progress,
-            system_context,
-        )
-    })
-    .unwrap();
-
-    batch_id
-}
-
 fn assemble_create_assets_and_set_contents_operations(
     state: &mut State,
     system_context: &SystemContext,
@@ -331,20 +287,15 @@ fn assemble_create_assets_and_set_contents_operations(
         }));
 
         for (enc, chunks) in asset.encodings {
-            let mut chunk_ids = vec![];
-            for chunk in chunks {
-                chunk_ids.push(
-                    state
-                        .create_chunk(
-                            CreateChunkArg {
-                                batch_id: batch_id.clone(),
-                                content: chunk,
-                            },
-                            system_context,
-                        )
-                        .unwrap(),
-                );
-            }
+            let chunk_ids = state
+                .create_chunks(
+                    CreateChunksArg {
+                        batch_id: batch_id.clone(),
+                        content: chunks,
+                    },
+                    system_context,
+                )
+                .unwrap();
 
             operations.push(BatchOperation::SetAssetContent({
                 SetAssetContentArguments {
@@ -358,12 +309,6 @@ fn assemble_create_assets_and_set_contents_operations(
         }
     }
     operations
-}
-
-fn delete_batch(state: &mut State, batch_id: BatchId) {
-    state
-        .delete_batch(DeleteBatchArguments { batch_id })
-        .unwrap();
 }
 
 fn lookup_header<'a>(response: &'a HttpResponse, header: &str) -> Option<&'a str> {
@@ -413,10 +358,10 @@ fn can_create_assets_using_batch_api() {
 
     // Try to update a completed batch.
     let error_msg = state
-        .create_chunk(
-            CreateChunkArg {
+        .create_chunks(
+            CreateChunksArg {
                 batch_id,
-                content: ByteBuf::new(),
+                content: vec![ByteBuf::new()],
             },
             &system_context,
         )
@@ -430,85 +375,7 @@ fn can_create_assets_using_batch_api() {
 }
 
 #[test]
-fn serve_correct_encoding_v1() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const IDENTITY_BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    const GZIP_BODY: &[u8] = b"this is 'gzipped' content";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![IDENTITY_BODY])
-                .with_encoding("gzip", vec![GZIP_BODY]),
-            AssetBuilder::new("/only-identity.html", "text/html")
-                .with_encoding("identity", vec![IDENTITY_BODY]),
-            AssetBuilder::new("/no-encoding.html", "text/html"),
-        ],
-    );
-
-    // Most important encoding is returned with certificate
-    let identity_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "identity")
-            .build(),
-    );
-    assert_eq!(identity_response.status_code, 200);
-    assert_eq!(identity_response.body.as_ref(), IDENTITY_BODY);
-    assert!(lookup_header(&identity_response, "IC-Certificate").is_some());
-
-    // If only uncertified encoding is accepted, return it without any certificate
-    let gzip_response = state.http_request(
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "gzip")
-            .build(),
-        &[],
-        unused_callback(),
-    );
-    assert_eq!(gzip_response.status_code, 200);
-    assert_eq!(gzip_response.body.as_ref(), GZIP_BODY);
-    assert!(lookup_header(&gzip_response, "IC-Certificate").is_some());
-
-    // If no encoding matches, return most important encoding with certificate
-    let unknown_encoding_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "unknown")
-            .build(),
-    );
-    assert_eq!(unknown_encoding_response.status_code, 200);
-    assert_eq!(unknown_encoding_response.body.as_ref(), IDENTITY_BODY);
-    assert!(lookup_header(&unknown_encoding_response, "IC-Certificate").is_some());
-
-    let unknown_encoding_response_2 = certified_http_request(
-        &state,
-        RequestBuilder::get("/only-identity.html")
-            .with_header("Accept-Encoding", "gzip")
-            .build(),
-    );
-    assert_eq!(unknown_encoding_response_2.status_code, 200);
-    assert_eq!(unknown_encoding_response_2.body.as_ref(), IDENTITY_BODY);
-    assert!(lookup_header(&unknown_encoding_response_2, "IC-Certificate").is_some());
-
-    // Serve 404 if the requested asset has no encoding uploaded at all
-    // certification v1 cannot certify 404
-    let no_encoding_response = state.http_request(
-        RequestBuilder::get("/no-encoding.html")
-            .with_header("Accept-Encoding", "identity")
-            .build(),
-        &[],
-        unused_callback(),
-    );
-    assert_eq!(no_encoding_response.status_code, 404);
-    assert_eq!(no_encoding_response.body.as_ref(), "not found".as_bytes());
-}
-
-#[test]
-fn serve_correct_encoding_v2() {
+fn serve_correct_encoding() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -561,7 +428,7 @@ fn serve_correct_encoding_v2() {
 }
 
 #[test]
-fn serve_fallback_v2() {
+fn serve_fallback() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -633,82 +500,6 @@ fn serve_fallback_v2() {
 }
 
 #[test]
-fn serve_fallback_v1() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![INDEX_BODY])],
-    );
-
-    let identity_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/index.html")
-            .with_header("Accept-Encoding", "identity")
-            .build(),
-    );
-    assert_eq!(identity_response.status_code, 200);
-    assert_eq!(identity_response.body.as_ref(), INDEX_BODY);
-    assert!(lookup_header(&identity_response, "IC-Certificate").is_some());
-
-    let fallback_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/nonexistent")
-            .with_header("Accept-Encoding", "identity")
-            .build(),
-    );
-    assert_eq!(fallback_response.status_code, 200);
-    assert_eq!(fallback_response.body.as_ref(), INDEX_BODY);
-    assert!(lookup_header(&fallback_response, "IC-Certificate").is_some());
-}
-
-#[test]
-fn can_create_assets_using_batch_proposal_api() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    let batch_id = create_assets_by_proposal(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/contents.html", "text/html").with_encoding("identity", vec![BODY])],
-    );
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), BODY);
-
-    // Try to update a completed batch.
-    let error_msg = state
-        .create_chunk(
-            CreateChunkArg {
-                batch_id,
-                content: ByteBuf::new(),
-            },
-            &system_context,
-        )
-        .unwrap_err();
-
-    let expected = "batch not found";
-    assert!(
-        error_msg.contains(expected),
-        "expected '{expected}' error, got: {error_msg}"
-    );
-}
-
-#[test]
 fn batches_are_dropped_after_timeout() {
     let mut state = State::default();
     let mut system_context = mock_system_context();
@@ -718,10 +509,10 @@ fn batches_are_dropped_after_timeout() {
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
 
     let _chunk_1 = state
-        .create_chunk(
-            CreateChunkArg {
+        .create_chunks(
+            CreateChunksArg {
                 batch_id: batch_1.clone(),
-                content: ByteBuf::from(BODY.to_vec()),
+                content: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -731,180 +522,16 @@ fn batches_are_dropped_after_timeout() {
         system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS + 1;
     let _batch_2 = state.create_batch(&system_context);
 
-    match state.create_chunk(
-        CreateChunkArg {
-            batch_id: batch_1,
-            content: ByteBuf::from(BODY.to_vec()),
-        },
-        &system_context,
-    ) {
-        Err(err) if err.contains("batch not found") => (),
-        other => panic!("expected 'batch not found' error, got: {other:?}"),
-    }
-}
-
-#[test]
-fn can_propose_commit_batch_exactly_once() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    let batch_1 = state.create_batch(&system_context).unwrap();
-
-    let args = CommitBatchArguments {
-        batch_id: batch_1.clone(),
-        operations: vec![],
-    };
-    assert_eq!(Ok(()), state.propose_commit_batch(args.clone()));
-    match state.propose_commit_batch(args) {
-        Err(err)
-            if err == format!("batch {batch_1} already has proposed CommitBatchArguments",) => {}
-        other => panic!("expected batch already proposed error, got: {other:?}"),
-    };
-}
-
-#[test]
-fn cannot_create_chunk_in_proposed_batch_() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    let batch_1 = state.create_batch(&system_context).unwrap();
-
-    let args = CommitBatchArguments {
-        batch_id: batch_1.clone(),
-        operations: vec![],
-    };
-    assert_eq!(Ok(()), state.propose_commit_batch(args));
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    match state.create_chunk(
-        CreateChunkArg {
-            batch_id: batch_1.clone(),
-            content: ByteBuf::from(BODY.to_vec()),
-        },
-        &system_context,
-    ) {
-        Err(err) if err == format!("batch {batch_1} has been proposed") => {}
-        other => panic!("expected batch already proposed error, got: {other:?}"),
-    }
     match state.create_chunks(
         CreateChunksArg {
-            batch_id: batch_1.clone(),
+            batch_id: batch_1,
             content: vec![ByteBuf::from(BODY.to_vec())],
         },
         &system_context,
     ) {
-        Err(err) if err == format!("batch {batch_1} has been proposed") => {}
-        other => panic!("expected batch already proposed error, got: {other:?}"),
-    }
-}
-
-#[test]
-fn batches_with_proposed_commit_args_do_not_expire() {
-    let mut state = State::default();
-    let mut system_context = mock_system_context();
-
-    let batch_1 = state.create_batch(&system_context).unwrap();
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    let _chunk_1 = state
-        .create_chunk(
-            CreateChunkArg {
-                batch_id: batch_1.clone(),
-                content: ByteBuf::from(BODY.to_vec()),
-            },
-            &system_context,
-        )
-        .unwrap();
-
-    let args = CommitBatchArguments {
-        batch_id: batch_1.clone(),
-        operations: vec![],
-    };
-    assert_eq!(Ok(()), state.propose_commit_batch(args));
-
-    system_context.current_timestamp_ns =
-        system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS + 1;
-    let _batch_2 = state.create_batch(&system_context);
-
-    match state.create_chunk(
-        CreateChunkArg {
-            batch_id: batch_1,
-            content: ByteBuf::from(BODY.to_vec()),
-        },
-        &system_context,
-    ) {
         Err(err) if err.contains("batch not found") => (),
         other => panic!("expected 'batch not found' error, got: {other:?}"),
     }
-}
-
-#[test]
-fn batches_with_evidence_do_not_expire() {
-    let mut state = State::default();
-    let mut system_context = mock_system_context();
-
-    let batch_1 = state.create_batch(&system_context).unwrap();
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    let _chunk_1 = state
-        .create_chunk(
-            CreateChunkArg {
-                batch_id: batch_1.clone(),
-                content: ByteBuf::from(BODY.to_vec()),
-            },
-            &system_context,
-        )
-        .unwrap();
-
-    let args = CommitBatchArguments {
-        batch_id: batch_1.clone(),
-        operations: vec![],
-    };
-    assert_eq!(Ok(()), state.propose_commit_batch(args));
-    assert!(run_computation_until_completion(|_progress| {
-        state.compute_evidence(&ComputeEvidenceArguments {
-            batch_id: batch_1.clone(),
-            max_iterations: Some(3),
-        })
-    })
-    .is_ok());
-
-    system_context.current_timestamp_ns =
-        system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS + 1;
-    let _batch_2 = state.create_batch(&system_context);
-
-    match state.create_chunk(
-        CreateChunkArg {
-            batch_id: batch_1.clone(),
-            content: ByteBuf::from(BODY.to_vec()),
-        },
-        &system_context,
-    ) {
-        Err(err) if err == format!("batch {batch_1} has been proposed") => {}
-        other => panic!("expected batch already proposed error, got: {other:?}"),
-    }
-}
-
-#[test]
-fn can_delete_proposed_batch() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    let batch_1 = state.create_batch(&system_context).unwrap();
-
-    let args = CommitBatchArguments {
-        batch_id: batch_1.clone(),
-        operations: vec![],
-    };
-    assert_eq!(Ok(()), state.propose_commit_batch(args));
-    let delete_args = DeleteBatchArguments { batch_id: batch_1 };
-    assert_eq!(Ok(()), state.delete_batch(delete_args.clone()));
-    assert_eq!(
-        Err("batch not found".to_string()),
-        state.delete_batch(delete_args)
-    );
 }
 
 #[test]
@@ -916,10 +543,10 @@ fn can_delete_batch_with_chunks() {
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     let _chunk_1 = state
-        .create_chunk(
-            CreateChunkArg {
+        .create_chunks(
+            CreateChunksArg {
                 batch_id: batch_1.clone(),
-                content: ByteBuf::from(BODY.to_vec()),
+                content: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -977,7 +604,7 @@ fn preserves_state_on_stable_roundtrip() {
             .with_encoding("identity", vec![INDEX_BODY])],
     );
 
-    let stable_state: StableStateV2 = state.into();
+    let stable_state: StableState = state.into();
     let state: State = stable_state.into();
 
     let response = certified_http_request(
@@ -2020,7 +1647,7 @@ fn alias_behavior_persists_through_upgrade() {
         SUBDIR_INDEX_BODY
     );
 
-    let stable_state: StableStateV2 = state.into();
+    let stable_state: StableState = state.into();
     let state: State = stable_state.into();
 
     let alias_stays_turned_off = state.http_request(
@@ -2247,7 +1874,7 @@ mod allow_raw_access {
 #[cfg(test)]
 mod certificate_expression {
     use super::*;
-    use crate::asset_certification::types::http::build_ic_certificate_expression_from_headers_and_encoding;
+    use crate::certification::build_ic_certificate_expression_from_headers_and_encoding;
     use ic_representation_independent_hash::Value;
 
     #[test]
@@ -2286,23 +1913,10 @@ mod certificate_expression {
                 .with_header("Access-Control-Allow-Origin", "*")],
         );
 
-        let v1_response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .build(),
-        );
-
-        assert!(
-            lookup_header(&v1_response, "ic-certificateexpression").is_none(),
-            "superfluous ic-certificateexpression header detected in cert v1"
-        );
-
         let response = certified_http_request(
             &state,
             RequestBuilder::get("/contents.html")
                 .with_header("Accept-Encoding", "gzip,identity")
-                .with_certificate_version(2)
                 .build(),
         );
 
@@ -2383,7 +1997,7 @@ mod certificate_expression {
 }
 
 #[cfg(test)]
-mod certification_v2 {
+mod certification {
     use super::*;
 
     #[test]
@@ -2466,1640 +2080,12 @@ mod certification_v2 {
             &state,
             RequestBuilder::get("/contents.html")
                 .with_header("Accept-Encoding", "gzip,identity")
-                .with_certificate_version(1)
                 .build(),
         );
         assert_eq!(
             lookup_header(&response, "etag").expect("ic-certificate header missing"),
             "my-etag"
         );
-
-        let response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .with_certificate_version(2)
-                .build(),
-        );
-        assert_eq!(
-            lookup_header(&response, "etag").expect("ic-certificate header missing"),
-            "my-etag"
-        );
-    }
-}
-
-#[cfg(test)]
-mod evidence_computation {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::types::BatchOperation::SetAssetContent;
-    use crate::types::{ClearArguments, ComputeEvidenceArguments, UnsetAssetContentArguments};
-
-    #[test]
-    fn evidence_with_set_single_chunk_asset_content() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-        let chunk_1 = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_1.clone(),
-                    content: ByteBuf::from(BODY.to_vec()),
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        let create_asset = CreateAssetArguments {
-            key: "/a/b/c".to_string(),
-            content_type: "text/plain".to_string(),
-            max_age: None,
-            headers: None,
-            enable_aliasing: None,
-            allow_raw_access: None,
-        };
-        let set_asset_content = SetAssetContentArguments {
-            key: "/a/b/c".to_string(),
-            content_encoding: "identity".to_string(),
-            chunk_ids: vec![chunk_1],
-            last_chunk: None,
-            sha256: None,
-        };
-        let cba = CommitBatchArguments {
-            batch_id: batch_1.clone(),
-            operations: vec![
-                BatchOperation::CreateAsset(create_asset),
-                BatchOperation::SetAssetContent(set_asset_content),
-            ],
-        };
-        assert!(state.propose_commit_batch(cba).is_ok());
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .is_ok());
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(1),
-            })
-        })
-        .is_ok());
-    }
-
-    #[test]
-    fn evidence_with_set_multiple_chunk_asset_content() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        const CHUNK_1_CONTENT: &[u8] = b"<!DOCTYPE html><html></html>";
-        const CHUNK_2_CONTENT: &[u8] = b"there is more content here";
-        let chunk_1 = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_1.clone(),
-                    content: ByteBuf::from(CHUNK_1_CONTENT.to_vec()),
-                },
-                &system_context,
-            )
-            .unwrap();
-        let chunk_2 = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_1.clone(),
-                    content: ByteBuf::from(CHUNK_2_CONTENT.to_vec()),
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        let create_asset = CreateAssetArguments {
-            key: "/a/b/c".to_string(),
-            content_type: "text/plain".to_string(),
-            max_age: None,
-            headers: None,
-            enable_aliasing: None,
-            allow_raw_access: None,
-        };
-        let set_asset_content = SetAssetContentArguments {
-            key: "/a/b/c".to_string(),
-            content_encoding: "identity".to_string(),
-            chunk_ids: vec![chunk_1, chunk_2],
-            last_chunk: None,
-            sha256: None,
-        };
-        let cba = CommitBatchArguments {
-            batch_id: batch_1.clone(),
-            operations: vec![
-                BatchOperation::CreateAsset(create_asset),
-                BatchOperation::SetAssetContent(set_asset_content),
-            ],
-        };
-        assert!(state.propose_commit_batch(cba).is_ok());
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(4),
-            })
-        })
-        .is_ok());
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(1),
-            })
-        })
-        .is_ok());
-    }
-
-    #[test]
-    fn evidence_with_create_asset() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_id = state.create_batch(&system_context).unwrap();
-        let create_asset = CreateAssetArguments {
-            key: "/a/b/c".to_string(),
-            content_type: "text/plain".to_string(),
-            max_age: None,
-            headers: None,
-            enable_aliasing: None,
-            allow_raw_access: None,
-        };
-        let cba = CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations: vec![BatchOperation::CreateAsset(create_asset)],
-        };
-
-        assert!(state.propose_commit_batch(cba).is_ok());
-
-        let compute_args = ComputeEvidenceArguments {
-            batch_id,
-            max_iterations: Some(1),
-        };
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&compute_args)
-        })
-        .is_ok());
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&compute_args)
-        })
-        .is_ok());
-    }
-
-    #[test]
-    fn evidence_with_set_empty_asset_content() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_id = state.create_batch(&system_context).unwrap();
-        let create_asset = CreateAssetArguments {
-            key: "/a/b/c".to_string(),
-            content_type: "text/plain".to_string(),
-            max_age: None,
-            headers: None,
-            enable_aliasing: None,
-            allow_raw_access: None,
-        };
-        let set_asset_content = SetAssetContentArguments {
-            key: "/a/b/c".to_string(),
-            content_encoding: "identity".to_string(),
-            chunk_ids: vec![],
-            last_chunk: None,
-            sha256: None,
-        };
-        let cba = CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations: vec![
-                BatchOperation::CreateAsset(create_asset),
-                BatchOperation::SetAssetContent(set_asset_content),
-            ],
-        };
-        assert!(state.propose_commit_batch(cba).is_ok());
-
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_id.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .is_ok());
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_id.clone(),
-                max_iterations: Some(1),
-            })
-        })
-        .is_ok());
-    }
-
-    #[test]
-    fn evidence_with_no_operations() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_id = state.create_batch(&system_context).unwrap();
-        let cba = CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations: vec![],
-        };
-        assert!(state.propose_commit_batch(cba).is_ok());
-
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_id.clone(),
-                max_iterations: Some(1),
-            })
-        })
-        .is_ok());
-    }
-
-    #[test]
-    fn create_asset_same_fields_same_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        {
-            let batch_1 = state.create_batch(&system_context).unwrap();
-            assert!(state
-                .propose_commit_batch(CommitBatchArguments {
-                    batch_id: batch_1.clone(),
-                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                        key: "/a/b/c".to_string(),
-                        content_type: "".to_string(),
-                        max_age: None,
-                        headers: None,
-                        enable_aliasing: None,
-                        allow_raw_access: None,
-                    }),],
-                })
-                .is_ok());
-            let evidence_1 = run_computation_until_completion(|_progress| {
-                state.compute_evidence(&ComputeEvidenceArguments {
-                    batch_id: batch_1.clone(),
-                    max_iterations: Some(3),
-                })
-            })
-            .unwrap();
-            delete_batch(&mut state, batch_1);
-
-            let batch_2 = state.create_batch(&system_context).unwrap();
-            assert!(state
-                .propose_commit_batch(CommitBatchArguments {
-                    batch_id: batch_2.clone(),
-                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                        key: "/a/b/c".to_string(),
-                        content_type: "".to_string(),
-                        max_age: None,
-                        headers: None,
-                        enable_aliasing: None,
-                        allow_raw_access: None,
-                    }),],
-                })
-                .is_ok());
-            let evidence_2 = run_computation_until_completion(|_progress| {
-                state.compute_evidence(&ComputeEvidenceArguments {
-                    batch_id: batch_2.clone(),
-                    max_iterations: Some(3),
-                })
-            })
-            .unwrap();
-            delete_batch(&mut state, batch_2);
-
-            assert_eq!(evidence_1, evidence_2);
-        }
-
-        {
-            let batch_1 = state.create_batch(&system_context).unwrap();
-            assert!(state
-                .propose_commit_batch(CommitBatchArguments {
-                    batch_id: batch_1.clone(),
-                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                        key: "/d".to_string(),
-                        content_type: "text/plain".to_string(),
-                        max_age: Some(98),
-                        headers: Some(BTreeMap::from([
-                            ("H1".to_string(), "V1".to_string()),
-                            ("H2".to_string(), "V2".to_string())
-                        ])),
-                        enable_aliasing: Some(true),
-                        allow_raw_access: Some(false),
-                    }),],
-                })
-                .is_ok());
-            let evidence_1 = run_computation_until_completion(|_progress| {
-                state.compute_evidence(&ComputeEvidenceArguments {
-                    batch_id: batch_1.clone(),
-                    max_iterations: Some(3),
-                })
-            })
-            .unwrap();
-            delete_batch(&mut state, batch_1);
-
-            let batch_2 = state.create_batch(&system_context).unwrap();
-            assert!(state
-                .propose_commit_batch(CommitBatchArguments {
-                    batch_id: batch_2.clone(),
-                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                        key: "/d".to_string(),
-                        content_type: "text/plain".to_string(),
-                        max_age: Some(98),
-                        headers: Some(BTreeMap::from([
-                            ("H1".to_string(), "V1".to_string()),
-                            ("H2".to_string(), "V2".to_string())
-                        ])),
-                        enable_aliasing: Some(true),
-                        allow_raw_access: Some(false),
-                    }),],
-                })
-                .is_ok());
-            let evidence_2 = run_computation_until_completion(|_progress| {
-                state.compute_evidence(&ComputeEvidenceArguments {
-                    batch_id: batch_2.clone(),
-                    max_iterations: Some(3),
-                })
-            })
-            .unwrap();
-            assert_eq!(evidence_1, evidence_2);
-        }
-    }
-
-    #[test]
-    fn create_asset_arguments_key_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/a/b/c".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/d/e/f".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn create_asset_arguments_content_type_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "text/plain".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "application/octet-stream".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn create_asset_arguments_max_age_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: Some(32),
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_2);
-
-        let batch_3 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_3.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: Some(987),
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_3 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_3.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-        assert_ne!(evidence_1, evidence_3);
-        assert_ne!(evidence_2, evidence_3);
-    }
-
-    #[test]
-    fn create_asset_arguments_headers_affect_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: Some(BTreeMap::from([("H1".to_string(), "V1".to_string()),])),
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: Some(BTreeMap::from([("H1".to_string(), "V2".to_string()),])),
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_2);
-
-        let batch_3 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_3.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: Some(BTreeMap::from([("H2".to_string(), "V1".to_string()),])),
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-
-        let evidence_3 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_3.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_3);
-
-        let batch_4 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_4.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: Some(BTreeMap::from([
-                        ("H1".to_string(), "V1".to_string()),
-                        ("H2".to_string(), "V2".to_string()),
-                    ])),
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_4 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_4.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-        assert_ne!(evidence_1, evidence_3);
-        assert_ne!(evidence_1, evidence_4);
-        assert_ne!(evidence_2, evidence_3);
-        assert_ne!(evidence_2, evidence_4);
-        assert_ne!(evidence_3, evidence_4);
-    }
-
-    #[test]
-    fn create_asset_arguments_enable_aliasing_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: Some(false),
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_2);
-
-        let batch_3 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_3.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: Some(true),
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_3 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_3.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-        assert_ne!(evidence_1, evidence_3);
-        assert_ne!(evidence_2, evidence_3);
-    }
-
-    #[test]
-    fn create_asset_arguments_allow_raw_access_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: Some(false),
-                }),],
-            })
-            .is_ok());
-
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_2);
-
-        let batch_3 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_3.clone(),
-                operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "/".to_string(),
-                    content_type: "".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: Some(true),
-                }),],
-            })
-            .is_ok());
-        let evidence_3 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_3.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-        assert_ne!(evidence_1, evidence_3);
-        assert_ne!(evidence_2, evidence_3);
-    }
-
-    #[test]
-    fn set_asset_content_arguments_key_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids: vec![],
-                    last_chunk: None,
-                    sha256: None,
-                })],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/2".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids: vec![],
-                    last_chunk: None,
-                    sha256: None,
-                })],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn set_asset_content_arguments_content_encoding_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids: vec![],
-                    last_chunk: None,
-                    sha256: None,
-                })],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/1".to_string(),
-                    content_encoding: "gzip".to_string(),
-                    chunk_ids: vec![],
-                    last_chunk: None,
-                    sha256: None,
-                })],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn set_asset_content_arguments_chunk_contents_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const CHUNK_1_CONTENT: &[u8] = b"first batch chunk content";
-        const CHUNK_2_CONTENT: &[u8] = b"second batch chunk content";
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        let chunk_1 = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_1.clone(),
-                    content: ByteBuf::from(CHUNK_1_CONTENT),
-                },
-                &system_context,
-            )
-            .unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids: vec![chunk_1],
-                    last_chunk: None,
-                    sha256: None,
-                })],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        let chunk_2 = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_2.clone(),
-                    content: ByteBuf::from(CHUNK_2_CONTENT),
-                },
-                &system_context,
-            )
-            .unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids: vec![chunk_2],
-                    last_chunk: None,
-                    sha256: None,
-                })],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-    #[test]
-    fn set_asset_content_arguments_multiple_chunk_contents_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const CHUNK_1_CONTENT: &[u8] = b"first chunk, same for both";
-        const BATCH_1_CHUNK_2_CONTENT: &[u8] = b"first batch second chunk content";
-        const BATCH_2_CHUNK_2_CONTENT: &[u8] = b"second batch second chunk content";
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        {
-            let chunk_1 = state
-                .create_chunk(
-                    CreateChunkArg {
-                        batch_id: batch_1.clone(),
-                        content: ByteBuf::from(CHUNK_1_CONTENT),
-                    },
-                    &system_context,
-                )
-                .unwrap();
-            let chunk_2 = state
-                .create_chunk(
-                    CreateChunkArg {
-                        batch_id: batch_1.clone(),
-                        content: ByteBuf::from(BATCH_1_CHUNK_2_CONTENT),
-                    },
-                    &system_context,
-                )
-                .unwrap();
-
-            assert!(state
-                .propose_commit_batch(CommitBatchArguments {
-                    batch_id: batch_1.clone(),
-                    operations: vec![SetAssetContent(SetAssetContentArguments {
-                        key: "/1".to_string(),
-                        content_encoding: "identity".to_string(),
-                        chunk_ids: vec![chunk_1, chunk_2],
-                        last_chunk: None,
-                        sha256: None,
-                    })],
-                })
-                .is_ok());
-        }
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(4),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        {
-            let chunk_1 = state
-                .create_chunk(
-                    CreateChunkArg {
-                        batch_id: batch_2.clone(),
-                        content: ByteBuf::from(CHUNK_1_CONTENT),
-                    },
-                    &system_context,
-                )
-                .unwrap();
-            let chunk_2 = state
-                .create_chunk(
-                    CreateChunkArg {
-                        batch_id: batch_2.clone(),
-                        content: ByteBuf::from(BATCH_2_CHUNK_2_CONTENT),
-                    },
-                    &system_context,
-                )
-                .unwrap();
-            assert!(state
-                .propose_commit_batch(CommitBatchArguments {
-                    batch_id: batch_2.clone(),
-                    operations: vec![SetAssetContent(SetAssetContentArguments {
-                        key: "/1".to_string(),
-                        content_encoding: "identity".to_string(),
-                        chunk_ids: vec![chunk_1, chunk_2],
-                        last_chunk: None,
-                        sha256: None,
-                    })],
-                })
-                .is_ok());
-        }
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(4),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn set_asset_content_arguments_sha256_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let sha256_1 = ByteBuf::from("01020304");
-        let sha256_2 = ByteBuf::from("09080706");
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    last_chunk: None,
-                    chunk_ids: vec![],
-                    sha256: Some(sha256_1),
-                })],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![SetAssetContent(SetAssetContentArguments {
-                    key: "/1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    last_chunk: None,
-                    chunk_ids: vec![],
-                    sha256: Some(sha256_2),
-                })],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn unset_asset_content_arguments_key_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::UnsetAssetContent(
-                    UnsetAssetContentArguments {
-                        key: "/1".to_string(),
-                        content_encoding: "".to_string(),
-                    }
-                ),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::UnsetAssetContent(
-                    UnsetAssetContentArguments {
-                        key: "/2".to_string(),
-                        content_encoding: "".to_string(),
-                    }
-                ),],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn unset_asset_content_arguments_content_encoding_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::UnsetAssetContent(
-                    UnsetAssetContentArguments {
-                        key: "/1".to_string(),
-                        content_encoding: "identity".to_string(),
-                    }
-                ),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::UnsetAssetContent(
-                    UnsetAssetContentArguments {
-                        key: "/1".to_string(),
-                        content_encoding: "gzip".to_string(),
-                    }
-                ),],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn delete_asset_content_arguments_key_affects_evidence() {
-        // todo
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::DeleteAsset(DeleteAssetArguments {
-                    key: "/1".to_string(),
-                }),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::DeleteAsset(DeleteAssetArguments {
-                    key: "/2".to_string(),
-                }),],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn clear_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::Clear(ClearArguments {}),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![
-                    BatchOperation::Clear(ClearArguments {}),
-                    BatchOperation::Clear(ClearArguments {})
-                ],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn set_asset_properties_arguments_key_affects_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_1.clone(),
-                operations: vec![BatchOperation::SetAssetProperties(
-                    SetAssetPropertiesArguments {
-                        key: "/1".to_string(),
-                        max_age: Some(Some(100)),
-                        headers: None,
-                        allow_raw_access: Some(Some(false)),
-                        is_aliased: Some(Some(true))
-                    }
-                ),],
-            })
-            .is_ok());
-        let evidence_1 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_1.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-        delete_batch(&mut state, batch_1);
-
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_2.clone(),
-                operations: vec![BatchOperation::SetAssetProperties(
-                    SetAssetPropertiesArguments {
-                        key: "/2".to_string(),
-                        max_age: Some(Some(100)),
-                        headers: None,
-                        allow_raw_access: Some(Some(false)),
-                        is_aliased: Some(Some(true))
-                    }
-                ),],
-            })
-            .is_ok());
-        let evidence_2 = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_2.clone(),
-                max_iterations: Some(3),
-            })
-        })
-        .unwrap();
-
-        assert_ne!(evidence_1, evidence_2);
-    }
-
-    #[test]
-    fn set_asset_properties_arguments_properties_affects_evidence() {
-        fn generate_unique_set_asset_properties() -> Vec<SetAssetPropertiesArguments> {
-            let mut result = vec![];
-            for max_age in &[None, Some(None), Some(Some(100))] {
-                for headers in &[
-                    None,
-                    Some(None),
-                    Some(Some(BTreeMap::from([(
-                        String::from("a"),
-                        String::from("b"),
-                    )]))),
-                ] {
-                    for allow_raw_access in &[None, Some(None), Some(Some(true)), Some(Some(false))]
-                    {
-                        for is_aliased in &[None, Some(None), Some(Some(true)), Some(Some(false))] {
-                            result.push(SetAssetPropertiesArguments {
-                                key: "/1".to_string(),
-                                max_age: *max_age,
-                                headers: headers.clone(),
-                                allow_raw_access: *allow_raw_access,
-                                is_aliased: *is_aliased,
-                            });
-                        }
-                    }
-                }
-            }
-            result
-        }
-
-        fn compute_evidence_for_set_asset_properties(
-            args: SetAssetPropertiesArguments,
-        ) -> serde_bytes::ByteBuf {
-            let mut state = State::default();
-            let system_context = mock_system_context();
-
-            let batch = state.create_batch(&system_context).unwrap();
-            assert!(state
-                .propose_commit_batch(CommitBatchArguments {
-                    batch_id: batch.clone(),
-                    operations: vec![BatchOperation::SetAssetProperties(args)],
-                })
-                .is_ok());
-
-            run_computation_until_completion(|_progress| {
-                state.compute_evidence(&ComputeEvidenceArguments {
-                    batch_id: batch.clone(),
-                    max_iterations: Some(3),
-                })
-            })
-            .unwrap()
-        }
-
-        let instances = generate_unique_set_asset_properties();
-        let evidences = instances
-            .into_iter()
-            .map(compute_evidence_for_set_asset_properties)
-            .collect::<Vec<_>>();
-
-        // Check if all evidences are different.
-        for i in 0..evidences.len() {
-            for j in (i + 1)..evidences.len() {
-                assert_ne!(evidences[i], evidences[j]);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod validate_commit_proposed_batch {
-    use super::*;
-    use crate::types::ComputeEvidenceArguments;
-
-    #[test]
-    fn batch_not_found() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        match state.validate_commit_proposed_batch(CommitProposedBatchArguments {
-            batch_id: 1_u8.into(),
-            evidence: Default::default(),
-        }) {
-            Err(err) if err.contains("batch not found") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-
-        match run_computation_until_completion(|progress| {
-            state.commit_proposed_batch(
-                &CommitProposedBatchArguments {
-                    batch_id: 1_u8.into(),
-                    evidence: Default::default(),
-                },
-                progress,
-                &system_context,
-            )
-        }) {
-            Err(err) if err.contains("batch not found") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn no_commit_batch_arguments() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-        let batch_id = state.create_batch(&system_context).unwrap();
-
-        match state.validate_commit_proposed_batch(CommitProposedBatchArguments {
-            batch_id: batch_id.clone(),
-            evidence: Default::default(),
-        }) {
-            Err(err) if err.contains("batch does not have CommitBatchArguments") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-
-        match run_computation_until_completion(|progress| {
-            state.commit_proposed_batch(
-                &CommitProposedBatchArguments {
-                    batch_id: batch_id.clone(),
-                    evidence: Default::default(),
-                },
-                progress,
-                &system_context,
-            )
-        }) {
-            Err(err) if err.contains("batch does not have CommitBatchArguments") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn evidence_not_computed() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-        let batch_id = state.create_batch(&system_context).unwrap();
-
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_id.clone(),
-                operations: vec![],
-            })
-            .is_ok());
-
-        match state.validate_commit_proposed_batch(CommitProposedBatchArguments {
-            batch_id: batch_id.clone(),
-            evidence: Default::default(),
-        }) {
-            Err(err) if err.contains("batch does not have computed evidence") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-        match run_computation_until_completion(|progress| {
-            state.commit_proposed_batch(
-                &CommitProposedBatchArguments {
-                    batch_id: batch_id.clone(),
-                    evidence: Default::default(),
-                },
-                progress,
-                &system_context,
-            )
-        }) {
-            Err(err) if err.contains("batch does not have computed evidence") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn evidence_does_not_match() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-        let batch_id = state.create_batch(&system_context).unwrap();
-
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_id.clone(),
-                operations: vec![],
-            })
-            .is_ok());
-
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_id.clone(),
-                max_iterations: Some(1),
-            })
-        })
-        .is_ok());
-
-        match state.validate_commit_proposed_batch(CommitProposedBatchArguments {
-            batch_id: batch_id.clone(),
-            evidence: Default::default(),
-        }) {
-            Err(err) if err.contains("does not match presented evidence") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-
-        match run_computation_until_completion(|progress| {
-            state.commit_proposed_batch(
-                &CommitProposedBatchArguments {
-                    batch_id: batch_id.clone(),
-                    evidence: Default::default(),
-                },
-                progress,
-                &system_context,
-            )
-        }) {
-            Err(err) if err.contains("does not match presented evidence") => (),
-            other => panic!("expected 'batch not found' error, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn all_good() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-        let batch_id = state.create_batch(&system_context).unwrap();
-
-        assert!(state
-            .propose_commit_batch(CommitBatchArguments {
-                batch_id: batch_id.clone(),
-                operations: vec![],
-            })
-            .is_ok());
-
-        let compute_evidence_result = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_id.clone(),
-                max_iterations: Some(1),
-            })
-        });
-        assert!(compute_evidence_result.is_ok());
-
-        let evidence = if let Ok(computed_evidence) = compute_evidence_result {
-            computed_evidence
-        } else {
-            unreachable!()
-        };
-
-        assert_eq!(
-            state
-                .validate_commit_proposed_batch(CommitProposedBatchArguments {
-                    batch_id: batch_id.clone(),
-                    evidence: evidence.clone(),
-                },)
-                .unwrap(),
-            "commit proposed batch 0 with evidence e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-
-        run_computation_until_completion(|progress| {
-            state.commit_proposed_batch(
-                &CommitProposedBatchArguments {
-                    batch_id: batch_id.clone(),
-                    evidence: evidence.clone(),
-                },
-                progress,
-                &system_context,
-            )
-        })
-        .unwrap();
     }
 }
 
@@ -4257,56 +2243,6 @@ mod enforce_limits {
     use crate::types::ConfigureArguments;
 
     #[test]
-    fn cannot_create_batch_if_batch_already_proposed_with_no_batch_limit() {
-        cannot_create_batch_if_batch_already_proposed_with_batch_limit(None);
-    }
-
-    #[test]
-    fn cannot_create_batch_if_batch_already_proposed_with_a_batch_limit() {
-        // test with a batch limit to make sure we get the right message (not: batch limit exceeded)
-        cannot_create_batch_if_batch_already_proposed_with_batch_limit(Some(1));
-    }
-
-    fn cannot_create_batch_if_batch_already_proposed_with_batch_limit(max_batches: Option<u64>) {
-        let mut state = State::default();
-        let mut system_context = mock_system_context();
-        let time_now = system_context.current_timestamp_ns;
-
-        state.configure(ConfigureArguments {
-            max_batches: Some(max_batches),
-            max_chunks: None,
-            max_bytes: None,
-        });
-
-        let batch_id = state.create_batch(&system_context).unwrap();
-        let cba = CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations: vec![],
-        };
-        assert!(state.propose_commit_batch(cba).is_ok());
-
-        system_context.current_timestamp_ns = time_now + BATCH_EXPIRY_NANOS - 1;
-        assert_eq!(
-            state.create_batch(&system_context).unwrap_err(),
-            "Batch 0 has not completed evidence computation.  Wait for it to expire or delete it to propose another."
-        );
-
-        assert!(run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_id.clone(),
-                max_iterations: Some(1),
-            })
-        })
-        .is_ok());
-
-        system_context.current_timestamp_ns = time_now + BATCH_EXPIRY_NANOS + 1;
-        assert_eq!(
-            state.create_batch(&system_context).unwrap_err(),
-            "Batch 0 is already proposed.  Delete or execute it to propose another."
-        );
-    }
-
-    #[test]
     fn max_batches() {
         let mut state = State::default();
         let system_context = mock_system_context();
@@ -4339,19 +2275,19 @@ mod enforce_limits {
         let batch_2 = state.create_batch(&system_context).unwrap();
 
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_1.clone(),
-                    content: ByteBuf::new(),
+                    content: vec![ByteBuf::new()],
                 },
                 &system_context,
             )
             .unwrap();
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_2.clone(),
-                    content: ByteBuf::new(),
+                    content: vec![ByteBuf::new()],
                 },
                 &system_context,
             )
@@ -4369,10 +2305,10 @@ mod enforce_limits {
             "chunk limit exceeded"
         );
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_2.clone(),
-                    content: ByteBuf::new(),
+                    content: vec![ByteBuf::new()],
                 },
                 &system_context,
             )
@@ -4380,10 +2316,10 @@ mod enforce_limits {
 
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_1,
-                        content: ByteBuf::new(),
+                        content: vec![ByteBuf::new()],
                     },
                     &system_context,
                 )
@@ -4392,10 +2328,10 @@ mod enforce_limits {
         );
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_2.clone(),
-                        content: ByteBuf::new(),
+                        content: vec![ByteBuf::new()],
                     },
                     &system_context,
                 )
@@ -4449,10 +2385,10 @@ mod enforce_limits {
             .unwrap();
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_2.clone(),
-                        content: ByteBuf::from(c2),
+                        content: vec![ByteBuf::from(c2)],
                     },
                     &system_context,
                 )
@@ -4460,20 +2396,20 @@ mod enforce_limits {
             "byte limit exceeded"
         );
         state
-            .create_chunk(
-                CreateChunkArg {
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_2.clone(),
-                    content: ByteBuf::from(c3),
+                    content: vec![ByteBuf::from(c3)],
                 },
                 &system_context,
             )
             .unwrap();
         assert_eq!(
             state
-                .create_chunk(
-                    CreateChunkArg {
+                .create_chunks(
+                    CreateChunksArg {
                         batch_id: batch_1,
-                        content: ByteBuf::from(c4),
+                        content: vec![ByteBuf::from(c4)],
                     },
                     &system_context,
                 )
@@ -4637,7 +2573,7 @@ mod last_state_update_timestamp {
         assert_eq!(expected_timestamp, system_context.current_timestamp_ns);
 
         // Convert to stable state and back
-        let stable_state: StableStateV2 = state.into();
+        let stable_state: StableState = state.into();
         let restored_state: State = stable_state.into();
 
         // Timestamp should be preserved
@@ -4878,11 +2814,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CONTENT),
+                    content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
             )
@@ -4893,7 +2829,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id],
+                chunk_ids,
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
@@ -4925,11 +2861,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CONTENT),
+                    content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
             )
@@ -4940,7 +2876,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id],
+                chunk_ids,
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
             },
@@ -4972,11 +2908,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CONTENT),
+                    content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
             )
@@ -4987,7 +2923,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id],
+                chunk_ids,
                 last_chunk: None,
                 sha256: None,
             },
@@ -5032,20 +2968,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunks
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id_1 = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CHUNK_1),
-                },
-                &system_context,
-            )
-            .unwrap();
-        let chunk_id_2 = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CHUNK_2),
+                    content: vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
                 },
                 &system_context,
             )
@@ -5056,7 +2983,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id_1, chunk_id_2],
+                chunk_ids,
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
@@ -5092,11 +3019,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id_1 = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(CHUNK_1),
+                    content: vec![ByteBuf::from(CHUNK_1)],
                 },
                 &system_context,
             )
@@ -5107,7 +3034,7 @@ mod set_asset_content_sha256_verification {
             SetAssetContentArguments {
                 key: "/test.txt".to_string(),
                 content_encoding: "identity".to_string(),
-                chunk_ids: vec![chunk_id_1],
+                chunk_ids,
                 last_chunk: Some(ByteBuf::from(LAST_CHUNK)),
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
@@ -5121,78 +3048,6 @@ mod set_asset_content_sha256_verification {
 #[cfg(test)]
 mod compute_state_hash {
     use super::*;
-    use sha2::{Digest, Sha256};
-
-    #[test]
-    fn test_compute_state_hash_matches_evidence() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Create a batch to compute evidence "normally"
-        let batch_id = state.create_batch(&system_context).unwrap();
-
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
-                    batch_id: batch_id.clone(),
-                    content: ByteBuf::from(b"content1"),
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        // Compute SHA256 of content
-        let mut hasher = Sha256::new();
-        hasher.update(b"content1");
-        let sha256: [u8; 32] = hasher.finalize().into();
-
-        let args = CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations: vec![
-                BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "asset1".to_string(),
-                    content_type: "text/plain".to_string(),
-                    max_age: None,
-                    headers: None,
-                    enable_aliasing: None,
-                    allow_raw_access: None,
-                }),
-                BatchOperation::SetAssetContent(SetAssetContentArguments {
-                    key: "asset1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids: vec![chunk_id],
-                    last_chunk: None,
-                    sha256: Some(ByteBuf::from(sha256)),
-                }),
-            ],
-        };
-
-        state.propose_commit_batch(args.clone()).unwrap();
-
-        let evidence = run_computation_until_completion(|_progress| {
-            state.compute_evidence(&ComputeEvidenceArguments {
-                batch_id: batch_id.clone(),
-                max_iterations: None,
-            })
-        })
-        .unwrap();
-
-        // Now apply the batch to state so we can compute state hash
-        run_computation_until_completion(|progress| {
-            state.commit_batch(&args, progress, &system_context)
-        })
-        .unwrap();
-
-        // Compute state hash
-        let state_hash =
-            run_computation_until_completion(|_progress| state.compute_state_hash()).unwrap();
-
-        assert_eq!(
-            hex::encode(evidence.as_slice()),
-            state_hash,
-            "State hash should match evidence computed from batch when starting with an empty asset canister"
-        );
-    }
 
     #[test]
     fn test_compute_state_hash_interruption() {
@@ -5201,11 +3056,11 @@ mod compute_state_hash {
 
         // Setup state
         let batch_id = state.create_batch(&system_context).unwrap();
-        let chunk_id = state
-            .create_chunk(
-                CreateChunkArg {
+        let chunk_ids = state
+            .create_chunks(
+                CreateChunksArg {
                     batch_id: batch_id.clone(),
-                    content: ByteBuf::from(b"content1"),
+                    content: vec![ByteBuf::from(b"content1")],
                 },
                 &system_context,
             )
@@ -5225,7 +3080,7 @@ mod compute_state_hash {
                 BatchOperation::SetAssetContent(SetAssetContentArguments {
                     key: "asset1".to_string(),
                     content_encoding: "identity".to_string(),
-                    chunk_ids: vec![chunk_id],
+                    chunk_ids,
                     last_chunk: None,
                     sha256: None,
                 }),
@@ -5241,7 +3096,7 @@ mod compute_state_hash {
 
         // Update state using commit_batch to ensure timestamp is updated
         // We need a new system context with a later timestamp
-        let canister_env = crate::system_context::canister_env::CanisterEnv {
+        let canister_env = crate::system_context::CanisterEnv {
             ic_root_key: vec![0, 1, 2, 3],
             icp_public_env_vars: BTreeMap::new(),
         };

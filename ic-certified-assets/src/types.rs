@@ -1,6 +1,7 @@
 //! This module defines types shared by the certified assets state machine and the canister
 //! endpoints.
-use crate::asset_certification::types::{certification::AssetKey, rc_bytes::RcBytes};
+use crate::certification::AssetKey;
+use crate::rc_bytes::RcBytes;
 use candid::{CandidType, Deserialize, Nat, Principal};
 use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
@@ -81,20 +82,8 @@ pub struct CommitBatchArguments {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CommitProposedBatchArguments {
-    pub batch_id: BatchId,
-    pub evidence: ByteBuf,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct DeleteBatchArguments {
     pub batch_id: BatchId,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct ComputeEvidenceArguments {
-    pub batch_id: BatchId,
-    pub max_iterations: Option<u16>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -129,17 +118,6 @@ pub struct GetChunkResponse {
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct CreateBatchResponse {
     pub batch_id: BatchId,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CreateChunkArg {
-    pub batch_id: BatchId,
-    pub content: ByteBuf,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CreateChunkResponse {
-    pub chunk_id: ChunkId,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]

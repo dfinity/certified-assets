@@ -15,7 +15,7 @@ Defined in `src/types.rs`:
 
 ```
 Permission::Commit            — create/update/delete assets, commit batches
-Permission::Prepare           — create batches and chunks, propose batches
+Permission::Prepare           — create batches and chunks
 Permission::ManagePermissions — grant and revoke permissions for others
 ```
 
@@ -57,16 +57,13 @@ These are serialised to `StableStatePermissionsV2` on upgrade and restored in
 |---|---|
 | `store` | `Commit` |
 | `create_batch` | `Prepare` (or `Commit`) |
-| `create_chunk` / `create_chunks` | `Prepare` (or `Commit`) |
+| `create_chunks` | `Prepare` (or `Commit`) |
 | `create_asset` | `Commit` |
 | `set_asset_content` | `Commit` |
 | `unset_asset_content` | `Commit` |
 | `delete_asset` | `Commit` |
 | `clear` | `Commit` |
 | `commit_batch` | `Commit` |
-| `propose_commit_batch` | `Prepare` (or `Commit`) |
-| `compute_evidence` | `Prepare` (or `Commit`) |
-| `commit_proposed_batch` | `Commit` |
 | `delete_batch` | `Prepare` (or `Commit`) |
 | `set_asset_properties` | `Commit` |
 | `configure` | `Commit` |
@@ -109,7 +106,7 @@ When the sync plugin is invoked after `icp deploy --proxy`:
    `Commit` permission and is the controller.
 2. The sync plugin currently sends all calls with `direct: true` → calls are
    signed by the **user's identity**.
-3. `create_batch`, `create_chunk`, and `commit_batch` all require `Commit`;
+3. `create_batch`, `create_chunks`, and `commit_batch` all require `Commit`;
    the user's identity has none → every upload call is rejected.
 
 ### Solution (permission bootstrap in proxy mode)
@@ -138,7 +135,7 @@ Before starting the upload flow, the plugin should:
 
 ### Why `Commit` is sufficient
 
-The V2 batch upload flow (`create_batch` → `create_chunk` → `commit_batch`)
+The V2 batch upload flow (`create_batch` → `create_chunks` → `commit_batch`)
 requires only `Commit`. Granting `Commit` to the user's identity is therefore
 the minimal permission needed and does not expose `ManagePermissions` to the
 user.
