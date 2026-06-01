@@ -1,4 +1,0 @@
-[
-  // Apply the standard security policy to every asset.
-  { "match": "**/*", "security_policy": "standard" },
-]

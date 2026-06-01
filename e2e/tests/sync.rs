@@ -1,5 +1,5 @@
 use candid::Principal;
-use e2e::{get_asset_properties, icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
+use e2e::{icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
 use std::fs;
 
 /// Deploy the test fixture to a local replica and verify that `/index.html` appears
@@ -182,40 +182,6 @@ fn asset_deletion() {
     assert!(
         !assets_after.iter().any(|a| a.key == "/style.css"),
         "/style.css should be removed from the canister after local deletion",
-    );
-}
-
-/// Deploy a fixture whose `.ic-assets.json5` declares `security_policy: "standard"`.
-/// The canister must store the canonical CSP / X-Frame-Options / etc. headers
-/// against the asset, proving the full chain — JSON5 parse → policy expansion →
-/// `CreateAssetArguments.headers` → canister state — is wired up.
-#[test]
-fn security_policy_headers_persisted() {
-    let tmp = setup_project("tests/fixture/security-policy");
-    let project = tmp.path();
-    let _network = LocalNetwork::start(project);
-
-    icp_cmd(project).arg("deploy").assert().success();
-
-    let props = get_asset_properties(project, "/index.html");
-    let headers = props
-        .headers
-        .expect("/index.html should have headers after deploy");
-
-    let csp = headers
-        .get("Content-Security-Policy")
-        .expect("Content-Security-Policy header should be present");
-    assert!(
-        csp.starts_with("default-src 'self'"),
-        "unexpected CSP value: {csp}",
-    );
-    assert_eq!(
-        headers.get("X-Frame-Options").map(String::as_str),
-        Some("DENY")
-    );
-    assert_eq!(
-        headers.get("X-Content-Type-Options").map(String::as_str),
-        Some("nosniff"),
     );
 }
 

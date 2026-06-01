@@ -19,7 +19,6 @@ use crate::canister::{
 use crate::content::{encoders_for, Content, Encoder};
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
-use crate::security_policy::report_security_policy_issues;
 use std::path::Path;
 
 // Stay safely under the canister's ingress message limit (~2 MB).
@@ -99,8 +98,6 @@ pub fn sync<C: CanisterCall>(
 
     let sources = crate::scan::scan(dirs)?;
     println!("found {} file(s) from {:?}", sources.len(), dirs);
-
-    report_security_policy_issues(&sources)?;
 
     let project_rules = load_redirect_rules(dir)?;
     println!(
@@ -200,24 +197,15 @@ fn prepare_asset(
     canister_assets: &HashMap<String, AssetDetails>,
 ) -> Result<ProjectAsset, String> {
     let content = Content::load(&source.path)?;
-    // Use encoding list from config if specified; otherwise fall back to the
-    // default policy (gzip for text/* and js/html, identity for everything else).
-    let encoders: Vec<Encoder> = match source.config.encodings.as_deref() {
-        Some(cfg_encs) => cfg_encs.to_vec(),
-        None => encoders_for(&content.media_type),
-    };
-    // The identity encoding is always uploaded if it's in the encoders list.
-    // Other encodings are only uploaded if they save bytes vs. identity.
-    // If identity is absent, force the alternate encoding through.
-    let force_encoding = !encoders.contains(&Encoder::Identity);
+    // gzip for text/* and js/html, identity for everything else.
+    let encoders: Vec<Encoder> = encoders_for(&content.media_type);
 
     let mut encodings: HashMap<String, ProjectAssetEncoding> = HashMap::new();
     for encoder in encoders {
         let encoded = content.encode(encoder)?;
-        if encoder != Encoder::Identity
-            && !force_encoding
-            && encoded.data.len() >= content.data.len()
-        {
+        // Identity is always uploaded. Alternate encodings only get uploaded if
+        // they save bytes vs. identity.
+        if encoder != Encoder::Identity && encoded.data.len() >= content.data.len() {
             continue;
         }
         let name = encoder.name().to_string();
@@ -351,19 +339,17 @@ fn build_operations(
         canister_assets.remove(&k);
     }
 
-    // 2. Create new assets (those not present after deletions).
+    // 2. Create new assets (those not present after deletions). Per-asset
+    //    properties (max_age, headers, allow_raw_access) come from defaults
+    //    only — no project-side config source exists yet.
     for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
             ops.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: key.clone(),
                 content_type: pa.media_type.to_string(),
-                max_age: pa.source.config.cache.as_ref().and_then(|c| c.max_age),
-                headers: pa
-                    .source
-                    .config
-                    .combined_headers()
-                    .map(|h| h.into_iter().collect()),
-                allow_raw_access: pa.source.config.allow_raw_access,
+                max_age: None,
+                headers: None,
+                allow_raw_access: Some(true),
             }));
         }
     }
@@ -440,11 +426,10 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
     redirects::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-// Mirrors `ic-asset/src/batch_upload/operations.rs::update_properties`: for each
-// asset that already exists on the canister, compare `max_age`, `headers`, and
-// `allow_raw_access` against the project config and push a `SetAssetProperties`
-// op only when at least one field differs. Newly-created assets already get
-// their properties from `CreateAssetArguments`.
+// For each asset that already exists on the canister, reset any per-asset
+// properties (`max_age`, `headers`, `allow_raw_access`) that drifted from the
+// plugin's defaults. Newly-created assets get the same defaults via
+// `CreateAssetArguments`, so we don't emit `SetAssetProperties` for them.
 //
 // `canister_assets` is the post-deletion view: keys removed in step 1 (missing
 // from the project, or content_type drift forcing delete-then-create) are
@@ -457,36 +442,27 @@ fn update_properties(
     canister_assets: &HashMap<String, AssetDetails>,
     canister_asset_properties: &HashMap<String, AssetProperties>,
 ) {
-    for (key, pa) in project_assets {
+    for key in project_assets.keys() {
         if !canister_assets.contains_key(key) {
             continue;
         }
         let Some(canister_props) = canister_asset_properties.get(key) else {
             continue;
         };
-        let config = &pa.source.config;
 
-        let project_max_age = config.cache.as_ref().and_then(|c| c.max_age);
-        let max_age = (project_max_age != canister_props.max_age).then_some(project_max_age);
+        let max_age = canister_props.max_age.is_some().then_some(None);
 
-        let project_headers = config.combined_headers().map(sorted_header_pairs);
         // The canister auto-injects `Set-Cookie: ic_env=…` on HTML assets via
         // `on_asset_change`; that header is runtime-managed, not project-managed,
-        // so strip it before comparing or we'd loop emitting drift forever.
-        // After stripping, an otherwise-empty header map normalises to None so
-        // a canister with only Set-Cookie matches a project with no headers.
-        let canister_headers = canister_props.headers.as_ref().and_then(|h| {
-            let pairs = sorted_header_pairs(
-                h.iter()
-                    .filter(|&(k, _v)| !k.eq_ignore_ascii_case("set-cookie"))
-                    .map(|(k, v)| (k.clone(), v.clone())),
-            );
-            (!pairs.is_empty()).then_some(pairs)
-        });
-        let headers = (project_headers != canister_headers).then_some(project_headers);
+        // so ignore it when checking for drift.
+        let canister_has_user_headers = canister_props
+            .headers
+            .as_ref()
+            .is_some_and(|h| h.keys().any(|k| !k.eq_ignore_ascii_case("set-cookie")));
+        let headers = canister_has_user_headers.then_some(None);
 
-        let allow_raw_access = (config.allow_raw_access != canister_props.allow_raw_access)
-            .then_some(config.allow_raw_access);
+        let allow_raw_access =
+            (canister_props.allow_raw_access != Some(true)).then_some(Some(true));
 
         if max_age.is_some() || headers.is_some() || allow_raw_access.is_some() {
             ops.push(BatchOperationKind::SetAssetProperties(
@@ -501,24 +477,12 @@ fn update_properties(
     }
 }
 
-fn sorted_header_pairs<I>(iter: I) -> Vec<(String, String)>
-where
-    I: IntoIterator<Item = (String, String)>,
-{
-    // Project headers come from a BTreeMap and canister headers from a HashMap;
-    // sorting both sides yields a stable comparison regardless of input ordering.
-    let mut v: Vec<(String, String)> = iter.into_iter().collect();
-    v.sort();
-    v
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::canister::{
         AssetDetails, AssetEncodingDetails, BatchOperationKind, CallType, CanisterCall,
     };
-    use crate::config::AssetConfig;
     use candid::{CandidType, Nat, Principal};
     use serde::de::DeserializeOwned;
     use std::cell::{Cell, RefCell};
@@ -634,15 +598,6 @@ mod tests {
         media_type: &str,
         encodings: &[(&str, Vec<u8>, bool)],
     ) -> (String, ProjectAsset) {
-        mk_project_asset_with_config(key, media_type, encodings, AssetConfig::default())
-    }
-
-    fn mk_project_asset_with_config(
-        key: &str,
-        media_type: &str,
-        encodings: &[(&str, Vec<u8>, bool)],
-        config: AssetConfig,
-    ) -> (String, ProjectAsset) {
         let mime: mime::Mime = media_type.parse().expect("valid MIME");
         let mut enc_map = HashMap::new();
         for (name, sha, already_in_place) in encodings {
@@ -667,7 +622,6 @@ mod tests {
                 source: AssetSource {
                     path: PathBuf::from(key.trim_start_matches('/')),
                     key: key.to_string(),
-                    config,
                 },
                 media_type: mime,
                 encodings: enc_map,
@@ -1039,7 +993,6 @@ mod tests {
         let source = AssetSource {
             path: f.path().to_path_buf(),
             key: "/test.txt".to_string(),
-            config: AssetConfig::default(),
         };
         let asset = prepare_asset(source, &HashMap::new()).unwrap();
         assert!(
@@ -1071,25 +1024,11 @@ mod tests {
     }
 
     #[test]
-    fn config_fields_flow_into_create_asset_args() {
-        use crate::config::{AssetConfig, CacheConfig};
-        use std::collections::BTreeMap;
-
-        let mut headers = BTreeMap::new();
-        headers.insert("X-Frame-Options".to_string(), "DENY".to_string());
-        let config = AssetConfig {
-            cache: Some(CacheConfig {
-                max_age: Some(86400),
-            }),
-            headers: Some(headers),
-            allow_raw_access: Some(false),
-            ..Default::default()
-        };
-        let project = HashMap::from([mk_project_asset_with_config(
+    fn create_asset_args_use_defaults() {
+        let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
-            config,
         )]);
         let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
         let create_op = ops
@@ -1103,12 +1042,9 @@ mod tests {
             })
             .expect("CreateAsset op");
 
-        assert_eq!(create_op.max_age, Some(86400));
-        assert_eq!(
-            create_op.headers.as_ref().unwrap()["X-Frame-Options"],
-            "DENY"
-        );
-        assert_eq!(create_op.allow_raw_access, Some(false));
+        assert_eq!(create_op.max_age, None);
+        assert!(create_op.headers.is_none());
+        assert_eq!(create_op.allow_raw_access, Some(true));
     }
 
     fn set_props_ops(
@@ -1123,19 +1059,11 @@ mod tests {
     }
 
     #[test]
-    fn update_properties_emits_set_when_max_age_differs() {
-        use crate::config::{AssetConfig, CacheConfig};
-        let config = AssetConfig {
-            cache: Some(CacheConfig {
-                max_age: Some(3600),
-            }),
-            ..AssetConfig::default()
-        };
-        let project = HashMap::from([mk_project_asset_with_config(
+    fn update_properties_emits_nothing_when_canister_matches_defaults() {
+        let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
             &[("identity", vec![1, 2, 3], true)],
-            config,
         )]);
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
@@ -1145,45 +1073,7 @@ mod tests {
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
-                max_age: Some(60),
-                headers: None,
-                allow_raw_access: Some(true),
-            },
-        )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
-        let by_key = set_props_ops(&ops);
-        assert_eq!(by_key.len(), 1);
-        let set = by_key["/index.html"];
-        assert_eq!(set.max_age, Some(Some(3600)));
-        assert_eq!(set.headers, None);
-        assert_eq!(set.allow_raw_access, None);
-    }
-
-    #[test]
-    fn update_properties_emits_nothing_when_all_match() {
-        use crate::config::{AssetConfig, CacheConfig};
-        let config = AssetConfig {
-            cache: Some(CacheConfig {
-                max_age: Some(3600),
-            }),
-            allow_raw_access: Some(true),
-            ..AssetConfig::default()
-        };
-        let project = HashMap::from([mk_project_asset_with_config(
-            "/index.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], true)],
-            config,
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
-        )]);
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: Some(3600),
+                max_age: None,
                 headers: None,
                 allow_raw_access: Some(true),
             },
@@ -1191,12 +1081,12 @@ mod tests {
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         assert!(
             set_props_ops(&ops).is_empty(),
-            "no SetAssetProperties op when properties match"
+            "no SetAssetProperties op when canister already matches defaults"
         );
     }
 
     #[test]
-    fn update_properties_clears_max_age_when_canister_has_it_but_project_doesnt() {
+    fn update_properties_clears_max_age_when_canister_has_it() {
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1212,34 +1102,23 @@ mod tests {
             AssetProperties {
                 max_age: Some(60),
                 headers: None,
-                // mk_project_asset uses AssetConfig::default() → allow_raw_access: Some(true).
                 allow_raw_access: Some(true),
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
-        // Project has no max_age, canister has Some(60) — the op must explicitly
-        // request clearing it (the inner None means "set to null on the canister").
+        // canister has Some(60), defaults are None — the op must explicitly
+        // request clearing (the inner None means "set to null on the canister").
         assert_eq!(by_key["/index.html"].max_age, Some(None));
     }
 
     #[test]
-    fn update_properties_detects_header_drift_irrespective_of_order() {
-        use crate::config::AssetConfig;
-        use std::collections::BTreeMap;
-        let mut headers = BTreeMap::new();
-        headers.insert("X-A".to_string(), "1".to_string());
-        headers.insert("X-B".to_string(), "2".to_string());
-        let config = AssetConfig {
-            headers: Some(headers),
-            ..AssetConfig::default()
-        };
-        let project = HashMap::from([mk_project_asset_with_config(
+    fn update_properties_clears_canister_headers() {
+        let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
             &[("identity", vec![1, 2, 3], true)],
-            config,
         )]);
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
@@ -1247,10 +1126,7 @@ mod tests {
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
         let mut canister_headers = HashMap::new();
-        // Same entries as project; HashMap iteration order does not matter
-        // because both sides are sorted before comparison.
-        canister_headers.insert("X-B".to_string(), "2".to_string());
-        canister_headers.insert("X-A".to_string(), "1".to_string());
+        canister_headers.insert("X-Frame-Options".to_string(), "DENY".to_string());
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
@@ -1260,79 +1136,17 @@ mod tests {
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
-        assert!(
-            set_props_ops(&ops).is_empty(),
-            "headers match (order-insensitive); no SetAssetProperties op expected"
-        );
-    }
-
-    #[test]
-    fn rule_only_change_propagates_via_set_asset_properties() {
-        use crate::config::AssetConfig;
-        use crate::security_policy::SecurityPolicy;
-        let sha = vec![1u8, 2, 3];
-
-        // Project config: standard security policy → produces canonical CSP /
-        // X-Frame-Options / etc. headers via `combined_headers()`.
-        let config = AssetConfig {
-            security_policy: Some(SecurityPolicy::Standard),
-            ..AssetConfig::default()
-        };
-        // Identity encoding already in place (matches canister sha).
-        let project = HashMap::from([mk_project_asset_with_config(
-            "/index.html",
-            "text/html",
-            &[("identity", sha.clone(), true)],
-            config,
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(sha))],
-        )]);
-        // Canister currently has no headers stored — i.e., the asset was
-        // deployed before the rule was added.
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: None,
-                headers: None,
-                allow_raw_access: Some(true),
-            },
-        )]);
-
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[]);
-
-        // The asset content must not be touched (no Create/Set/Unset/Delete).
-        assert_eq!(count_op(&ops, "CreateAsset"), 0);
-        assert_eq!(count_op(&ops, "SetAssetContent"), 0);
-        assert_eq!(count_op(&ops, "UnsetAssetContent"), 0);
-        assert_eq!(count_op(&ops, "DeleteAsset"), 0);
-
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
-        let new_headers = by_key["/index.html"]
-            .headers
-            .as_ref()
-            .expect("headers field must be Some(_)")
-            .as_ref()
-            .expect("inner option must be Some(headers) (not clearing)");
-        let map: std::collections::HashMap<&str, &str> = new_headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        assert!(
-            map.contains_key("Content-Security-Policy"),
-            "standard policy CSP header should be present in SetAssetProperties; got: {map:#?}",
-        );
-        assert_eq!(map.get("X-Frame-Options").copied(), Some("DENY"));
+        // The inner None clears the headers map on the canister.
+        assert_eq!(by_key["/index.html"].headers, Some(None));
     }
 
     #[test]
     fn update_properties_ignores_canister_managed_set_cookie() {
         // The canister auto-injects `Set-Cookie: ic_env=…` on HTML assets via
         // `on_asset_change`. Without filtering, a no-op re-sync of an HTML
-        // asset with no project headers would emit drift every time.
+        // asset would emit drift every time.
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1366,29 +1180,19 @@ mod tests {
     #[test]
     fn update_properties_skips_assets_being_recreated_due_to_content_type_drift() {
         // Asset on canister has a different content_type → step 1 deletes it
-        // and step 2 recreates it with project properties. update_properties
+        // and step 2 recreates it with default properties. update_properties
         // must not emit a redundant SetAssetProperties op for that key, even
         // if canister_asset_properties still contains pre-deletion data.
-        use crate::config::{AssetConfig, CacheConfig};
-        let config = AssetConfig {
-            cache: Some(CacheConfig {
-                max_age: Some(3600),
-            }),
-            ..AssetConfig::default()
-        };
-        let project = HashMap::from([mk_project_asset_with_config(
+        let project = HashMap::from([mk_project_asset(
             "/file",
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
-            config,
         )]);
         let canister = HashMap::from([mk_canister_asset(
             "/file",
             "application/octet-stream",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        // Simulate a caller that captured properties before the deletion was
-        // decided — the function must defend against this.
         let canister_props = HashMap::from([(
             "/file".to_string(),
             AssetProperties {
@@ -1417,32 +1221,6 @@ mod tests {
         )]);
         let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[]);
         assert!(set_props_ops(&ops).is_empty());
-    }
-
-    #[test]
-    fn prepare_asset_encoding_override() {
-        use crate::content::Encoder;
-        use std::io::Write as _;
-        use tempfile::NamedTempFile;
-
-        // text/html would normally get gzip + identity; the config override should
-        // suppress gzip and produce identity only.
-        let mut f = NamedTempFile::with_suffix(".html").unwrap();
-        f.write_all(b"<html><body>hello world</body></html>")
-            .unwrap();
-
-        let source = AssetSource {
-            path: f.path().to_path_buf(),
-            key: "/index.html".to_string(),
-            config: AssetConfig {
-                encodings: Some(vec![Encoder::Identity]),
-                ..AssetConfig::default()
-            },
-        };
-
-        let result = prepare_asset(source, &HashMap::new()).unwrap();
-        assert!(result.encodings.contains_key("identity"));
-        assert!(!result.encodings.contains_key("gzip"));
     }
 
     // ---- Authorization tests ----
