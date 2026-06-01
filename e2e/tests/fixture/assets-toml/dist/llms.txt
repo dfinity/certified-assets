@@ -1,0 +1,2 @@
+site: example
+purpose: e2e test for assets.toml content_type override
