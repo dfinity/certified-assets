@@ -2,7 +2,6 @@
 pub mod asset;
 pub mod batch;
 pub mod certification;
-mod cookies;
 pub mod http;
 pub mod nested_tree;
 pub mod rc_bytes;

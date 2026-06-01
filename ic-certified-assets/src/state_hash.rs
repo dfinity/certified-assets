@@ -1,9 +1,9 @@
 use crate::state::State;
 use crate::types::{CreateAssetArguments, SetAssetContentArguments};
+#[cfg(test)]
 use itertools::Itertools;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 
 const TAG_FALSE: [u8; 1] = [0];
 const TAG_TRUE: [u8; 1] = [1];
@@ -214,11 +214,19 @@ fn hash_opt_bytebuf(hasher: &mut Sha256, buf: Option<&ByteBuf>) {
     }
 }
 
-fn hash_headers(hasher: &mut Sha256, headers: Option<&BTreeMap<String, String>>) {
+fn hash_headers(hasher: &mut Sha256, headers: Option<&Vec<(String, String)>>) {
     if let Some(headers) = headers {
         hasher.update(TAG_SOME);
-        for k in headers.keys().sorted() {
-            let v = headers.get(k).unwrap();
+        // Stable-sort by lowercased name only so multi-valued headers
+        // (e.g. Set-Cookie) preserve their declaration order — required
+        // because RFC 6265 §5.3 makes the last same-name cookie win.
+        let mut indexed: Vec<(usize, &(String, String))> = headers.iter().enumerate().collect();
+        indexed.sort_by(|(ai, (ak, _)), (bi, (bk, _))| {
+            let an = ak.to_ascii_lowercase();
+            let bn = bk.to_ascii_lowercase();
+            an.cmp(&bn).then(ai.cmp(bi))
+        });
+        for (_, (k, v)) in indexed {
             hasher.update(k);
             hasher.update(v);
         }

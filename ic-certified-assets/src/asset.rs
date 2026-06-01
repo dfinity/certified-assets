@@ -16,7 +16,6 @@ use crate::certification::{
     build_ic_certificate_expression_header, response_hash, AssetKey, AssetPath,
     CertificateExpression, CertifiedResponses, HashTreePath, RequestHash, ResponseHash,
 };
-use crate::cookies::add_ic_env_cookie;
 use crate::http::{
     CallbackFunc, HeaderField, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
@@ -26,7 +25,7 @@ use ic_certification::Hash;
 use ic_representation_independent_hash::Value;
 use serde_bytes::ByteBuf;
 use sha2::Digest;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 /// The preferred order in which we pick encodings.
 const ENCODING_CERTIFICATION_ORDER: &[&str] = &["identity", "gzip", "compress", "deflate", "br"];
@@ -76,14 +75,14 @@ impl AssetEncoding {
 
     fn compute_response_hashes(
         &self,
-        headers: &Option<BTreeMap<String, String>>,
+        headers: &Option<Vec<(String, String)>>,
         max_age: &Option<u64>,
         content_type: &str,
         encoding_name: &str,
     ) -> HashMap<u16, [u8; 32]> {
         // Collect all user-defined headers
         let base_headers: Vec<(String, Value)> = build_headers(
-            headers.as_ref().map(|h| h.iter()),
+            headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
             max_age,
             content_type,
             encoding_name,
@@ -117,7 +116,7 @@ pub struct Asset {
     pub content_type: String,
     pub encodings: HashMap<String, AssetEncoding>,
     pub max_age: Option<u64>,
-    pub headers: Option<BTreeMap<String, String>>,
+    pub headers: Option<Vec<(String, String)>>,
     pub allow_raw_access: Option<bool>,
 }
 
@@ -136,7 +135,7 @@ pub struct AssetDetails {
     pub content_type: String,
     pub encodings: Vec<AssetEncodingDetails>,
     pub max_age: Option<u64>,
-    pub headers: Option<BTreeMap<String, String>>,
+    pub headers: Option<Vec<(String, String)>>,
     pub allow_raw_access: Option<bool>,
     pub is_aliased: Option<bool>,
 }
@@ -162,8 +161,8 @@ impl Asset {
             headers.push(("cache-control".to_string(), Value::String("".to_string())));
         }
         if let Some(custom_headers) = &self.headers {
-            for h in custom_headers.iter() {
-                headers.push((h.0.into(), Value::String(h.1.into())));
+            for (k, v) in custom_headers.iter() {
+                headers.push((k.clone(), Value::String(v.clone())));
             }
         }
 
@@ -175,13 +174,13 @@ impl Asset {
         }
     }
 
-    pub fn get_headers_for_asset(&self, encoding_name: &str) -> HashMap<String, String> {
+    pub fn get_headers_for_asset(&self, encoding_name: &str) -> Vec<(String, String)> {
         let ce = self
             .encodings
             .get(encoding_name)
             .and_then(|e| e.certificate_expression.as_ref());
         build_headers(
-            self.headers.as_ref().map(|h| h.iter()),
+            self.headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
             &self.max_age,
             &self.content_type,
             encoding_name.to_owned(),
@@ -209,7 +208,7 @@ impl Asset {
     ) -> HttpResponse {
         let mut headers = self.get_headers_for_asset(enc_name);
         if let Some(head) = certificate_header {
-            headers.insert(head.0.clone(), head.1.clone());
+            headers.push((head.0.clone(), head.1.clone()));
         }
 
         let streaming_strategy = StreamingCallbackToken::create_token(
@@ -233,17 +232,17 @@ impl Asset {
                 .iter()
                 .any(|(header_name, _)| header_name.eq_ignore_ascii_case("etag"))
             {
-                headers.insert(
+                headers.push((
                     "etag".to_string(),
                     format!("\"{}\"", hex::encode(enc.sha256)),
-                );
+                ));
             }
             (200, enc.content_chunks[chunk_index].clone())
         };
 
         HttpResponse {
             status_code,
-            headers: headers.into_iter().collect::<_>(),
+            headers,
             body,
             upgrade: None,
             streaming_strategy,
@@ -306,23 +305,24 @@ fn build_headers(
     content_type: impl Into<String>,
     encoding_name: impl Into<String>,
     cert_expr: Option<&CertificateExpression>,
-) -> HashMap<String, String> {
-    let mut headers = HashMap::from([("content-type".to_string(), content_type.into())]);
+) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> =
+        vec![("content-type".to_string(), content_type.into())];
     if let Some(max_age) = max_age {
-        headers.insert("cache-control".to_string(), format!("max-age={max_age}"));
+        headers.push(("cache-control".to_string(), format!("max-age={max_age}")));
     }
     let encoding_name = encoding_name.into();
     if encoding_name != "identity" {
-        headers.insert("content-encoding".to_string(), encoding_name);
+        headers.push(("content-encoding".to_string(), encoding_name));
     }
     if let Some(arg_headers) = custom_headers {
         for (k, v) in arg_headers {
-            headers.insert(k.into().to_lowercase(), v.into());
+            headers.push((k.into().to_lowercase(), v.into()));
         }
     }
     if let Some(expr) = cert_expr {
         let (k, v) = build_ic_certificate_expression_header(expr);
-        headers.insert(k, v);
+        headers.push((k, v));
     }
     headers
 }
@@ -332,7 +332,6 @@ pub(crate) fn on_asset_change(
     key: &str,
     asset: &mut Asset,
     dependent_keys: Vec<AssetKey>,
-    encoded_canister_env: Option<&String>,
 ) {
     let mut affected_keys = dependent_keys;
     affected_keys.push(key.to_string());
@@ -345,14 +344,6 @@ pub(crate) fn on_asset_change(
 
     for enc in asset.encodings.values_mut() {
         enc.certified = false;
-    }
-
-    // Add ic_env cookie for html files, if the cookie value (canister env) is provided
-    if let Some(encoded_canister_env) = encoded_canister_env {
-        if key.ends_with(".html") {
-            let headers = asset.headers.get_or_insert_default();
-            add_ic_env_cookie(headers, encoded_canister_env);
-        }
     }
 
     asset.update_ic_certificate_expressions();

@@ -10,7 +10,7 @@
 //! helpers they rely on. State methods unrelated to batches stay in the
 //! state machine module.
 
-use crate::asset::{on_asset_change, Timestamp};
+use crate::asset::Timestamp;
 use crate::certification::{AssetKey, HashTreePath};
 use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
@@ -58,7 +58,6 @@ pub enum CommitBatchProgress {
     /// Initial state when `commit_batch` is first called.
     ///
     /// This phase:
-    /// - Reloads the canister environment
     /// - Computes and validates batch limits
     /// - Transitions to `ProcessingOperations` with the first operation
     #[default]
@@ -67,11 +66,9 @@ pub enum CommitBatchProgress {
     ///
     /// When a `SetAssetContent` operation is encountered, this transitions to
     /// `HashingChunks` to hash the asset content incrementally.
-    /// When all operations are processed, this transitions to `UpdatingCookies` to update the HTML assets.
     ProcessingOperations {
         batch_id: BatchId,
         operation_index: usize,
-        needs_cookie_update: bool,
     },
     /// Incrementally hashing asset content chunks, one chunk per call.
     ///
@@ -84,23 +81,11 @@ pub enum CommitBatchProgress {
     HashingChunks {
         batch_id: BatchId,
         operation_index: usize,
-        needs_cookie_update: bool,
         set_asset_content_arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
         chunk_index: usize,
         dependent_keys: Vec<AssetKey>,
         hasher: sha2::Sha256,
-    },
-    /// Updating cookies for HTML assets that depend on the canister environment.
-    ///
-    /// This phase is entered after all operations complete if the canister environment
-    /// changed during batch processing. HTML assets need their cookies updated to reflect
-    /// the new environment.
-    ///
-    /// One asset is updated per call until all HTML assets are processed.
-    UpdatingCookies {
-        html_keys: Vec<AssetKey>,
-        operation_index: usize,
     },
 }
 
@@ -229,27 +214,20 @@ impl State {
     ) -> ComputationStatus<(), CommitBatchProgress, String> {
         match progress {
             CommitBatchProgress::Starting => {
-                // Reload the canister env to get the latest values
-                let old_encoded_canister_env = self.encoded_canister_env.clone();
-                self.encoded_canister_env = system_context.get_canister_env().to_cookie_value();
-
                 let (chunks_added, bytes_added) = self.compute_last_chunk_data(arg);
                 if let Err(e) = self.check_batch_limits(chunks_added, bytes_added) {
                     return ComputationStatus::Error(e);
                 }
 
-                let needs_cookie_update = old_encoded_canister_env != self.encoded_canister_env;
                 let initial_progress = CommitBatchProgress::ProcessingOperations {
                     batch_id: arg.batch_id.clone(),
                     operation_index: 0,
-                    needs_cookie_update,
                 };
                 ComputationStatus::InProgress(initial_progress)
             }
             CommitBatchProgress::ProcessingOperations {
                 batch_id,
                 operation_index,
-                needs_cookie_update,
             } => {
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
@@ -262,31 +240,8 @@ impl State {
                     // the batch ends with a consistent rule tree.
                     self.on_redirect_rules_change();
 
-                    // Move to cookie update phase if needed
-                    if needs_cookie_update {
-                        let html_keys: Vec<_> = self
-                            .assets
-                            .keys()
-                            .filter(|key| key.ends_with(".html"))
-                            .cloned()
-                            .collect();
-
-                        if html_keys.is_empty() {
-                            // No HTML files to update, we're done
-                            self.last_state_update_timestamp_ns =
-                                system_context.current_timestamp_ns;
-                            return ComputationStatus::Done(());
-                        } else {
-                            let progress = CommitBatchProgress::UpdatingCookies {
-                                html_keys,
-                                operation_index: 0,
-                            };
-                            return ComputationStatus::InProgress(progress);
-                        }
-                    } else {
-                        self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
-                        return ComputationStatus::Done(());
-                    }
+                    self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
+                    return ComputationStatus::Done(());
                 }
 
                 let op = &arg.operations[operation_index];
@@ -324,7 +279,6 @@ impl State {
                         let progress = CommitBatchProgress::HashingChunks {
                             batch_id,
                             operation_index,
-                            needs_cookie_update,
                             set_asset_content_arg: arg.clone(),
                             content_chunks,
                             chunk_index: 0,
@@ -368,14 +322,12 @@ impl State {
                 let progress = CommitBatchProgress::ProcessingOperations {
                     batch_id,
                     operation_index: operation_index + 1,
-                    needs_cookie_update,
                 };
                 ComputationStatus::InProgress(progress)
             }
             CommitBatchProgress::HashingChunks {
                 batch_id,
                 operation_index,
-                needs_cookie_update,
                 set_asset_content_arg,
                 content_chunks,
                 chunk_index,
@@ -401,7 +353,6 @@ impl State {
                     let progress = CommitBatchProgress::ProcessingOperations {
                         batch_id,
                         operation_index: operation_index + 1,
-                        needs_cookie_update,
                     };
                     ComputationStatus::InProgress(progress)
                 } else {
@@ -410,7 +361,6 @@ impl State {
                     let progress = CommitBatchProgress::HashingChunks {
                         batch_id,
                         operation_index,
-                        needs_cookie_update,
                         set_asset_content_arg,
                         content_chunks,
                         chunk_index: chunk_index + 1,
@@ -419,36 +369,6 @@ impl State {
                     };
                     ComputationStatus::InProgress(progress)
                 }
-            }
-            CommitBatchProgress::UpdatingCookies {
-                html_keys,
-                operation_index,
-            } => {
-                // Process one cookie update per call
-                if operation_index >= html_keys.len() {
-                    // All cookies updated, we're done
-                    self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
-                    return ComputationStatus::Done(());
-                }
-
-                // Update one cookie
-                let key = &html_keys[operation_index];
-                let dependent_keys = self.dependent_keys(key);
-                if let Some(asset) = self.assets.get_mut(key) {
-                    on_asset_change(
-                        &mut self.asset_hashes,
-                        key,
-                        asset,
-                        dependent_keys,
-                        Some(&self.encoded_canister_env),
-                    );
-                }
-
-                let progress = CommitBatchProgress::UpdatingCookies {
-                    html_keys,
-                    operation_index: operation_index + 1,
-                };
-                ComputationStatus::InProgress(progress)
             }
         }
     }

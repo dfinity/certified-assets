@@ -7,7 +7,6 @@
 
 use candid::{CandidType, Nat, Principal};
 use serde::{de::DeserializeOwned, Deserialize};
-use std::collections::HashMap;
 
 #[derive(CandidType, Clone, Debug, Deserialize)]
 pub struct AssetEncodingDetails {
@@ -27,7 +26,7 @@ pub struct CreateAssetArguments {
     pub key: String,
     pub content_type: String,
     pub max_age: Option<u64>,
-    pub headers: Option<HashMap<String, String>>,
+    pub headers: Option<Vec<(String, String)>>,
     pub allow_raw_access: Option<bool>,
 }
 
@@ -101,7 +100,7 @@ pub struct CommitBatchArguments {
 #[derive(CandidType, Clone, Debug, Deserialize, Default)]
 pub struct AssetProperties {
     pub max_age: Option<u64>,
-    pub headers: Option<HashMap<String, String>>,
+    pub headers: Option<Vec<(String, String)>>,
     pub allow_raw_access: Option<bool>,
 }
 
