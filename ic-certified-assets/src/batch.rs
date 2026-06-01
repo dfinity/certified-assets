@@ -10,10 +10,11 @@
 //! helpers they rely on. State methods unrelated to batches stay in the
 //! state machine module.
 
-use crate::asset::{is_html_key, on_asset_change, Timestamp};
+use crate::asset::{on_asset_change, Timestamp};
 use crate::certification::{AssetKey, HashTreePath};
 use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
+use crate::redirect;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
@@ -255,13 +256,18 @@ impl State {
                     // All operations processed
                     self.batches.remove(&batch_id);
                     self.certify_404_if_required();
+                    // Asset ops in this batch may have clobbered tree entries
+                    // that redirect rules own (any rule whose source path
+                    // collides with an asset's `<$>` slot). Re-cert them so
+                    // the batch ends with a consistent rule tree.
+                    self.on_redirect_rules_change();
 
                     // Move to cookie update phase if needed
                     if needs_cookie_update {
                         let html_keys: Vec<_> = self
                             .assets
                             .keys()
-                            .filter(|key| is_html_key(key))
+                            .filter(|key| key.ends_with(".html"))
                             .cloned()
                             .collect();
 
@@ -338,6 +344,21 @@ impl State {
                     }
                     BatchOperation::SetAssetProperties(arg) => {
                         self.set_asset_properties(arg.clone())
+                    }
+                    BatchOperation::SetRedirectRules(arg) => {
+                        // Validate every rule before mutating state so a single
+                        // bad rule fails the whole op with no partial update.
+                        let mut validation: Result<(), String> = Ok(());
+                        for rule in &arg.rules {
+                            if let Err(e) = redirect::validate(rule) {
+                                validation = Err(e);
+                                break;
+                            }
+                        }
+                        validation.map(|_| {
+                            self.redirect_rules = arg.rules.clone();
+                            self.on_redirect_rules_change();
+                        })
                     }
                 };
                 if let Err(e) = result {

@@ -8,20 +8,17 @@
 //!   Candid surface types used by `get` / `list`.
 //! - [`on_asset_change`] is the central re-certification routine: every State
 //!   method that mutates an asset funnels through it.
-//! - Aliasing helpers ([`aliases_of`], [`aliased_by`], [`is_html_key`]) and
-//!   [`encoding_certification_order`] are small key/encoding utilities shared
+//! - [`encoding_certification_order`] is a small encoding utility shared
 //!   between the state machine and the asset itself.
 
 use crate::certification::{
     build_ic_certificate_expression_from_headers_and_encoding,
     build_ic_certificate_expression_header, response_hash, AssetKey, AssetPath,
-    CertificateExpression, CertifiedResponses, HashTreePath, NestedTreeKey, RequestHash,
-    ResponseHash,
+    CertificateExpression, CertifiedResponses, HashTreePath, RequestHash, ResponseHash,
 };
 use crate::cookies::add_ic_env_cookie;
 use crate::http::{
     CallbackFunc, HeaderField, HttpResponse, StreamingCallbackToken, StreamingStrategy,
-    FALLBACK_FILE,
 };
 use crate::rc_bytes::RcBytes;
 use candid::{CandidType, Deserialize, Int, Nat};
@@ -51,9 +48,6 @@ pub fn encoding_certification_order<'a>(
     encoding_order
 }
 
-/// Default aliasing behavior.
-pub(crate) const DEFAULT_ALIAS_ENABLED: bool = true;
-
 const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 
 pub(crate) type Timestamp = Int;
@@ -77,23 +71,6 @@ impl AssetEncoding {
                     path.hash_tree_path(ce, &RequestHash::default(), response_hash.into())
                 })
             })
-        })
-    }
-
-    fn not_found_hash_path(&self) -> Option<HashTreePath> {
-        self.certificate_expression.as_ref().and_then(|ce| {
-            self.response_hashes
-                .as_ref()
-                .and_then(|hashes| hashes.get(&200))
-                .map(|response_hash| {
-                    HashTreePath::from(Vec::<NestedTreeKey>::from([
-                        "http_expr".into(),
-                        "<*>".into(), // 404 not found wildcard segment
-                        ce.expression_hash.as_slice().into(),
-                        "".into(), // no request certification - use empty node
-                        response_hash.as_slice().into(),
-                    ]))
-                })
         })
     }
 
@@ -141,7 +118,6 @@ pub struct Asset {
     pub encodings: HashMap<String, AssetEncoding>,
     pub max_age: Option<u64>,
     pub headers: Option<BTreeMap<String, String>>,
-    pub is_aliased: Option<bool>,
     pub allow_raw_access: Option<bool>,
 }
 
@@ -213,6 +189,12 @@ impl Asset {
         )
     }
 
+    /// Builds the response for one encoding.
+    ///
+    /// When `status_override` is `None` this serves the normal 200/304 path
+    /// (etag-based not-modified). When it is `Some(s)` — used by redirect
+    /// rules that serve a custom error page — the response always carries
+    /// the body with status `s`, and the etag / 304 logic is skipped.
     #[allow(clippy::too_many_arguments)]
     pub fn build_ok_http_response(
         &self,
@@ -223,6 +205,7 @@ impl Asset {
         certificate_header: Option<&HeaderField>,
         callback: &CallbackFunc,
         etags: &[Hash],
+        status_override: Option<u16>,
     ) -> HttpResponse {
         let mut headers = self.get_headers_for_asset(enc_name);
         if let Some(head) = certificate_header {
@@ -241,7 +224,9 @@ impl Asset {
             token,
         });
 
-        let (status_code, body) = if etags.contains(&enc.sha256) {
+        let (status_code, body) = if let Some(status) = status_override {
+            (status, enc.content_chunks[chunk_index].clone())
+        } else if etags.contains(&enc.sha256) {
             (304, RcBytes::default())
         } else {
             if !headers
@@ -265,6 +250,7 @@ impl Asset {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_http_response_for_encodings(
         &self,
         requested_encodings: &[String],
@@ -273,6 +259,7 @@ impl Asset {
         certificate_header: Option<&HeaderField>,
         callback: &CallbackFunc,
         etags: &[Hash],
+        status_override: Option<u16>,
     ) -> Option<HttpResponse> {
         // Return a requested encoding that is certified
         for enc_name in requested_encodings.iter() {
@@ -286,6 +273,7 @@ impl Asset {
                         certificate_header,
                         callback,
                         etags,
+                        status_override,
                     ));
                 }
             }
@@ -303,6 +291,7 @@ impl Asset {
                         certificate_header,
                         callback,
                         etags,
+                        status_override,
                     ));
                 }
             }
@@ -360,7 +349,7 @@ pub(crate) fn on_asset_change(
 
     // Add ic_env cookie for html files, if the cookie value (canister env) is provided
     if let Some(encoded_canister_env) = encoded_canister_env {
-        if is_html_key(key) {
+        if key.ends_with(".html") {
             let headers = asset.headers.get_or_insert_default();
             add_ic_env_cookie(headers, encoded_canister_env);
         }
@@ -392,9 +381,6 @@ fn delete_preexisting_asset_hashes(
 ) {
     for key in affected_keys.iter() {
         asset_hashes.remove_responses_for_path(key);
-        if key == FALLBACK_FILE {
-            asset_hashes.remove_fallback_responses();
-        }
     }
 }
 
@@ -415,46 +401,5 @@ fn insert_new_response_hashes_for_encoding(
                 );
             }
         }
-        if key == FALLBACK_FILE {
-            if let Some(not_found_hash_path) = enc.not_found_hash_path() {
-                asset_hashes.certify_response_precomputed(&not_found_hash_path);
-            }
-        }
     }
-}
-
-// path like /path/to/my/asset should also be valid for /path/to/my/asset.html or /path/to/my/asset/index.html
-pub(crate) fn aliases_of(key: &AssetKey) -> Vec<AssetKey> {
-    if key.ends_with('/') {
-        vec![format!("{}index.html", key)]
-    } else if !is_html_key(key) {
-        vec![format!("{}.html", key), format!("{}/index.html", key)]
-    } else {
-        Vec::new()
-    }
-}
-
-// Determines possible original keys in case the supplied key is being aliaseded to.
-// Sort-of a reverse operation of `alias_of`
-pub(crate) fn aliased_by(key: &AssetKey) -> Vec<AssetKey> {
-    if key == "/index.html" {
-        vec![
-            key[..(key.len() - 5)].into(),
-            key[..(key.len() - 10)].into(),
-        ]
-    } else if key.ends_with("/index.html") {
-        vec![
-            key[..(key.len() - 5)].into(),
-            key[..(key.len() - 10)].into(),
-            key[..(key.len() - 11)].to_string(),
-        ]
-    } else if is_html_key(key) {
-        vec![key[..(key.len() - 5)].to_string()]
-    } else {
-        Vec::new()
-    }
-}
-
-pub(crate) fn is_html_key<T: AsRef<str>>(key: T) -> bool {
-    key.as_ref().ends_with(".html")
 }

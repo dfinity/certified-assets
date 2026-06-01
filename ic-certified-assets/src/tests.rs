@@ -182,11 +182,6 @@ impl AssetBuilder {
         self
     }
 
-    fn with_aliasing(mut self, aliasing: bool) -> Self {
-        self.aliasing = Some(aliasing);
-        self
-    }
-
     fn with_allow_raw_access(mut self, allow_raw_access: Option<bool>) -> Self {
         self.allow_raw_access = allow_raw_access;
         self
@@ -428,7 +423,7 @@ fn serve_correct_encoding() {
 }
 
 #[test]
-fn serve_fallback() {
+fn serve_fallback_via_rule() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -452,6 +447,10 @@ fn serve_fallback() {
         ],
     );
 
+    // SPA-style catch-all: a single root subtree rule replaces what used to
+    // be the built-in `FALLBACK_FILE` mechanism.
+    set_root_spa_rule(&mut state, "/index.html");
+
     let identity_response = certified_http_request(
         &state,
         RequestBuilder::get("/index.html")
@@ -460,7 +459,6 @@ fn serve_fallback() {
             .build(),
     );
     let certificate_header = lookup_header(&identity_response, "IC-Certificate").unwrap();
-    println!("certificate_header: {certificate_header}");
 
     assert_eq!(identity_response.status_code, 200);
     assert_eq!(identity_response.body.as_ref(), INDEX_BODY);
@@ -476,6 +474,8 @@ fn serve_fallback() {
     let certificate_header = lookup_header(&fallback_response, "IC-Certificate").unwrap();
     assert_eq!(fallback_response.status_code, 200);
     assert_eq!(fallback_response.body.as_ref(), INDEX_BODY);
+    // The rule lives at the root `<*>`, matching the previous built-in
+    // fallback's expr_path.
     assert!(certificate_header.contains("expr_path=:2dn3gmlodHRwX2V4cHJjPCo+:"));
 
     let valid_response = certified_http_request(
@@ -497,6 +497,68 @@ fn serve_fallback() {
     );
     assert_eq!(fallback_response.status_code, 200);
     assert_eq!(fallback_response.body.as_ref(), INDEX_BODY);
+}
+
+fn set_root_spa_rule(state: &mut State, target: &str) {
+    use crate::redirect::{RedirectRule, RulePattern};
+    use crate::types::SetRedirectRulesArguments;
+    let system_context = mock_system_context();
+    let batch_id = state.create_batch(&system_context).unwrap();
+    let ops = vec![BatchOperation::SetRedirectRules(
+        SetRedirectRulesArguments {
+            rules: vec![RedirectRule {
+                from: RulePattern::Subtree("/".into()),
+                to: target.into(),
+                status: 200,
+                headers: None,
+            }],
+        },
+    )];
+    run_computation_until_completion(|progress| {
+        state.commit_batch(
+            &CommitBatchArguments {
+                batch_id: batch_id.clone(),
+                operations: ops.clone(),
+            },
+            progress,
+            &system_context,
+        )
+    })
+    .unwrap();
+}
+
+fn set_exact_rewrite_rule(state: &mut State, from: &str, to: &str) {
+    set_exact_rewrite_rules(state, &[(from, to)]);
+}
+
+fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
+    use crate::redirect::{RedirectRule, RulePattern};
+    use crate::types::SetRedirectRulesArguments;
+    let system_context = mock_system_context();
+    let batch_id = state.create_batch(&system_context).unwrap();
+    let rules = pairs
+        .iter()
+        .map(|(from, to)| RedirectRule {
+            from: RulePattern::Exact((*from).into()),
+            to: (*to).into(),
+            status: 200,
+            headers: None,
+        })
+        .collect();
+    let ops = vec![BatchOperation::SetRedirectRules(
+        SetRedirectRulesArguments { rules },
+    )];
+    run_computation_until_completion(|progress| {
+        state.commit_batch(
+            &CommitBatchArguments {
+                batch_id: batch_id.clone(),
+                operations: ops.clone(),
+            },
+            progress,
+            &system_context,
+        )
+    })
+    .unwrap();
 }
 
 #[test]
@@ -561,7 +623,7 @@ fn can_delete_batch_with_chunks() {
 }
 
 #[test]
-fn returns_index_file_for_missing_assets() {
+fn returns_index_file_for_missing_assets_via_rule() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -578,6 +640,8 @@ fn returns_index_file_for_missing_assets() {
                 .with_encoding("identity", vec![OTHER_BODY]),
         ],
     );
+    // Without a rule the canister no longer auto-falls-back to /index.html.
+    set_root_spa_rule(&mut state, "/index.html");
 
     let response = certified_http_request(
         &state,
@@ -588,6 +652,86 @@ fn returns_index_file_for_missing_assets() {
 
     assert_eq!(response.status_code, 200);
     assert_eq!(response.body.as_ref(), INDEX_BODY);
+}
+
+#[test]
+fn old_stable_assets_with_is_aliased_load_cleanly() {
+    // Mirrors the plan's "guard against accidental data loss" test: a
+    // StableAsset record serialized when built-in aliasing was a real
+    // canister feature must still deserialize and serve correctly after
+    // the in-memory `Asset` lost the `is_aliased` field.
+    use crate::stable::{StableAsset, StableAssetEncoding};
+
+    let mut stable_assets = std::collections::HashMap::new();
+    stable_assets.insert(
+        "/foo.html".to_string(),
+        StableAsset {
+            content_type: "text/html".into(),
+            encodings: HashMap::from([(
+                "identity".into(),
+                StableAssetEncoding {
+                    modified: 0,
+                    content_chunks: vec![],
+                    total_length: 0,
+                    certified: false,
+                    sha256: [0u8; 32],
+                    certificate_expression: None,
+                    response_hashes: None,
+                },
+            )]),
+            max_age: None,
+            headers: None,
+            // Pretend this came from an older serialized blob.
+            is_aliased: Some(true),
+            allow_raw_access: None,
+        },
+    );
+    let stable_state = StableState {
+        authorized: vec![],
+        permissions: None,
+        stable_assets,
+        next_batch_id: None,
+        configuration: None,
+        last_state_update_timestamp: None,
+        redirect_rules: None,
+    };
+    // Round-trip through serde_cbor (the format stable memory uses).
+    let bytes = serde_cbor::to_vec(&stable_state).unwrap();
+    let restored: StableState = serde_cbor::from_slice(&bytes).unwrap();
+    let state: State = restored.into();
+    // The asset survives; the in-memory shape no longer carries the flag.
+    assert!(state.assets.contains_key("/foo.html"));
+}
+
+#[test]
+fn no_implicit_aliasing_without_rules() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![
+            AssetBuilder::new("/foo.html", "text/html").with_encoding("identity", vec![BODY]),
+            AssetBuilder::new("/blog/index.html", "text/html")
+                .with_encoding("identity", vec![BODY]),
+        ],
+    );
+
+    for missing in &["/foo", "/foo/", "/blog", "/blog/"] {
+        let response = state.http_request(
+            RequestBuilder::get(*missing).build(),
+            &[],
+            unused_callback(),
+        );
+        assert_eq!(
+            response.status_code, 404,
+            "expected 404 for {missing}, got {}",
+            response.status_code
+        );
+    }
+    let response = certified_http_request(&state, RequestBuilder::get("/foo.html").build());
+    assert_eq!(response.status_code, 200);
 }
 
 #[test]
@@ -1066,7 +1210,9 @@ fn supports_getting_and_setting_asset_properties() {
                 ("new-header".into(), "value".into())
             ])),
             allow_raw_access: None,
-            is_aliased: Some(false)
+            // `is_aliased` is accepted on the candid surface but ignored —
+            // the canister no longer aliases on its own.
+            is_aliased: None
         })
     );
 
@@ -1502,7 +1648,9 @@ fn create_asset_fails_if_asset_exists() {
 }
 
 #[test]
-fn support_aliases() {
+fn aliases_via_explicit_rules() {
+    // Migrated from `support_aliases`: what used to be built-in `.html` /
+    // `index.html` aliasing is now expressed as user-supplied 200 rules.
     let mut state = State::default();
     let system_context = mock_system_context();
     const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>index</html>";
@@ -1521,6 +1669,16 @@ fn support_aliases() {
                 .with_encoding("identity", vec![SUBDIR_INDEX_BODY]),
         ],
     );
+    set_exact_rewrite_rules(
+        &mut state,
+        &[
+            ("/contents", "/contents.html"),
+            ("/", "/index.html"),
+            ("/subdirectory/index", "/subdirectory/index.html"),
+            ("/subdirectory/", "/subdirectory/index.html"),
+            ("/subdirectory", "/subdirectory/index.html"),
+        ],
+    );
 
     let normal_request =
         certified_http_request(&state, RequestBuilder::get("/contents.html").build());
@@ -1531,11 +1689,6 @@ fn support_aliases() {
 
     let root_alias = certified_http_request(&state, RequestBuilder::get("/").build());
     assert_eq!(root_alias.body.as_ref(), INDEX_BODY);
-
-    // cannot use certified request because this produces an invalid URL
-    let empty_path_alias =
-        state.http_request(RequestBuilder::get("").build(), &[], unused_callback());
-    assert_eq!(empty_path_alias.body.as_ref(), INDEX_BODY);
 
     let subdirectory_index_alias =
         certified_http_request(&state, RequestBuilder::get("/subdirectory/index").build());
@@ -1551,7 +1704,9 @@ fn support_aliases() {
 }
 
 #[test]
-fn alias_enable_and_disable() {
+fn rule_aliasing_persists_through_upgrade() {
+    // Migrated from `alias_behavior_persists_through_upgrade`: rules survive
+    // the upgrade and serve correctly afterward.
     let mut state = State::default();
     let system_context = mock_system_context();
     const SUBDIR_INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>subdir index</html>";
@@ -1567,106 +1722,37 @@ fn alias_enable_and_disable() {
                 .with_encoding("identity", vec![SUBDIR_INDEX_BODY]),
         ],
     );
+    // No rule for /contents → no alias to /contents.html (used to be the
+    // "aliasing disabled" path); still install one for the subdirectory.
+    set_exact_rewrite_rule(&mut state, "/subdirectory", "/subdirectory/index.html");
 
-    let alias_add_html = certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(alias_add_html.body.as_ref(), FILE_BODY);
-
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/contents.html".into(),
-            max_age: None,
-            headers: None,
-            allow_raw_access: None,
-            is_aliased: Some(Some(false)),
-        })
-        .is_ok());
-
-    let no_more_alias = state.http_request(
+    let no_alias = state.http_request(
         RequestBuilder::get("/contents").build(),
         &[],
         unused_callback(),
     );
-    assert_ne!(no_more_alias.body.as_ref(), FILE_BODY);
+    assert_eq!(no_alias.status_code, 404);
 
-    let other_alias_still_works =
-        certified_http_request(&state, RequestBuilder::get("/subdirectory/index").build());
-    assert_eq!(other_alias_still_works.body.as_ref(), SUBDIR_INDEX_BODY);
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/contents.html", "text/html")
-            .with_encoding("identity", vec![FILE_BODY])
-            .with_aliasing(true)],
-    );
-
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/contents.html".into(),
-            max_age: None,
-            headers: None,
-            allow_raw_access: None,
-            is_aliased: Some(Some(true)),
-        })
-        .is_ok());
-    let alias_add_html_again =
-        certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(alias_add_html_again.body.as_ref(), FILE_BODY);
-}
-
-#[test]
-fn alias_behavior_persists_through_upgrade() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-    const SUBDIR_INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>subdir index</html>";
-    const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY])
-                .with_aliasing(false),
-            AssetBuilder::new("/subdirectory/index.html", "text/html")
-                .with_encoding("identity", vec![SUBDIR_INDEX_BODY]),
-        ],
-    );
-
-    let alias_disabled = state.http_request(
-        RequestBuilder::get("/contents").build(),
-        &[],
-        unused_callback(),
-    );
-    assert_ne!(alias_disabled.body.as_ref(), FILE_BODY);
-
-    let alias_for_other_asset_still_works =
-        certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
-    assert_eq!(
-        alias_for_other_asset_still_works.body.as_ref(),
-        SUBDIR_INDEX_BODY
-    );
+    let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
+    assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
 
     let stable_state: StableState = state.into();
     let state: State = stable_state.into();
 
-    let alias_stays_turned_off = state.http_request(
+    let no_alias = state.http_request(
         RequestBuilder::get("/contents").build(),
         &[],
         unused_callback(),
     );
-    assert_ne!(alias_stays_turned_off.body.as_ref(), FILE_BODY);
-
-    let alias_for_other_asset_still_works =
-        certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
-    assert_eq!(
-        alias_for_other_asset_still_works.body.as_ref(),
-        SUBDIR_INDEX_BODY
-    );
+    assert_eq!(no_alias.status_code, 404);
+    let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
+    assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
 }
 
 #[test]
-fn aliasing_name_clash() {
+fn rule_aliasing_name_clash() {
+    // Migrated from `aliasing_name_clash`: an asset at the rule's source
+    // shadows the rule.
     let mut state = State::default();
     let system_context = mock_system_context();
     const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
@@ -1678,9 +1764,10 @@ fn aliasing_name_clash() {
         vec![AssetBuilder::new("/contents.html", "text/html")
             .with_encoding("identity", vec![FILE_BODY])],
     );
+    set_exact_rewrite_rule(&mut state, "/contents", "/contents.html");
 
-    let alias_add_html = certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(alias_add_html.body.as_ref(), FILE_BODY);
+    let via_rule = certified_http_request(&state, RequestBuilder::get("/contents").build());
+    assert_eq!(via_rule.body.as_ref(), FILE_BODY);
 
     create_assets(
         &mut state,
@@ -1689,20 +1776,17 @@ fn aliasing_name_clash() {
             .with_encoding("identity", vec![FILE_BODY_2])],
     );
 
-    let alias_doesnt_overwrite_actual_file =
-        certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(
-        alias_doesnt_overwrite_actual_file.body.as_ref(),
-        FILE_BODY_2
-    );
+    let asset_wins = certified_http_request(&state, RequestBuilder::get("/contents").build());
+    assert_eq!(asset_wins.body.as_ref(), FILE_BODY_2);
 
     state.delete_asset(DeleteAssetArguments {
         key: "/contents".to_string(),
     });
+    state.on_redirect_rules_change();
 
-    let alias_accessible_again =
+    let rule_visible_again =
         certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(alias_accessible_again.body.as_ref(), FILE_BODY);
+    assert_eq!(rule_visible_again.body.as_ref(), FILE_BODY);
 }
 
 #[test]
@@ -1782,20 +1866,22 @@ mod allow_raw_access {
 
     #[test]
     fn redirects_from_raw_to_certified() {
+        // The raw-domain redirect now triggers for both direct asset hits and
+        // 200-rule aliases — explicit rules replace the canister's old
+        // built-in `.html` / `index.html` aliasing.
         let mut state = State::default();
 
         state.create_test_asset(
             AssetBuilder::new("/page.html", "text/html").with_allow_raw_access(Some(false)),
         );
+        set_exact_rewrite_rule(&mut state, "/page", "/page.html");
         let response = state.fake_http_request("a-b-c.raw.icp0.io", "/page");
-        dbg!(&response);
         assert_eq!(response.status_code, 308);
         assert_eq!(
             lookup_header(&response, "Location").unwrap(),
             "https://a-b-c.icp0.io/page"
         );
         let response = state.fake_http_request("a-b-c.raw.ic0.app", "/page");
-        dbg!(&response);
         assert_eq!(response.status_code, 308);
         assert_eq!(
             lookup_header(&response, "Location").unwrap(),
@@ -1805,8 +1891,11 @@ mod allow_raw_access {
         state.create_test_asset(
             AssetBuilder::new("/page2.html", "text/html").with_allow_raw_access(Some(false)),
         );
+        set_exact_rewrite_rules(
+            &mut state,
+            &[("/page", "/page.html"), ("/page2", "/page2.html")],
+        );
         let response = state.fake_http_request("a-b-c.raw.icp0.io", "/page2");
-        dbg!(&response);
         assert_eq!(response.status_code, 308);
         assert_eq!(
             lookup_header(&response, "Location").unwrap(),
@@ -1816,8 +1905,8 @@ mod allow_raw_access {
         state.create_test_asset(
             AssetBuilder::new("/index.html", "text/html").with_allow_raw_access(Some(false)),
         );
+        set_root_spa_rule(&mut state, "/index.html");
         let response = state.fake_http_request("a-b-c.raw.icp0.io", "/");
-        dbg!(&response);
         assert_eq!(response.status_code, 308);
         assert_eq!(
             lookup_header(&response, "Location").unwrap(),
@@ -1828,8 +1917,8 @@ mod allow_raw_access {
         state.create_test_asset(
             AssetBuilder::new("/index.html", "text/html").with_allow_raw_access(Some(false)),
         );
+        set_root_spa_rule(&mut state, "/index.html");
         let response = state.fake_http_request("a-b-c.raw.icp0.io", "/");
-        dbg!(&response);
         assert_eq!(response.status_code, 308);
         assert_eq!(
             lookup_header(&response, "Location").unwrap(),
@@ -3128,5 +3217,618 @@ mod compute_state_hash {
         // Verify we can call it again
         let result = run_computation_until_completion(|_progress| state.compute_state_hash());
         assert!(result.is_ok());
+    }
+}
+
+mod redirect_rules {
+    use super::*;
+    use crate::redirect::{RedirectRule, RulePattern};
+    use crate::types::SetRedirectRulesArguments;
+
+    fn commit(state: &mut State, ops: Vec<BatchOperation>) -> Result<(), String> {
+        let system_context = mock_system_context();
+        let batch_id = state.create_batch(&system_context).unwrap();
+        run_computation_until_completion(|progress| {
+            state.commit_batch(
+                &CommitBatchArguments {
+                    batch_id: batch_id.clone(),
+                    operations: ops.clone(),
+                },
+                progress,
+                &system_context,
+            )
+        })
+    }
+
+    fn sample_rules() -> Vec<RedirectRule> {
+        vec![
+            RedirectRule {
+                from: RulePattern::Exact("/old".into()),
+                to: "/new".into(),
+                status: 301,
+                headers: None,
+            },
+            RedirectRule {
+                from: RulePattern::Subtree("/legacy/".into()),
+                to: "/home".into(),
+                status: 308,
+                headers: Some(vec![("X-Reason".into(), "moved".into())]),
+            },
+        ]
+    }
+
+    #[test]
+    fn commit_set_redirect_rules_round_trips_through_get() {
+        let mut state = State::default();
+        let rules = sample_rules();
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: rules.clone(),
+                },
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(state.get_redirect_rules(), rules);
+    }
+
+    #[test]
+    fn invalid_rule_fails_op_without_mutating_state() {
+        let mut state = State::default();
+        // Seed an initial valid set so we can confirm it is preserved.
+        let initial = vec![RedirectRule {
+            from: RulePattern::Exact("/seed".into()),
+            to: "/dest".into(),
+            status: 301,
+            headers: None,
+        }];
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: initial.clone(),
+                },
+            )],
+        )
+        .unwrap();
+
+        // One valid + one invalid (status 418) — the whole op must fail.
+        let mixed = vec![
+            RedirectRule {
+                from: RulePattern::Exact("/a".into()),
+                to: "/b".into(),
+                status: 301,
+                headers: None,
+            },
+            RedirectRule {
+                from: RulePattern::Exact("/c".into()),
+                to: "/d".into(),
+                status: 418,
+                headers: None,
+            },
+        ];
+        let err = commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments { rules: mixed },
+            )],
+        )
+        .unwrap_err();
+        assert!(err.contains("unsupported status code"), "got: {err}");
+
+        assert_eq!(
+            state.get_redirect_rules(),
+            initial,
+            "rules must be unchanged after a failed SetRedirectRules"
+        );
+    }
+
+    #[test]
+    fn rules_persist_through_upgrade() {
+        let mut state = State::default();
+        let rules = sample_rules();
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: rules.clone(),
+                },
+            )],
+        )
+        .unwrap();
+
+        let stable: StableState = state.into();
+        let state: State = stable.into();
+
+        assert_eq!(state.get_redirect_rules(), rules);
+    }
+
+    #[test]
+    fn empty_rules_replace_existing() {
+        let mut state = State::default();
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: sample_rules(),
+                },
+            )],
+        )
+        .unwrap();
+        assert!(!state.get_redirect_rules().is_empty());
+
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments { rules: vec![] },
+            )],
+        )
+        .unwrap();
+        assert!(state.get_redirect_rules().is_empty());
+    }
+
+    #[test]
+    fn exact_3xx_rule_serves_redirect_with_certificate() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/old".into()),
+                        to: "/new".into(),
+                        status: 301,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+
+        let response = certified_http_request(&state, RequestBuilder::get("/old").build());
+        assert_eq!(response.status_code, 301);
+        assert_eq!(lookup_header(&response, "Location"), Some("/new"));
+    }
+
+    #[test]
+    fn subtree_3xx_rule_fires_for_descendants_and_verifies() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/legacy/".into()),
+                        to: "/home".into(),
+                        status: 308,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+
+        let response =
+            certified_http_request(&state, RequestBuilder::get("/legacy/anything/here").build());
+        assert_eq!(response.status_code, 308);
+        assert_eq!(lookup_header(&response, "Location"), Some("/home"));
+    }
+
+    #[test]
+    fn first_match_wins_across_multiple_3xx_rules() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![
+                        RedirectRule {
+                            from: RulePattern::Exact("/dup".into()),
+                            to: "/first".into(),
+                            status: 301,
+                            headers: None,
+                        },
+                        RedirectRule {
+                            from: RulePattern::Exact("/dup".into()),
+                            to: "/second".into(),
+                            status: 302,
+                            headers: None,
+                        },
+                    ],
+                },
+            )],
+        )
+        .unwrap();
+
+        let response = certified_http_request(&state, RequestBuilder::get("/dup").build());
+        assert_eq!(response.status_code, 301);
+        assert_eq!(lookup_header(&response, "Location"), Some("/first"));
+    }
+
+    #[test]
+    fn rules_survive_post_upgrade_and_witnesses_still_validate() {
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: sample_rules(),
+                },
+            )],
+        )
+        .unwrap();
+        // Sanity: rules fire pre-upgrade.
+        let pre = certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        assert_eq!(pre.status_code, 308);
+
+        let stable: StableState = state.into();
+        let state: State = stable.into();
+
+        let post = certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        assert_eq!(post.status_code, 308);
+        assert_eq!(lookup_header(&post, "Location"), Some("/home"));
+    }
+
+    #[test]
+    fn status_200_target_coupling() {
+        // Install rule before the target exists → rule is inert.
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/foo".into()),
+                        to: "/foo.html".into(),
+                        status: 200,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+        assert_eq!(inert.status_code, 404);
+
+        // Add the asset → rule fires.
+        const BODY_V1: &[u8] = b"<!DOCTYPE html><html>v1</html>";
+        create_assets(
+            &mut state,
+            &mock_system_context(),
+            vec![AssetBuilder::new("/foo.html", "text/html")
+                .with_encoding("identity", vec![BODY_V1])],
+        );
+        let v1 = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(v1.status_code, 200);
+        assert_eq!(v1.body.as_ref(), BODY_V1);
+
+        // Modify the asset → rule still fires with the new content.
+        const BODY_V2: &[u8] = b"<!DOCTYPE html><html>v2 different</html>";
+        create_assets(
+            &mut state,
+            &mock_system_context(),
+            vec![AssetBuilder::new("/foo.html", "text/html")
+                .with_encoding("identity", vec![BODY_V2])],
+        );
+        let v2 = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(v2.body.as_ref(), BODY_V2);
+
+        // Delete the target → rule goes inert again.
+        delete_asset_via_batch(&mut state, "/foo.html");
+        let after_delete =
+            state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+        assert_eq!(after_delete.status_code, 404);
+    }
+
+    fn delete_asset_via_batch(state: &mut State, key: &str) {
+        commit(
+            state,
+            vec![BatchOperation::DeleteAsset(DeleteAssetArguments {
+                key: key.to_string(),
+            })],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn asset_shadows_exact_rule_at_same_path() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const RULE_TARGET: &[u8] = b"rule-target";
+        const SOURCE_ASSET: &[u8] = b"source-asset";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/bar.html", "text/html")
+                .with_encoding("identity", vec![RULE_TARGET])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/foo".into()),
+                        to: "/bar.html".into(),
+                        status: 200,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+
+        // Without an asset at /foo, the rule fires.
+        let via_rule = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(via_rule.body.as_ref(), RULE_TARGET);
+
+        // Upload an asset at /foo → asset wins.
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/foo", "text/html")
+                .with_encoding("identity", vec![SOURCE_ASSET])],
+        );
+        let via_asset = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(via_asset.body.as_ref(), SOURCE_ASSET);
+
+        // Delete the source asset → rule reappears.
+        delete_asset_via_batch(&mut state, "/foo");
+        let back_to_rule = certified_http_request(&state, RequestBuilder::get("/foo").build());
+        assert_eq!(back_to_rule.body.as_ref(), RULE_TARGET);
+    }
+
+    #[test]
+    fn custom_404_page_serves_target_with_4xx_status() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const PAGE_BODY: &[u8] =
+            b"<!DOCTYPE html><html><body>This page is not found.</body></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![PAGE_BODY])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/legacy/".into()),
+                        to: "/404.html".into(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+
+        let response =
+            certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response.body.as_ref(), PAGE_BODY);
+        // The target's content-type carries over verbatim.
+        assert_eq!(lookup_header(&response, "Content-Type"), Some("text/html"));
+    }
+
+    #[test]
+    fn custom_410_page_serves_target_with_4xx_status() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const PAGE_BODY: &[u8] =
+            b"<!DOCTYPE html><html><body>The content here has been removed.</body></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/410.html", "text/html")
+                .with_encoding("identity", vec![PAGE_BODY])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/retired".into()),
+                        to: "/410.html".into(),
+                        status: 410,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+
+        let response = certified_http_request(&state, RequestBuilder::get("/retired").build());
+        assert_eq!(response.status_code, 410);
+        assert_eq!(response.body.as_ref(), PAGE_BODY);
+    }
+
+    #[test]
+    fn validate_rejects_4xx_with_empty_target() {
+        // `_redirects` always supplies a target — the canister rejects 4xx
+        // rules without one (the catch-all 404 covers the empty case).
+        let mut state = State::default();
+        let err = commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: String::new(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap_err();
+        assert!(err.contains("must be an absolute asset path"), "got: {err}");
+    }
+
+    #[test]
+    fn no_rules_falls_through_to_builtin_404() {
+        // No `_redirects` rules at all: missing paths return the canister's
+        // built-in certified 404 ("not found" body).
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![BODY])
+            ],
+        );
+
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response.body.as_ref(), b"not found");
+    }
+
+    #[test]
+    fn rule_4xx_with_missing_target_stays_inert() {
+        // Matches the 200 behavior: pointing `to` at an asset that doesn't
+        // exist yet leaves the rule inert until the asset shows up.
+        let mut state = State::default();
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: "/404.html".into(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+        // Target doesn't exist → rule inert → built-in fall-through 404.
+        let inert = state.http_request(
+            RequestBuilder::get("/missing").build(),
+            &[],
+            unused_callback(),
+        );
+        assert_eq!(inert.status_code, 404);
+        // The body is the built-in "not found", not the (missing) /404.html.
+        assert_eq!(inert.body.as_ref(), b"not found");
+
+        // Now create the target — the rule starts firing.
+        const PAGE: &[u8] = b"<html>Custom 404</html>";
+        create_assets(
+            &mut state,
+            &mock_system_context(),
+            vec![AssetBuilder::new("/404.html", "text/html").with_encoding("identity", vec![PAGE])],
+        );
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response.body.as_ref(), PAGE);
+    }
+
+    #[test]
+    fn custom_4xx_target_updates_refresh_the_rule() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const V1: &[u8] = b"<html>404 v1</html>";
+        const V2: &[u8] = b"<html>404 v2 redesigned</html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/404.html", "text/html").with_encoding("identity", vec![V1])],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/old/".into()),
+                        to: "/404.html".into(),
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+        let v1 = certified_http_request(&state, RequestBuilder::get("/old/x").build());
+        assert_eq!(v1.body.as_ref(), V1);
+        assert_eq!(v1.status_code, 404);
+
+        // Update the target page — the rule keeps firing with the new content.
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/404.html", "text/html").with_encoding("identity", vec![V2])],
+        );
+        let v2 = certified_http_request(&state, RequestBuilder::get("/old/x").build());
+        assert_eq!(v2.body.as_ref(), V2);
+        assert_eq!(v2.status_code, 404);
+    }
+
+    #[test]
+    fn validate_rejects_4xx_relative_target() {
+        let mut state = State::default();
+        let err = commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: "404.html".into(), // missing leading '/'
+                        status: 404,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap_err();
+        assert!(err.contains("must be an absolute asset path"), "got: {err}");
+    }
+
+    #[test]
+    fn subtree_200_rule_fires_for_unshadowed_children() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>index</html>";
+        const REAL_BODY: &[u8] = b"<!DOCTYPE html><html>real</html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![INDEX_BODY]),
+                AssetBuilder::new("/real-page", "text/html")
+                    .with_encoding("identity", vec![REAL_BODY]),
+            ],
+        );
+        commit(
+            &mut state,
+            vec![BatchOperation::SetRedirectRules(
+                SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Subtree("/".into()),
+                        to: "/index.html".into(),
+                        status: 200,
+                        headers: None,
+                    }],
+                },
+            )],
+        )
+        .unwrap();
+
+        // Real asset still wins for its own path.
+        let real = certified_http_request(&state, RequestBuilder::get("/real-page").build());
+        assert_eq!(real.body.as_ref(), REAL_BODY);
+
+        // Unshadowed path falls back to the rule → /index.html content.
+        let fallback = certified_http_request(&state, RequestBuilder::get("/anything").build());
+        assert_eq!(fallback.body.as_ref(), INDEX_BODY);
     }
 }

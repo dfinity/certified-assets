@@ -6,6 +6,7 @@ mod cookies;
 pub mod http;
 pub mod nested_tree;
 pub mod rc_bytes;
+pub mod redirect;
 pub mod stable;
 pub mod state;
 pub mod state_hash;
@@ -110,6 +111,7 @@ pub fn store(arg: StoreArg) {
         if let Err(msg) = s.store(arg, &system_context) {
             trap(&msg);
         }
+        s.on_redirect_rules_change();
         certified_data_set(s.root_hash());
     });
 }
@@ -137,6 +139,7 @@ pub fn create_asset(arg: CreateAssetArguments) {
         if let Err(msg) = s.create_asset(arg) {
             trap(&msg);
         }
+        s.on_redirect_rules_change();
         certified_data_set(s.root_hash());
     })
 }
@@ -148,6 +151,7 @@ pub fn set_asset_content(arg: SetAssetContentArguments) {
         if let Err(msg) = s.set_asset_content(arg, &system_context) {
             trap(&msg);
         }
+        s.on_redirect_rules_change();
         certified_data_set(s.root_hash());
     })
 }
@@ -157,6 +161,7 @@ pub fn unset_asset_content(arg: UnsetAssetContentArguments) {
         if let Err(msg) = s.unset_asset_content(arg) {
             trap(&msg);
         }
+        s.on_redirect_rules_change();
         certified_data_set(s.root_hash());
     })
 }
@@ -164,6 +169,7 @@ pub fn unset_asset_content(arg: UnsetAssetContentArguments) {
 pub fn delete_asset(arg: DeleteAssetArguments) {
     with_state_mut(|s| {
         s.delete_asset(arg);
+        s.on_redirect_rules_change();
         certified_data_set(s.root_hash());
     });
 }
@@ -171,6 +177,7 @@ pub fn delete_asset(arg: DeleteAssetArguments) {
 pub fn clear() {
     with_state_mut(|s| {
         s.clear();
+        s.on_redirect_rules_change();
         certified_data_set(s.root_hash());
     });
 }
@@ -225,6 +232,10 @@ pub fn list(request: ListRequest) -> Vec<AssetDetails> {
     with_state(|s| s.list_assets(request))
 }
 
+pub fn get_redirect_rules() -> Vec<crate::redirect::RedirectRule> {
+    with_state(|s| s.get_redirect_rules())
+}
+
 pub fn certified_tree() -> CertifiedTree {
     let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
 
@@ -269,6 +280,8 @@ pub fn set_asset_properties(arg: SetAssetPropertiesArguments) {
         if let Err(msg) = s.set_asset_properties(arg) {
             trap(&msg);
         }
+        s.on_redirect_rules_change();
+        certified_data_set(s.root_hash());
     })
 }
 

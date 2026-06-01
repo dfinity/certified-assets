@@ -6,14 +6,13 @@
 
 use crate::{
     asset::{
-        aliased_by, aliases_of, on_asset_change, Asset, AssetDetails, AssetEncoding,
-        AssetEncodingDetails, EncodedAsset, DEFAULT_ALIAS_ENABLED,
+        on_asset_change, Asset, AssetDetails, AssetEncoding, AssetEncodingDetails, EncodedAsset,
     },
     batch::{Batch, Chunk, ComputationStatus},
-    certification::{AssetKey, CertifiedResponses, WitnessResult},
+    certification::{AssetKey, CertifiedResponses},
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
-        StreamingCallbackToken, FALLBACK_FILE,
+        StreamingCallbackToken,
     },
     rc_bytes::RcBytes,
     stable::StableState,
@@ -62,6 +61,13 @@ pub struct State {
 
     pub(crate) asset_hashes: CertifiedResponses,
 
+    pub(crate) redirect_rules: Vec<crate::redirect::RedirectRule>,
+    /// Per-rule certified-tree entries, parallel to `redirect_rules`. A
+    /// `None` slot means the rule has no certified entry — either because an
+    /// asset shadows an exact rule at the same path, or because an alias rule
+    /// (200/4xx) points at a target asset that doesn't exist yet.
+    pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
+
     pub(crate) encoded_canister_env: String,
 
     pub(crate) state_hash_computation: Option<StateHashComputation>,
@@ -73,20 +79,6 @@ impl State {
     fn get_asset(&self, key: &AssetKey) -> Result<&Asset, String> {
         self.assets
             .get(key)
-            .or_else(|| {
-                let aliased = aliases_of(key)
-                    .into_iter()
-                    .find_map(|alias_key| self.assets.get(&alias_key));
-                if let Some(asset) = aliased {
-                    if asset.is_aliased.unwrap_or(DEFAULT_ALIAS_ENABLED) {
-                        aliased
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
             .ok_or_else(|| "asset not found".to_string())
     }
 
@@ -138,6 +130,10 @@ impl State {
             return Err("asset already exists".to_string());
         }
 
+        // `arg.enable_aliasing` is accepted for backward compatibility but
+        // ignored — the canister no longer aliases on its own; users express
+        // aliasing as an explicit status-200 rule in `_redirects`.
+        let _ = arg.enable_aliasing;
         self.assets.insert(
             arg.key,
             Asset {
@@ -145,7 +141,6 @@ impl State {
                 encodings: HashMap::new(),
                 max_age: arg.max_age,
                 headers: arg.headers,
-                is_aliased: arg.enable_aliasing,
                 allow_raw_access: arg.allow_raw_access,
             },
         );
@@ -254,22 +249,8 @@ impl State {
 
     pub fn delete_asset(&mut self, arg: DeleteAssetArguments) {
         if self.assets.contains_key(&arg.key) {
-            for dependent in self.dependent_keys(&arg.key) {
-                self.asset_hashes.remove_responses_for_path(&dependent);
-                if dependent == FALLBACK_FILE {
-                    self.asset_hashes.remove_fallback_responses();
-                }
-            }
+            self.asset_hashes.remove_responses_for_path(&arg.key);
             self.assets.remove(&arg.key);
-        }
-        for key in aliases_of(&arg.key) {
-            // if an existing file can be aliased to the deleted file it has to become a valid alias again
-            if self.assets.contains_key(&key) {
-                let dependent_keys = self.dependent_keys(&key);
-                if let Some(asset) = self.assets.get_mut(&key) {
-                    on_asset_change(&mut self.asset_hashes, &key, asset, dependent_keys, None);
-                }
-            }
         }
     }
 
@@ -327,7 +308,8 @@ impl State {
         let dependent_keys = self.dependent_keys(&arg.key);
         let asset = self.assets.entry(arg.key.clone()).or_default();
         asset.content_type = arg.content_type;
-        asset.is_aliased = arg.aliased;
+        // `arg.aliased` is accepted for backward compatibility but ignored.
+        let _ = arg.aliased;
 
         let hash = sha2::Sha256::digest(&arg.content).into();
         if let Some(provided_hash) = arg.sha256 {
@@ -434,7 +416,7 @@ impl State {
                         max_age: asset.max_age,
                         headers: asset.headers.clone(),
                         allow_raw_access: asset.allow_raw_access,
-                        is_aliased: asset.is_aliased,
+                        is_aliased: None,
                     }
                 })
             })
@@ -504,50 +486,115 @@ impl State {
         etags: Vec<Hash>,
         req: HttpRequest,
     ) -> HttpResponse {
+        // Asset at the requested path wins.
         if let Ok(asset) = self.get_asset(&path.into()) {
             if !asset.allow_raw_access() && req.is_raw_domain() {
                 return req.redirect_from_raw_to_certified_domain();
             }
-        } else if let Ok(asset) = self.get_asset(&FALLBACK_FILE.to_string()) {
-            if !asset.allow_raw_access() && req.is_raw_domain() {
-                return req.redirect_from_raw_to_certified_domain();
+            let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
+            if let Some(response) = asset.build_http_response_for_encodings(
+                &requested_encodings,
+                path,
+                chunk_index,
+                Some(&cert_header),
+                &callback,
+                &etags,
+                None,
+            ) {
+                return response;
             }
         }
 
-        let (certificate_header, witness_result) =
-            self.asset_hashes.witness_to_header(path, certificate);
-
-        if witness_result == WitnessResult::FallbackFound {
-            if let Ok(asset) = self.get_asset(&FALLBACK_FILE.to_string()) {
-                if let Some(response) = asset.build_http_response_for_encodings(
-                    &requested_encodings,
-                    path,
-                    chunk_index,
-                    Some(&certificate_header),
-                    &callback,
-                    &etags,
-                ) {
-                    return response;
+        // Scan redirect rules in declaration order; first match wins.
+        for (idx, rule) in self.redirect_rules.iter().enumerate() {
+            if !rule.matches(path) {
+                continue;
+            }
+            // Rules that borrow a body from a target asset (200 rewrite or
+            // 4xx custom error page) honor the target's `allow_raw_access`
+            // setting — checked even before the rule has a certified entry
+            // because the target may not yet have an encoding.
+            let borrows_from_target = matches!(rule.status, 200 | 404 | 410);
+            if borrows_from_target {
+                if let Some(target) = self.assets.get(&rule.to) {
+                    if !target.allow_raw_access() && req.is_raw_domain() {
+                        return req.redirect_from_raw_to_certified_domain();
+                    }
                 }
             }
-        } else if witness_result == WitnessResult::PathFound {
-            if let Ok(asset) = self.get_asset(&path.into()) {
-                if !asset.allow_raw_access() && req.is_raw_domain() {
-                    return req.redirect_from_raw_to_certified_domain();
-                }
-                if let Some(response) = asset.build_http_response_for_encodings(
-                    &requested_encodings,
-                    path,
-                    chunk_index,
-                    Some(&certificate_header),
-                    &callback,
-                    &etags,
-                ) {
-                    return response;
-                }
-            }
+            let Some(entry) = self
+                .rule_certified_entries
+                .get(idx)
+                .and_then(|e| e.as_ref())
+            else {
+                continue;
+            };
+            return self.build_redirect_rule_response(
+                rule,
+                entry,
+                path,
+                certificate,
+                &requested_encodings,
+                chunk_index,
+                &callback,
+                &etags,
+            );
         }
+
+        let (certificate_header, _) = self.asset_hashes.witness_to_header(path, certificate);
         HttpResponse::build_404(certificate_header)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_redirect_rule_response(
+        &self,
+        rule: &crate::redirect::RedirectRule,
+        entry: &crate::redirect::CertifiedRuleEntry,
+        path: &str,
+        certificate: &[u8],
+        requested_encodings: &[String],
+        chunk_index: usize,
+        callback: &CallbackFunc,
+        etags: &[Hash],
+    ) -> HttpResponse {
+        let cert_header =
+            self.asset_hashes
+                .witness_to_header_with_location(path, &entry.location, certificate);
+        match &entry.kind {
+            crate::redirect::CertifiedRuleEntryKind::Synthetic { expression } => {
+                // Synthetic entries only cover 3xx redirects — empty body.
+                let cert_expr_header =
+                    crate::certification::build_ic_certificate_expression_header(expression);
+                let mut headers = rule.certified_headers();
+                headers.push((cert_expr_header.0, cert_expr_header.1));
+                headers.push(cert_header);
+
+                HttpResponse {
+                    status_code: rule.status,
+                    headers,
+                    body: RcBytes::from(ByteBuf::new()),
+                    upgrade: None,
+                    streaming_strategy: None,
+                }
+            }
+            crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status } => {
+                let Some(asset) = self.assets.get(target_key) else {
+                    return HttpResponse::build_404(cert_header);
+                };
+                let status_override = (*status != 200).then_some(*status);
+                asset
+                    .build_http_response_for_encodings(
+                        requested_encodings,
+                        path,
+                        chunk_index,
+                        Some(&cert_header),
+                        callback,
+                        etags,
+                        status_override,
+                    )
+                    .unwrap_or_else(|| HttpResponse::build_404(cert_header))
+            }
+        }
     }
 
     pub fn http_request(
@@ -635,7 +682,7 @@ impl State {
             max_age: asset.max_age,
             headers: asset.headers.clone(),
             allow_raw_access: asset.allow_raw_access,
-            is_aliased: asset.is_aliased,
+            is_aliased: None,
         })
     }
 
@@ -656,9 +703,8 @@ impl State {
             asset.allow_raw_access = allow_raw_access
         }
 
-        if let Some(is_aliased) = arg.is_aliased {
-            asset.is_aliased = is_aliased
-        }
+        // `arg.is_aliased` is accepted for backward compatibility but ignored.
+        let _ = arg.is_aliased;
 
         on_asset_change(
             &mut self.asset_hashes,
@@ -671,21 +717,14 @@ impl State {
         Ok(())
     }
 
-    // Returns keys that needs to be updated if the supplied key is changed.
-    pub(crate) fn dependent_keys(&self, key: &AssetKey) -> Vec<AssetKey> {
-        if self
-            .assets
-            .get(key)
-            .and_then(|asset| asset.is_aliased)
-            .unwrap_or(DEFAULT_ALIAS_ENABLED)
-        {
-            aliased_by(key)
-                .into_iter()
-                .filter(|k| !self.assets.contains_key(k))
-                .collect()
-        } else {
-            Vec::new()
-        }
+    // Returns keys that need to be updated if the supplied key is changed.
+    //
+    // The built-in aliasing this used to fan out to is gone; nothing pulls
+    // sibling keys today. The hook is kept in the signature of
+    // `on_asset_change` so a future feature can repopulate it without
+    // touching all the call sites.
+    pub(crate) fn dependent_keys(&self, _key: &AssetKey) -> Vec<AssetKey> {
+        Vec::new()
     }
 
     pub fn get_configuration(&self) -> ConfigurationResponse {
@@ -697,6 +736,105 @@ impl State {
             max_chunks,
             max_bytes,
         }
+    }
+
+    pub fn get_redirect_rules(&self) -> Vec<crate::redirect::RedirectRule> {
+        self.redirect_rules.clone()
+    }
+
+    /// Rebuild the certified-tree entries for `redirect_rules`. Called whenever
+    /// the rule list changes (in `commit_batch`) or assets are restored from
+    /// stable memory (in `From<StableState>`). Caller must refresh
+    /// `certified_data` after this — `commit_batch` already does so via the
+    /// `certified_data_set(s.root_hash())` it runs after each batch.
+    ///
+    /// Status-200 rules borrow each encoding's certificate expression and
+    /// response hash from the target asset, so this also has to run after any
+    /// asset change that could affect those values.
+    pub(crate) fn on_redirect_rules_change(&mut self) {
+        for entry in self.rule_certified_entries.drain(..).flatten() {
+            for tp in &entry.tree_paths {
+                self.asset_hashes.remove_response_precomputed(tp);
+            }
+        }
+
+        let rules = self.redirect_rules.clone();
+        let mut new_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>> =
+            Vec::with_capacity(rules.len());
+        for rule in &rules {
+            new_entries.push(self.build_rule_entry(rule));
+        }
+        self.rule_certified_entries = new_entries;
+    }
+
+    fn build_rule_entry(
+        &mut self,
+        rule: &crate::redirect::RedirectRule,
+    ) -> Option<crate::redirect::CertifiedRuleEntry> {
+        if let crate::redirect::RulePattern::Exact(src) = &rule.from {
+            if self.assets.contains_key(src) {
+                // Asset at the source path shadows the rule.
+                return None;
+            }
+        }
+        match rule.status {
+            // 200 rewrites and 4xx custom error pages both borrow body +
+            // headers from the target asset (4xx re-certifies with the
+            // override status; see `build_alias_rule_entry`).
+            200 | 404 | 410 => self.build_alias_rule_entry(rule, rule.status),
+            // 3xx redirects synthesize an empty body; only the headers
+            // (content-type, Location) are certified.
+            _ => {
+                let entry = crate::redirect::build_synthetic_entry(rule);
+                for tp in &entry.tree_paths {
+                    self.asset_hashes.certify_response_precomputed(tp);
+                }
+                Some(entry)
+            }
+        }
+    }
+
+    fn build_alias_rule_entry(
+        &mut self,
+        rule: &crate::redirect::RedirectRule,
+        status: u16,
+    ) -> Option<crate::redirect::CertifiedRuleEntry> {
+        let target_key = rule.to.clone();
+        let target = self.assets.get(&target_key)?;
+        let location = rule.tree_location();
+        let mut tree_paths = Vec::new();
+        for (enc_name, enc) in &target.encodings {
+            let Some(expr) = enc.certificate_expression.as_ref() else {
+                continue;
+            };
+            let resp_hash = if status == 200 {
+                // Borrow the asset's already-certified 200 response hash.
+                let Some(h) = enc.response_hashes.as_ref().and_then(|m| m.get(&200)) else {
+                    continue;
+                };
+                *h
+            } else {
+                // 4xx custom error page: re-certify with the override status
+                // using the same headers and body the asset would serve at 200.
+                let base_headers: Vec<(String, ic_representation_independent_hash::Value)> = target
+                    .get_headers_for_asset(enc_name)
+                    .into_iter()
+                    .map(|(k, v)| (k, ic_representation_independent_hash::Value::String(v)))
+                    .collect();
+                crate::certification::response_hash(&base_headers, status, &enc.sha256).0
+            };
+            let tp = crate::redirect::alias_tree_path(&location, expr.expression_hash, resp_hash);
+            self.asset_hashes.certify_response_precomputed(&tp);
+            tree_paths.push(tp);
+        }
+        if tree_paths.is_empty() {
+            return None;
+        }
+        Some(crate::redirect::CertifiedRuleEntry {
+            tree_paths,
+            location,
+            kind: crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status },
+        })
     }
 
     pub fn configure(&mut self, args: ConfigureArguments) {
@@ -746,6 +884,7 @@ impl From<StableState> for State {
                 .map(Into::into)
                 .unwrap_or_default(),
             last_state_update_timestamp_ns: stable_state.last_state_update_timestamp.unwrap_or(0),
+            redirect_rules: stable_state.redirect_rules.unwrap_or_default(),
             ..Self::default()
         };
 
@@ -762,6 +901,7 @@ impl From<StableState> for State {
                 // shouldn't reach this
             }
         }
+        state.on_redirect_rules_change();
         state
     }
 }

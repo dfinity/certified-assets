@@ -5,7 +5,8 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    asset::Timestamp, certification::CertificateExpression, rc_bytes::RcBytes, types::BatchId,
+    asset::Timestamp, certification::CertificateExpression, rc_bytes::RcBytes,
+    redirect::RedirectRule, types::BatchId,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -17,6 +18,11 @@ pub struct StableState {
     pub(crate) next_batch_id: Option<u64>,
     pub(crate) configuration: Option<StableConfiguration>,
     pub(crate) last_state_update_timestamp: Option<u64>,
+
+    /// Optional so a `StableState` serialized before this field existed still
+    /// deserializes cleanly (yields `None`, which we treat as "no rules").
+    #[serde(default)]
+    pub(crate) redirect_rules: Option<Vec<RedirectRule>>,
 }
 
 impl From<crate::state::State> for StableState {
@@ -37,6 +43,7 @@ impl From<crate::state::State> for StableState {
             next_batch_id: Some(batch_id_to_u64(state.next_batch_id)),
             configuration: Some(state.configuration.into()),
             last_state_update_timestamp: Some(state.last_state_update_timestamp_ns),
+            redirect_rules: Some(state.redirect_rules),
         }
     }
 }
@@ -76,13 +83,18 @@ impl From<StableConfiguration> for crate::state::Configuration {
     }
 }
 
-/// Same as [crate::asset::Asset] but serde-serializable
+/// Same as [crate::asset::Asset] but serde-serializable.
+///
+/// `is_aliased` is kept as an optional ignored field so stable-memory blobs
+/// written before built-in aliasing was removed still deserialize. Newly
+/// written blobs always set it to `None`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableAsset {
     pub content_type: String,
     pub encodings: HashMap<String, StableAssetEncoding>,
     pub max_age: Option<u64>,
     pub headers: Option<BTreeMap<String, String>>,
+    #[serde(default)]
     pub is_aliased: Option<bool>,
     pub allow_raw_access: Option<bool>,
 }
@@ -98,7 +110,7 @@ impl From<crate::asset::Asset> for StableAsset {
                 .collect(),
             max_age: asset.max_age,
             headers: asset.headers,
-            is_aliased: asset.is_aliased,
+            is_aliased: None,
             allow_raw_access: asset.allow_raw_access,
         }
     }
@@ -115,7 +127,6 @@ impl From<StableAsset> for crate::asset::Asset {
                 .collect(),
             max_age: stable_asset.max_age,
             headers: stable_asset.headers,
-            is_aliased: stable_asset.is_aliased,
             allow_raw_access: stable_asset.allow_raw_access,
         }
     }
