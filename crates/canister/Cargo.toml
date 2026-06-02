@@ -1,21 +1,18 @@
 [package]
 name = "canister"
-version = "0.0.0"
+version.workspace = true
 authors.workspace = true
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
-description = "Assets Canister for IC."
-categories = ["wasm"]
-keywords = ["internet-computer", "dfinity"]
-publish = false
+publish.workspace = true
 
 [lib]
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ic-certified-assets = { path = "../ic-certified-assets" }
+canister-core = { path = "../canister-core" }
 ic-cdk.workspace = true
 candid.workspace = true
 serde.workspace = true

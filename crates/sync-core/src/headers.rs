@@ -8,7 +8,7 @@
 //! `Content-Type` is parsed structurally onto [`HeaderRule::content_type`]
 //! instead of accumulating in `headers`: the canister stores it as asset
 //! metadata that drives encoder selection and certification, not as an
-//! appended response header. See HEADERS.md for the full reject list.
+//! appended response header. See `docs/headers.md` for the full reject list.
 
 use crate::glob::KeyPattern;
 use crate::strip_comment;
@@ -69,7 +69,7 @@ struct OpenBlock {
 /// rules are concatenated with `, ` per RFC 7230 §3.2.2, with `Set-Cookie`
 /// carved out per RFC 6265 §3 (kept as separate entries). The returned Vec is
 /// stable-sorted by lowercased header name so multi-valued headers preserve
-/// their declaration order — see the determinism guarantee in HEADERS.md.
+/// their declaration order — see the determinism guarantee in `docs/headers.md`.
 ///
 /// `Content-Type` is never present in the output — it routes through
 /// [`content_type_for`] into the asset's stored `content_type` metadata.

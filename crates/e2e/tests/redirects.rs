@@ -81,7 +81,7 @@ fn redirect_rules_honoured() {
 
 /// Without a user-supplied `_redirects`, the plugin auto-synthesises
 /// Cloudflare's `auto-trailing-slash` rule set for every HTML asset (see
-/// `assets-sync::html_handling`). This test deploys an HTML-only fixture
+/// `sync-core::html_handling`). This test deploys an HTML-only fixture
 /// and walks the full CF table for each of the three asset shapes:
 /// root index, directory index, and non-index HTML file.
 ///

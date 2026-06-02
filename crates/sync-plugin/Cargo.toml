@@ -1,0 +1,17 @@
+[package]
+name = "sync-plugin"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sync-core = { path = "../sync-core" }
+candid.workspace = true
+serde.workspace = true
+wit-bindgen = { workspace = true, features = ["realloc"] }

@@ -123,24 +123,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "assets-sync"
-version = "0.1.0"
-dependencies = [
- "brotli",
- "candid",
- "flate2",
- "hex",
- "http",
- "mime",
- "mime_guess",
- "serde",
- "serde_bytes",
- "sha2 0.11.0",
- "tempfile",
- "url",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -409,10 +391,36 @@ version = "0.0.0"
 dependencies = [
  "candid",
  "candid_parser",
+ "canister-core",
  "ic-cdk",
- "ic-certified-assets",
  "serde",
  "serde_cbor",
+]
+
+[[package]]
+name = "canister-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "candid",
+ "hex",
+ "http",
+ "ic-cdk",
+ "ic-certification 3.2.0",
+ "ic-certification-testing",
+ "ic-crypto-tree-hash",
+ "ic-http-certification 3.2.0",
+ "ic-representation-independent-hash 3.2.0",
+ "ic-response-verification",
+ "ic-response-verification-test-utils",
+ "itertools 0.14.0",
+ "num-traits",
+ "percent-encoding",
+ "serde",
+ "serde_bytes",
+ "serde_cbor",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -815,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "e2e"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "assert_cmd",
  "candid",
@@ -1371,32 +1379,6 @@ dependencies = [
  "thiserror 1.0.69",
  "wasm-bindgen",
  "wasm-bindgen-console-logger",
-]
-
-[[package]]
-name = "ic-certified-assets"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "candid",
- "hex",
- "http",
- "ic-cdk",
- "ic-certification 3.2.0",
- "ic-certification-testing",
- "ic-crypto-tree-hash",
- "ic-http-certification 3.2.0",
- "ic-representation-independent-hash 3.2.0",
- "ic-response-verification",
- "ic-response-verification-test-utils",
- "itertools 0.14.0",
- "num-traits",
- "percent-encoding",
- "serde",
- "serde_bytes",
- "serde_cbor",
- "sha2 0.11.0",
 ]
 
 [[package]]
@@ -2430,16 +2412,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "plugin"
-version = "0.1.0"
-dependencies = [
- "assets-sync",
- "candid",
- "serde",
- "wit-bindgen 0.57.1",
-]
-
-[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3111,6 +3083,34 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sync-core"
+version = "0.0.0"
+dependencies = [
+ "brotli",
+ "candid",
+ "flate2",
+ "hex",
+ "http",
+ "mime",
+ "mime_guess",
+ "serde",
+ "serde_bytes",
+ "sha2 0.11.0",
+ "tempfile",
+ "url",
+]
+
+[[package]]
+name = "sync-plugin"
+version = "0.0.0"
+dependencies = [
+ "candid",
+ "serde",
+ "sync-core",
+ "wit-bindgen 0.57.1",
 ]
 
 [[package]]

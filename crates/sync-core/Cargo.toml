@@ -1,8 +1,11 @@
 [package]
-name = "assets-sync"
-version = "0.1.0"
-edition = "2021"
-publish = false
+name = "sync-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 brotli.workspace = true

@@ -1,15 +1,11 @@
 [package]
-name = "ic-certified-assets"
-version = "0.3.0"
+name = "canister-core"
+version.workspace = true
 authors.workspace = true
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
-description = "Rust support for asset certification."
-documentation = "https://docs.rs/ic-certified-assets"
-categories = ["wasm", "filesystem", "data-structures"]
-keywords = ["internet-computer", "dfinity"]
-rust-version = "1.84.0"
+publish.workspace = true
 
 [dependencies]
 base64.workspace = true
