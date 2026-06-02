@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "canister-core"
-version = "0.3.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "e2e"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "assert_cmd",
  "candid",
@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "sync-core"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "brotli",
  "candid",
@@ -3105,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "sync-plugin"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "candid",
  "serde",

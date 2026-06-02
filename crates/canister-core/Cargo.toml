@@ -1,13 +1,11 @@
 [package]
 name = "canister-core"
-version = "0.3.0"
+version.workspace = true
 authors.workspace = true
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
-description = "Asset certification, storage, and HTTP serving logic for the assets canister."
-rust-version = "1.84.0"
-publish = false
+publish.workspace = true
 
 [dependencies]
 base64.workspace = true

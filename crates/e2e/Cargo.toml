@@ -1,9 +1,11 @@
 [package]
 name = "e2e"
-version = "0.1.0"
+version.workspace = true
+authors.workspace = true
 edition.workspace = true
+repository.workspace = true
 license.workspace = true
-publish = false
+publish.workspace = true
 
 [dependencies]
 assert_cmd.workspace = true

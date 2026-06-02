@@ -3,10 +3,12 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
+version = "0.0.0"
 authors = ["DFINITY Stiftung <sdk@dfinity.org>"]
 edition = "2021"
 repository = "https://github.com/dfinity/certified-assets"
 license = "Apache-2.0"
+publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.56"
