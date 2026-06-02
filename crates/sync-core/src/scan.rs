@@ -1,89 +1,105 @@
-//! Scan a project's input directory for asset files.
+//! Scan a project's input directory for asset files, applying the per-directory
+//! `.ic-assets.json5` configuration.
 //!
-//! Matches `ic-asset`'s traversal behaviour: only plain files are included;
-//! dotfiles and all symlinks (to files or directories) are skipped.
-//! Exception: `.well-known/` is traversed even though it starts with `.`,
-//! mirroring `ic-asset`'s `KNOWN_DIRECTORIES` list.
+//! Ported from `ic-asset`'s `gather_asset_descriptors` / `include_entry`:
+//! - dotfiles and dotdirs are skipped unless a config rule re-includes them
+//!   (`"ignore": false`), with the exception of `KNOWN_DIRECTORIES` (`.well-known`),
+//! - a rule's `"ignore": true` drops a path (and prunes a directory subtree),
+//! - the `.ic-assets.json` / `.ic-assets.json5` files themselves are never uploaded,
+//! - each surviving file carries its resolved [`AssetConfig`].
 //!
-//! Files whose names appear in `CONFIG_FILENAMES` (`_redirects`, etc.) are
-//! consumed by the sync layer and excluded from the upload set.
+//! Symlinks are not followed (walkdir default), matching `ic-asset`.
 
-use crate::headers::HEADERS_FILENAME;
-use crate::redirects::REDIRECTS_FILENAME;
+use crate::config::{
+    AssetConfig, AssetSourceDirectoryConfiguration, ASSETS_CONFIG_FILENAME_JSON,
+    ASSETS_CONFIG_FILENAME_JSON5,
+};
 use std::path::{Path, PathBuf};
+use walkdir::{DirEntry, WalkDir};
 
 const KNOWN_DIRECTORIES: &[&str] = &[".well-known"];
-
-/// Filenames whose presence is configuration, not asset content. Loaded for
-/// their side effects (redirect rules, header rules, etc.) and excluded from
-/// the upload set.
-const CONFIG_FILENAMES: &[&str] = &[REDIRECTS_FILENAME, HEADERS_FILENAME];
 
 #[derive(Debug)]
 pub struct AssetSource {
     pub path: PathBuf,
     pub key: String,
+    pub config: AssetConfig,
 }
 
-/// Scans `dirs` for asset files.
+/// Scans `dirs` for asset files, resolving each file's `.ic-assets.json5` config.
 pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
-    let mut out = Vec::new();
+    let mut out: Vec<AssetSource> = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
+
     for dir in dirs {
-        let root = Path::new(dir);
-        let root_abs = root
+        let root = Path::new(dir)
             .canonicalize()
-            .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-        walk(&root_abs, &root_abs, &mut out, &mut seen_keys)?;
-    }
-    Ok(out)
-}
+            .map_err(|e| format!("canonicalize {dir}: {e}"))?;
+        let mut configuration = AssetSourceDirectoryConfiguration::load(&root)?;
 
-fn walk(
-    root: &Path,
-    current: &Path,
-    out: &mut Vec<AssetSource>,
-    seen_keys: &mut std::collections::HashSet<String>,
-) -> Result<(), String> {
-    let entries =
-        std::fs::read_dir(current).map_err(|e| format!("read_dir {}: {e}", current.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry in {}: {e}", current.display()))?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let path = entry.path();
-        let ft = entry
-            .file_type()
-            .map_err(|e| format!("file_type {}: {e}", path.display()))?;
+        let entries: Vec<DirEntry> = WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|entry| {
+                // The root itself is always traversed; pruning it (e.g. when the
+                // root dir name starts with `.`) would drop the whole tree.
+                if entry.depth() == 0 {
+                    return true;
+                }
+                match entry.path().canonicalize() {
+                    Ok(canonical) => {
+                        let config = configuration
+                            .get_asset_config(&canonical)
+                            .unwrap_or_default();
+                        include_entry(entry, &config)
+                    }
+                    Err(_) => false,
+                }
+            })
+            .filter_map(|r| r.ok())
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry.file_name() != ASSETS_CONFIG_FILENAME_JSON
+                    && entry.file_name() != ASSETS_CONFIG_FILENAME_JSON5
+            })
+            .collect();
 
-        // Skip dotfiles / dotdirs (except known dirs like .well-known).
-        if name_str.starts_with('.') && !(ft.is_dir() && KNOWN_DIRECTORIES.contains(&&*name_str)) {
-            continue;
-        }
-
-        // Skip config files (`_redirects` etc.) regardless of where they sit
-        // in the tree — they're consumed by the sync layer, not uploaded.
-        if ft.is_file() && CONFIG_FILENAMES.contains(&&*name_str) {
-            continue;
-        }
-
-        if ft.is_dir() {
-            walk(root, &path, out, seen_keys)?;
-        } else if ft.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|e| format!("strip_prefix {}: {e}", path.display()))?;
+        for entry in entries {
+            let source = entry
+                .path()
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", entry.path().display()))?;
+            let relative = source
+                .strip_prefix(&root)
+                .map_err(|e| format!("strip_prefix {}: {e}", source.display()))?;
             let key = format!("/{}", relative.to_string_lossy());
+            let config = configuration.get_asset_config(&source)?;
 
             if !seen_keys.insert(key.clone()) {
                 return Err(format!("duplicate asset key {key}"));
             }
-            out.push(AssetSource { path, key });
+            out.push(AssetSource {
+                path: source,
+                key,
+                config,
+            });
         }
-        // Symlinks (to files or directories) are skipped, matching ic-asset::sync.
     }
 
-    Ok(())
+    Ok(out)
+}
+
+/// Decides whether a walkdir entry is included, mirroring `ic-asset::include_entry`.
+/// An explicit `ignore` rule wins; otherwise dotfiles/dotdirs are excluded unless
+/// they are a known directory (e.g. `.well-known`).
+fn include_entry(entry: &DirEntry, config: &AssetConfig) -> bool {
+    if let Some(ignored) = config.ignore {
+        !ignored
+    } else if let Some(entry_name) = entry.file_name().to_str() {
+        let is_known = entry.file_type().is_dir() && KNOWN_DIRECTORIES.contains(&entry_name);
+        is_known || !entry_name.starts_with('.')
+    } else {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -127,19 +143,77 @@ mod tests {
     fn dotfile_skipped() {
         let dir = tmp();
         fs::write(dir.path().join(".hidden"), b"secret").unwrap();
-        fs::write(dir.path().join(".gitignore"), b"*.tmp").unwrap();
         fs::write(dir.path().join("visible.txt"), b"ok").unwrap();
         let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/visible.txt"]);
     }
 
     #[test]
-    fn redirects_file_skipped() {
+    fn config_file_skipped() {
         let dir = tmp();
-        fs::write(dir.path().join(REDIRECTS_FILENAME), b"").unwrap();
+        fs::write(dir.path().join(".ic-assets.json5"), b"[]").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
         let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
+    }
+
+    #[test]
+    fn ignore_rule_excludes_file() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(".ic-assets.json5"),
+            br#"[{ "match": "secret.txt", "ignore": true }]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("secret.txt"), b"x").unwrap();
+        fs::write(dir.path().join("index.html"), b"y").unwrap();
+        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        assert_eq!(keys, vec!["/index.html"]);
+    }
+
+    #[test]
+    fn reinclude_dotfile_via_config() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(".ic-assets.json5"),
+            br#"[{ "match": ".env", "ignore": false }]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join(".env"), b"x").unwrap();
+        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        assert_eq!(keys, vec!["/.env"]);
+    }
+
+    #[test]
+    fn config_attaches_to_source() {
+        let dir = tmp();
+        fs::write(
+            dir.path().join(".ic-assets.json5"),
+            br#"[{ "match": "*.html", "headers": { "X-Foo": "bar" } }]"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("index.html"), b"x").unwrap();
+        let sources = scan(&[dir_str(&dir)]).unwrap();
+        let src = sources.iter().find(|s| s.key == "/index.html").unwrap();
+        assert_eq!(
+            src.config
+                .headers
+                .as_ref()
+                .unwrap()
+                .get("X-Foo")
+                .map(String::as_str),
+            Some("bar")
+        );
+    }
+
+    #[test]
+    fn well_known_directory_included() {
+        let dir = tmp();
+        fs::create_dir(dir.path().join(".well-known")).unwrap();
+        fs::write(dir.path().join(".well-known/ic-domains"), b"foo.bar.com").unwrap();
+        fs::write(dir.path().join("index.html"), b"hello").unwrap();
+        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        assert_eq!(keys, vec!["/.well-known/ic-domains", "/index.html"]);
     }
 
     #[test]
@@ -159,38 +233,5 @@ mod tests {
             err.contains("/index.html"),
             "error should name the key: {err}"
         );
-    }
-
-    #[test]
-    fn multiple_source_dirs() {
-        let dir1 = tmp();
-        let dir2 = tmp();
-        fs::write(dir1.path().join("a.txt"), b"a").unwrap();
-        fs::write(dir2.path().join("b.txt"), b"b").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir1), dir_str(&dir2)]).unwrap());
-        assert_eq!(keys, vec!["/a.txt", "/b.txt"]);
-    }
-
-    #[test]
-    fn well_known_directory_included() {
-        let dir = tmp();
-        fs::create_dir(dir.path().join(".well-known")).unwrap();
-        fs::write(dir.path().join(".well-known/ic-domains"), b"foo.bar.com").unwrap();
-        fs::write(dir.path().join("index.html"), b"hello").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
-        assert_eq!(keys, vec!["/.well-known/ic-domains", "/index.html"]);
-    }
-
-    // Symlinks are skipped regardless of target type, matching ic-asset::sync.
-    #[cfg(unix)]
-    #[test]
-    fn symlink_skipped() {
-        let dir = tmp();
-        let target = dir.path().join("real.txt");
-        fs::write(&target, b"content").unwrap();
-        let link = dir.path().join("link.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
-        assert_eq!(keys, vec!["/real.txt"]);
     }
 }

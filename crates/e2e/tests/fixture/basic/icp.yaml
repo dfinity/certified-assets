@@ -9,7 +9,7 @@ canisters:
     build:
       steps:
         - type: pre-built
-          path: wasms/canister.wasm
+          path: wasms/canister.wasm.gz
 
     sync:
       steps:

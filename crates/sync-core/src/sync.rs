@@ -1,8 +1,12 @@
-//! Orchestrates: load assets, diff against canister, upload chunks, commit batch.
+//! Orchestrates: load assets + `.ic-assets.json5` config, diff against the
+//! legacy asset canister, upload chunks, commit batch.
 //!
-//! V2-only port of `ic-asset`'s `sync` flow, simplified:
-//! - synchronous (drives the host's sync `canister-call` import)
-//! - no proposal mode
+//! Port of `ic-asset`'s sync flow targeting the dfx 0.32.0 `assetstorage`
+//! canister (`api_version == 2`), simplified:
+//! - synchronous (drives the host's sync `canister-call` import),
+//! - no proposal mode,
+//! - no redirect rules / `_headers` / `_redirects` (the legacy canister has no
+//!   `SetRedirectRules`); per-asset metadata comes from `.ic-assets.json5`.
 
 use candid::{Nat, Principal};
 use mime::Mime;
@@ -10,17 +14,14 @@ use std::collections::HashMap;
 
 use crate::canister::{
     api_version, commit_batch, create_batch, create_chunks, get_asset_properties,
-    get_redirect_rules, grant_permission_via_proxy, list_assets, list_permitted, AssetDetails,
-    AssetProperties, BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
-    DeleteAssetArguments, Permission, RedirectRule, SetAssetContentArguments,
-    SetAssetPropertiesArguments, SetRedirectRulesArguments, UnsetAssetContentArguments,
+    grant_permission_via_proxy, list_assets, list_permitted, AssetDetails, AssetProperties,
+    BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
+    DeleteAssetArguments, Permission, SetAssetContentArguments, SetAssetPropertiesArguments,
+    UnsetAssetContentArguments,
 };
+use crate::config::{AssetConfig, HeadersConfig};
 use crate::content::{encoders_for, Content, Encoder};
-use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
-use crate::html_handling;
-use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
-use std::path::Path;
 
 // Stay safely under the canister's ingress message limit (~2 MB).
 const MAX_CHUNK_SIZE: usize = 1_900_000;
@@ -37,6 +38,12 @@ struct ProjectAsset {
     source: AssetSource,
     media_type: Mime,
     encodings: HashMap<String, ProjectAssetEncoding>,
+}
+
+impl ProjectAsset {
+    fn config(&self) -> &AssetConfig {
+        &self.source.config
+    }
 }
 
 /// Ensures the signing identity has `Commit` permission on the assets canister.
@@ -70,29 +77,18 @@ pub fn sync<C: CanisterCall>(
     identity_principal: &str,
     proxy_canister_id: Option<&str>,
 ) -> Result<String, String> {
-    // The assets plugin owns the URL space of its canister: every key starts at
-    // `/`, `_redirects` lives at the project root, and the canister has no
-    // notion of "merge two trees together". Multiple input directories would
-    // produce ambiguous redirect-file precedence and quietly hide key
-    // collisions, so the contract is exactly one directory.
-    let dir = match dirs {
-        [d] => d,
-        _ => {
-            return Err(format!(
-                "assets sync plugin: expected exactly one input directory, got {}",
-                dirs.len()
-            ))
-        }
-    };
+    if dirs.is_empty() {
+        return Err("assets sync plugin: expected at least one input directory, got 0".to_string());
+    }
 
-    if let Some(_proxy) = proxy_canister_id {
+    if proxy_canister_id.is_some() {
         ensure_commit_permission(canister, identity_principal)?;
     }
 
     let version = api_version(canister)?;
     if version < 2 {
         return Err(format!(
-            "assets canister api_version is {version}; this plugin requires V2"
+            "assets canister api_version is {version}; this plugin requires V2 (dfx 0.32.0 assetstorage)"
         ));
     }
     println!("api_version: {version}");
@@ -100,65 +96,16 @@ pub fn sync<C: CanisterCall>(
     let sources = crate::scan::scan(dirs)?;
     println!("found {} file(s) from {:?}", sources.len(), dirs);
 
-    // Synthesised CF `auto-trailing-slash` rules first, then the user's
-    // `_redirects`. The canister matches rules in declaration order, so this
-    // makes the html-handling defaults win at the exact paths they cover and
-    // lets user rules catch what's left (e.g. a SPA-style `/* /404.html 404`
-    // catch-all only fires for paths the html_handling defaults don't claim).
-    //
-    // The reason synth must come first is also a certification correctness
-    // requirement: if a user subtree rule like `/*` is declared before the
-    // synthesised Exact rules, the user rule wins at request time and the
-    // canister returns a wildcard expression path (`["http_expr", "<*>"]`),
-    // while the synthesised Exact entries (e.g. `["http_expr", "index", "<$>"]`)
-    // still sit in the certified tree. The HTTP gateway's verifier then
-    // rejects the response with "wildcard expression path provided, but a
-    // potential exact expression path exists in the tree" and returns 503.
-    // Putting synth first keeps responses on the Exact path whenever an Exact
-    // entry exists.
-    //
-    // Synthesis is keyed off the scanned asset keys; nothing in the project
-    // has uploaded yet, so this is the authoritative HTML set.
-    let user_rules = load_redirect_rules(dir)?;
-    println!(
-        "parsed {} redirect rule(s) from _redirects",
-        user_rules.len()
-    );
-
-    let asset_keys: Vec<String> = sources.iter().map(|s| s.key.clone()).collect();
-    let synthesised = html_handling::synthesize(&asset_keys);
-    if !synthesised.is_empty() {
-        println!(
-            "synthesised {} html-handling rule(s) for {} html asset(s)",
-            synthesised.len(),
-            asset_keys.iter().filter(|k| k.ends_with(".html")).count(),
-        );
-    }
-    let mut project_rules = synthesised;
-    project_rules.extend(user_rules);
-
-    let project_header_rules = load_header_rules(dir)?;
-    println!(
-        "parsed {} header rule(s) from _headers",
-        project_header_rules.len()
-    );
-
     let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
         .into_iter()
         .map(|d| (d.key.clone(), d))
         .collect();
     println!("canister currently has {} asset(s)", canister_assets.len());
 
-    let canister_rules = get_redirect_rules(canister)?;
-    println!(
-        "canister currently has {} redirect rule(s)",
-        canister_rules.len()
-    );
-
     // Phase 1: compute metadata only — no batch created yet.
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
     for source in sources {
-        let asset = prepare_asset(source, &project_header_rules, &canister_assets)?;
+        let asset = prepare_asset(source, &canister_assets)?;
         project_assets.insert(asset.source.key.clone(), asset);
     }
 
@@ -181,9 +128,6 @@ pub fn sync<C: CanisterCall>(
         &project_assets,
         &canister_assets,
         &canister_asset_properties,
-        &project_rules,
-        &canister_rules,
-        &project_header_rules,
     )
     .is_empty()
     {
@@ -204,9 +148,6 @@ pub fn sync<C: CanisterCall>(
         &project_assets,
         &canister_assets,
         &canister_asset_properties,
-        &project_rules,
-        &canister_rules,
-        &project_header_rules,
     );
     println!("committing {} operation(s)", operations.len());
 
@@ -220,27 +161,30 @@ pub fn sync<C: CanisterCall>(
 
 fn prepare_asset(
     source: AssetSource,
-    header_rules: &[HeaderRule],
     canister_assets: &HashMap<String, AssetDetails>,
 ) -> Result<ProjectAsset, String> {
-    let mut content = Content::load(&source.path)?;
-    // Apply per-glob `Content-Type` override from `_headers` before deciding
-    // encoders or computing the asset's stored media type. Routing through
-    // `content.media_type` is what makes a `.did` file declared as
-    // `text/plain` pick up gzip compression and surface the correct
-    // `Content-Type` from the canister's certified response.
-    if let Some(override_mime) = headers::content_type_for(&source.key, header_rules) {
-        content.media_type = override_mime;
-    }
-    // gzip for text/* and js/html, identity for everything else.
-    let encoders: Vec<Encoder> = encoders_for(&content.media_type);
+    let content = Content::load(&source.path)?;
+
+    // Per-asset `encodings` override from `.ic-assets.json5`, else the default
+    // gzip-for-text policy. When identity is not in the list, `force_encoding`
+    // keeps the alternate encoding even if it doesn't shrink the bytes (mirrors
+    // ic-asset's plumbing).
+    let encoders: Vec<Encoder> = source
+        .config
+        .encodings
+        .clone()
+        .unwrap_or_else(|| encoders_for(&content.media_type));
+    let force_encoding = !encoders.contains(&Encoder::Identity);
 
     let mut encodings: HashMap<String, ProjectAssetEncoding> = HashMap::new();
     for encoder in encoders {
         let encoded = content.encode(encoder)?;
         // Identity is always uploaded. Alternate encodings only get uploaded if
-        // they save bytes vs. identity.
-        if encoder != Encoder::Identity && encoded.data.len() >= content.data.len() {
+        // they save bytes vs. identity, unless forced (no identity to compare).
+        if encoder != Encoder::Identity
+            && !force_encoding
+            && encoded.data.len() >= content.data.len()
+        {
             continue;
         }
         let name = encoder.name().to_string();
@@ -314,13 +258,35 @@ fn encoding_suffix(encoding: &str) -> String {
     }
 }
 
+/// Sorted `Vec` view of a `HeadersConfig` for the canister wire type. A
+/// `BTreeMap` already iterates in key order, so this is sorted by header name.
+fn headers_to_vec(h: HeadersConfig) -> Vec<(String, String)> {
+    h.into_iter().collect()
+}
+
+/// The legacy canister injects a `Set-Cookie: ic_env=...` header into every
+/// HTML asset's stored headers on each asset change (see ic-certified-assets'
+/// `add_ic_env_cookie`, driven by icp-cli's env-var step). The canister
+/// re-adds it automatically, so the plugin must not treat it as drift or try to
+/// own it. Normalises a canister/project headers value for comparison by
+/// dropping that cookie, sorting, and collapsing an empty map to `None`.
+fn normalize_headers(headers: Option<Vec<(String, String)>>) -> Option<Vec<(String, String)>> {
+    let mut v: Vec<(String, String)> = headers
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(k, val)| !(k.eq_ignore_ascii_case("Set-Cookie") && val.starts_with("ic_env=")))
+        .collect();
+    v.sort();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 /// Pack-and-upload pass: collect every chunk from every not-yet-uploaded
 /// encoding across all assets, then ship them in `create_chunks` calls of up
 /// to `MAX_CHUNK_SIZE` total bytes each.
-///
-/// This is where the wall-clock win lives versus the old "one chunk per call"
-/// pattern: a project of 100 small files used to make 100 round-trips; now
-/// they ride in a single call (≈1.9 MB budget).
 ///
 /// Routing is by `(asset_key, encoding, chunk_index)`: each `PendingChunk`
 /// remembers where its eventual canister id should land in
@@ -369,8 +335,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
     }
 
     // First-fit-decreasing: sort descending, then in each pass take every
-    // chunk that still fits under MAX_CHUNK_SIZE. Anything that doesn't fit
-    // stays in `pending` for the next pass.
+    // chunk that still fits under MAX_CHUNK_SIZE.
     pending.sort_by_key(|b| std::cmp::Reverse(b.data.len()));
 
     let total_chunks = pending.len();
@@ -421,24 +386,12 @@ fn pack_and_upload_chunks<C: CanisterCall>(
 
 /// Commits `operations` to the canister, splitting them across multiple
 /// `commit_batch` ingress calls when a single payload would exceed the IC's
-/// 2 MiB per-message ingress limit on application subnets
-/// (`MAX_INGRESS_BYTES_PER_MESSAGE_APP_SUBNET` in `dfinity/ic`). The local
-/// replica's HTTP boundary accepts up to 4 MiB, but mainnet app subnets cap
-/// the inner ingress message at 2 MiB — so we target the tighter limit.
+/// 2 MiB per-message ingress limit on application subnets.
 ///
 /// Intermediate calls use `batch_id = 0` as a placeholder; the canister's
-/// `commit_batch` does not validate that `batch_id` refers to a live batch
-/// — it just consumes `chunk_ids` referenced by `SetAssetContent` ops and
-/// removes `batch_id` from its batch table at the very end. The chunks
-/// uploaded under the real `batch_id` survive between calls because the
-/// canister only GCs orphaned chunks at `create_batch` time, never inside
-/// `commit_batch`. The trailing call uses the real `batch_id` with empty
-/// operations purely to release that batch entry.
-///
-/// Trade-off: splitting forfeits cross-batch atomicity. A failure
-/// mid-deploy leaves the canister with the operations from previously
-/// successful calls applied; the next sync run diffs against the canister
-/// and resumes from there.
+/// `commit_batch` consumes the `chunk_ids` referenced by `SetAssetContent` ops
+/// and only removes the real `batch_id` entry at the end. The trailing call
+/// uses the real `batch_id` with empty operations purely to release that entry.
 fn commit_in_stages<C: CanisterCall>(
     canister: &C,
     batch_id: Nat,
@@ -446,9 +399,6 @@ fn commit_in_stages<C: CanisterCall>(
 ) -> Result<(), String> {
     let groups = create_commit_batches(operations);
     if groups.len() <= 1 {
-        // Everything fits in one ingress message: skip the placeholder
-        // dance and commit directly under the real `batch_id`, which also
-        // releases the batch entry in the same call.
         let ops = groups.into_iter().next().unwrap_or_default();
         return commit_batch(
             canister,
@@ -474,8 +424,7 @@ fn commit_in_stages<C: CanisterCall>(
             },
         )?;
     }
-    // Empty-ops commit on the real batch_id: the canister's
-    // "all operations processed" branch removes the batch entry.
+    // Empty-ops commit on the real batch_id: the canister removes the batch entry.
     commit_batch(
         canister,
         CommitBatchArguments {
@@ -486,25 +435,8 @@ fn commit_in_stages<C: CanisterCall>(
 }
 
 /// Splits `operations` into groups, each small enough that a single
-/// `commit_batch` ingress call stays under the IC's 2 MiB per-message
-/// limit on application subnets. Greedy in declaration order: walks
-/// operations once, starting a new group whenever the running totals
-/// would exceed either budget.
-///
-/// Budgets per group:
-/// - **500 operations** — bounds the certified-tree work each
-///   `commit_batch` does and limits the blast radius of a mid-deploy
-///   failure.
-/// - **1.5 MiB of inlined header bytes** — leaves ~500 KiB of headroom
-///   under the 2 MiB ingress cap for fixed per-op overhead (keys,
-///   chunk_ids, sha256s, variant tags, request envelope). Header bytes
-///   are the only variable-sized per-op field and are where real-world
-///   overruns come from — a multi-kilobyte `Content-Security-Policy`
-///   from `_headers` gets attached to every asset's `CreateAsset` and
-///   to every 3xx rule inside `SetRedirectRules`.
-///
-/// An operation whose own header size exceeds the budget gets a group
-/// to itself — better to ship it alone than to drop it on the floor.
+/// `commit_batch` ingress call stays under the IC's 2 MiB per-message limit.
+/// Budgets per group: 500 operations and 1.5 MiB of inlined header bytes.
 fn create_commit_batches(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchOperationKind>> {
     const MAX_OPERATIONS_PER_GROUP: usize = 500;
     const MAX_HEADER_BYTES_PER_GROUP: usize = 1_500_000;
@@ -532,13 +464,6 @@ fn create_commit_batches(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchOp
 
 /// Returns the total byte size of header name/value pairs inlined in `op`,
 /// or 0 for op kinds that carry no header data.
-///
-/// Kinds with inlined headers:
-/// - `CreateAsset` — the per-key resolution of `_headers`.
-/// - `SetAssetProperties` — same, when properties drift.
-/// - `SetRedirectRules` — each 3xx rule inlines its resolved headers
-///   (3xx rules synthesise their own response, so there's no target
-///   asset to inherit headers from). Summed across all rules.
 fn header_bytes_of(op: &BatchOperationKind) -> usize {
     fn sum(headers: &[(String, String)]) -> usize {
         headers.iter().map(|(k, v)| k.len() + v.len()).sum()
@@ -548,11 +473,6 @@ fn header_bytes_of(op: &BatchOperationKind) -> usize {
         BatchOperationKind::SetAssetProperties(a) => {
             a.headers.as_ref().and_then(|h| h.as_deref()).map_or(0, sum)
         }
-        BatchOperationKind::SetRedirectRules(a) => a
-            .rules
-            .iter()
-            .map(|r| r.headers.as_deref().map_or(0, sum))
-            .sum(),
         BatchOperationKind::Clear(_)
         | BatchOperationKind::DeleteAsset(_)
         | BatchOperationKind::UnsetAssetContent(_)
@@ -564,9 +484,6 @@ fn build_operations(
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
     canister_asset_properties: &HashMap<String, AssetProperties>,
-    project_rules: &[RedirectRule],
-    canister_rules: &[RedirectRule],
-    project_header_rules: &[HeaderRule],
 ) -> Vec<BatchOperationKind> {
     let mut ops = Vec::new();
     let mut canister_assets = canister_assets.clone();
@@ -590,18 +507,19 @@ fn build_operations(
         canister_assets.remove(&k);
     }
 
-    // 2. Create new assets (those not present after deletions). Per-asset
-    //    headers come from resolving the project's `_headers` rules against
-    //    each new key; max_age and allow_raw_access fall back to defaults.
+    // 2. Create new assets. Per-asset metadata comes from `.ic-assets.json5`.
     for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
-            let resolved = headers::resolve(key, project_header_rules);
+            let config = pa.config();
+            let max_age = config.cache.as_ref().and_then(|c| c.max_age);
+            let headers = config.combined_headers().map(headers_to_vec);
             ops.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: key.clone(),
                 content_type: pa.media_type.to_string(),
-                max_age: None,
-                headers: (!resolved.is_empty()).then_some(resolved),
-                allow_raw_access: Some(true),
+                max_age,
+                headers,
+                enable_aliasing: config.enable_aliasing,
+                allow_raw_access: config.allow_raw_access,
             }));
         }
     }
@@ -647,138 +565,71 @@ fn build_operations(
         project_assets,
         &canister_assets,
         canister_asset_properties,
-        project_header_rules,
     );
-
-    // 6. Replace-all the canister's redirect rules when they differ from the
-    //    parsed `_redirects`. Comparison is order-sensitive — rules are
-    //    matched in declaration order at request time, so reordering is a
-    //    semantic change.
-    //
-    //    3xx rules synthesize their response (no target asset), so the
-    //    canister has no headers to inherit from. Populate `RedirectRule.headers`
-    //    by resolving `_headers` against the rule's `from` pattern. 200/4xx
-    //    rules borrow headers from their target asset, so no plumbing here.
-    let project_rules_with_headers: Vec<RedirectRule> = project_rules
-        .iter()
-        .map(|rule| {
-            let mut rule = rule.clone();
-            if is_3xx(rule.status) {
-                let key = redirect_pattern_to_key(&rule.from);
-                let resolved = headers::resolve(&key, project_header_rules);
-                if !resolved.is_empty() {
-                    rule.headers = Some(resolved);
-                }
-            }
-            rule
-        })
-        .collect();
-    if project_rules_with_headers != canister_rules {
-        ops.push(BatchOperationKind::SetRedirectRules(
-            SetRedirectRulesArguments {
-                rules: project_rules_with_headers,
-            },
-        ));
-    }
 
     ops
 }
 
-fn is_3xx(status: u16) -> bool {
-    (300..400).contains(&status)
-}
-
-/// Returns a path-like key suitable for running the header resolver against a
-/// redirect rule's `from`. Exact patterns yield the path itself; subtree
-/// patterns yield the prefix, so only header rules that subsume the subtree
-/// (the same or a broader subtree) match — narrower or unrelated patterns are
-/// rejected by the resolver's `starts_with` check.
-fn redirect_pattern_to_key(pattern: &crate::canister::RulePattern) -> String {
-    match pattern {
-        crate::canister::RulePattern::Exact(p) => p.clone(),
-        crate::canister::RulePattern::Subtree(prefix) => prefix.clone(),
-    }
-}
-
-/// Reads `_redirects` from the project's input directory, if present. A
-/// missing file is treated as "no rules"; parse errors carry the file's
-/// path and 1-based line number so users can fix issues without a canister
-/// round-trip.
-fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
-    let path = Path::new(dir).join(REDIRECTS_FILENAME);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    redirects::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-// For each asset that already exists on the canister, reset any per-asset
-// properties (`max_age`, `headers`, `allow_raw_access`) that drifted from the
-// project config. Newly-created assets get the same values via
-// `CreateAssetArguments`, so we don't emit `SetAssetProperties` for them.
-//
-// Headers are resolved from `_headers` per-key; everything else falls back to
-// plugin defaults (None / Some(true)).
-//
-// `canister_assets` is the post-deletion view: keys removed in step 1 (missing
-// from the project, or content_type drift forcing delete-then-create) are
-// absent. Skipping those keys here avoids emitting a redundant
-// `SetAssetProperties` op for an asset whose properties are already being set
-// by `CreateAssetArguments` in this same batch.
+/// For each asset that already exists on the canister, reset any per-asset
+/// properties (`max_age`, `headers`, `allow_raw_access`, `is_aliased`) that
+/// drifted from the `.ic-assets.json5` config. Newly-created assets get the
+/// same values via `CreateAssetArguments`, so we don't emit `SetAssetProperties`
+/// for them. Mirrors `ic-asset`'s `update_properties`.
+///
+/// `canister_assets` is the post-deletion view: keys removed in step 1 are
+/// absent, so we skip emitting a redundant op for a key being recreated.
 fn update_properties(
     ops: &mut Vec<BatchOperationKind>,
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
     canister_asset_properties: &HashMap<String, AssetProperties>,
-    project_header_rules: &[HeaderRule],
 ) {
-    for key in project_assets.keys() {
+    for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
             continue;
         }
         let Some(canister_props) = canister_asset_properties.get(key) else {
             continue;
         };
+        let config = pa.config();
 
-        let max_age = canister_props.max_age.is_some().then_some(None);
-
-        let resolved = headers::resolve(key, project_header_rules);
-        let expected_headers = (!resolved.is_empty()).then_some(resolved);
-        let headers = if canister_props.headers != expected_headers {
-            Some(expected_headers)
-        } else {
-            None
+        let max_age = {
+            let project = config.cache.as_ref().and_then(|c| c.max_age);
+            (project != canister_props.max_age).then_some(project)
         };
 
-        let allow_raw_access =
-            (canister_props.allow_raw_access != Some(true)).then_some(Some(true));
+        let headers = {
+            let project = normalize_headers(config.combined_headers().map(headers_to_vec));
+            let canister = normalize_headers(canister_props.headers.clone());
+            (project != canister).then_some(project)
+        };
 
-        if max_age.is_some() || headers.is_some() || allow_raw_access.is_some() {
+        let is_aliased = {
+            let project = config.enable_aliasing;
+            (project != canister_props.is_aliased).then_some(project)
+        };
+
+        let allow_raw_access = {
+            let project = config.allow_raw_access;
+            (project != canister_props.allow_raw_access).then_some(project)
+        };
+
+        if max_age.is_some()
+            || headers.is_some()
+            || is_aliased.is_some()
+            || allow_raw_access.is_some()
+        {
             ops.push(BatchOperationKind::SetAssetProperties(
                 SetAssetPropertiesArguments {
                     key: key.clone(),
                     max_age,
                     headers,
                     allow_raw_access,
+                    is_aliased,
                 },
             ));
         }
     }
-}
-
-/// Reads `_headers` from the project's input directory, if present. A missing
-/// file is treated as "no rules"; parse errors carry the file's path and
-/// 1-based line number so users can fix issues without a canister round-trip.
-fn load_header_rules(dir: &str) -> Result<Vec<HeaderRule>, String> {
-    let path = Path::new(dir).join(HEADERS_FILENAME);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    headers::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -787,10 +638,11 @@ mod tests {
     use crate::canister::{
         AssetDetails, AssetEncodingDetails, BatchOperationKind, CallType, CanisterCall,
     };
+    use crate::config::{AssetConfig, CacheConfig};
     use candid::{CandidType, Nat, Principal};
     use serde::de::DeserializeOwned;
     use std::cell::{Cell, RefCell};
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::path::PathBuf;
 
     // Mirrors the private CreateChunksResponse — same field name produces the same Candid encoding.
@@ -800,9 +652,7 @@ mod tests {
     }
 
     // Counts each `create_chunks` call, returns one fresh id per chunk in the
-    // request, and records the batch sizes the packer produced. Used to verify
-    // that `pack_and_upload_chunks` collapses many small chunks into single
-    // calls and assigns canister ids to the right encoding slots.
+    // request, and records the batch sizes the packer produced.
     struct ChunkBatchRecorder {
         next_id: Cell<u64>,
         batches: RefCell<Vec<usize>>, // chunks-per-batch
@@ -845,6 +695,14 @@ mod tests {
         }
     }
 
+    fn mk_source(key: &str) -> AssetSource {
+        AssetSource {
+            path: PathBuf::from(key.trim_start_matches('/')),
+            key: key.to_string(),
+            config: AssetConfig::default(),
+        }
+    }
+
     fn mk_pending_asset(key: &str, encoding: &str, data: Vec<u8>) -> (String, ProjectAsset) {
         let mut enc_map = HashMap::new();
         enc_map.insert(
@@ -859,10 +717,7 @@ mod tests {
         (
             key.to_string(),
             ProjectAsset {
-                source: AssetSource {
-                    path: PathBuf::from(key.trim_start_matches('/')),
-                    key: key.to_string(),
-                },
+                source: mk_source(key),
                 media_type: "application/octet-stream".parse().unwrap(),
                 encodings: enc_map,
             },
@@ -871,7 +726,6 @@ mod tests {
 
     #[test]
     fn pack_uploads_one_full_chunk_per_call() {
-        // A single MAX-sized encoding ships in one call carrying one chunk.
         let mut assets = HashMap::from([mk_pending_asset(
             "/f",
             "identity",
@@ -885,9 +739,6 @@ mod tests {
 
     #[test]
     fn pack_splits_oversized_encoding_into_max_chunks() {
-        // MAX*3 + 1 bytes → 4 chunks: three at MAX, one at 1 byte. Each MAX
-        // chunk fills its own call; the trailing 1-byte chunk gets its own
-        // call too because nothing else is left to share with it.
         let mut assets = HashMap::from([mk_pending_asset(
             "/big",
             "identity",
@@ -901,8 +752,6 @@ mod tests {
 
     #[test]
     fn pack_collapses_many_small_chunks_into_one_call() {
-        // 100 × 1KB chunks fit comfortably under MAX_CHUNK_SIZE (~1.9 MB) →
-        // one call carrying all 100 chunks. This is the optimisation.
         let mut assets: HashMap<String, ProjectAsset> = (0..100)
             .map(|i| mk_pending_asset(&format!("/f{i}"), "identity", vec![0u8; 1024]))
             .collect();
@@ -912,37 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_packs_full_chunk_alone_then_packs_remaining_smalls() {
-        // One MAX-sized asset + many tiny assets. FFD puts the MAX chunk in
-        // its own call (nothing else fits), then packs the small chunks
-        // together.
-        let mut assets: HashMap<String, ProjectAsset> = HashMap::new();
-        assets.extend([mk_pending_asset(
-            "/big",
-            "identity",
-            vec![0u8; MAX_CHUNK_SIZE],
-        )]);
-        for i in 0..10 {
-            assets.extend([mk_pending_asset(
-                &format!("/tiny{i}"),
-                "identity",
-                vec![0u8; 1024],
-            )]);
-        }
-        let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
-        // Two calls total: one for the big chunk, one for the ten tinies.
-        let batches = mock.batches.borrow().clone();
-        assert_eq!(batches.len(), 2);
-        assert!(batches.contains(&1)); // big chunk on its own
-        assert!(batches.contains(&10)); // 10 tinies packed together
-    }
-
-    #[test]
     fn pack_routes_chunk_ids_to_correct_encoding_slot() {
-        // Two assets, multi-chunk each. After upload, every encoding's
-        // chunk_ids vec must be filled (no default zeros remaining) and
-        // ids must be distinct.
         let mut assets = HashMap::from([
             mk_pending_asset("/a", "identity", vec![0u8; MAX_CHUNK_SIZE + 100]), // 2 chunks
             mk_pending_asset("/b", "identity", vec![0u8; 500]),                  // 1 chunk
@@ -953,19 +772,18 @@ mod tests {
         let b_ids = &assets["/b"].encodings["identity"].chunk_ids;
         assert_eq!(a_ids.len(), 2);
         assert_eq!(b_ids.len(), 1);
-        let mut all: Vec<&Nat> = a_ids.iter().chain(b_ids.iter()).collect();
-        all.sort_by(|x, y| {
-            // Nat doesn't impl Ord; compare textually.
-            x.to_string().cmp(&y.to_string())
-        });
+        let mut all: Vec<String> = a_ids
+            .iter()
+            .chain(b_ids.iter())
+            .map(|n| n.to_string())
+            .collect();
+        all.sort();
         all.dedup();
         assert_eq!(all.len(), 3, "ids must be distinct");
     }
 
     #[test]
     fn pack_empty_encoding_still_gets_one_chunk_id() {
-        // A zero-byte encoding still needs a chunk_id so SetAssetContent
-        // has something to reference.
         let mut assets = HashMap::from([mk_pending_asset("/empty", "identity", vec![])]);
         let mock = ChunkBatchRecorder::new();
         pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
@@ -974,7 +792,6 @@ mod tests {
 
     #[test]
     fn pack_skips_already_in_place_encodings() {
-        // Nothing to upload → no calls made.
         let (k, mut pa) = mk_pending_asset("/skip", "identity", vec![0u8; 100]);
         pa.encodings.get_mut("identity").unwrap().already_in_place = true;
         pa.encodings.get_mut("identity").unwrap().data = Vec::new();
@@ -987,7 +804,6 @@ mod tests {
     // ── commit_batch splitting ──────────────────────────────────────────────
 
     fn create_asset_with_headers(key: &str, hdr_bytes: usize) -> BatchOperationKind {
-        // One header whose name+value bytes sum to `hdr_bytes`.
         let name = "X-Pad".to_string();
         let value = "a".repeat(hdr_bytes.saturating_sub(name.len()));
         BatchOperationKind::CreateAsset(CreateAssetArguments {
@@ -995,6 +811,7 @@ mod tests {
             content_type: "text/plain".to_string(),
             max_age: None,
             headers: Some(vec![(name, value)]),
+            enable_aliasing: None,
             allow_raw_access: Some(true),
         })
     }
@@ -1016,6 +833,18 @@ mod tests {
     }
 
     #[test]
+    fn header_bytes_of_counts_set_asset_properties_headers() {
+        let op = BatchOperationKind::SetAssetProperties(SetAssetPropertiesArguments {
+            key: "/k".to_string(),
+            max_age: None,
+            headers: Some(Some(vec![("X-A".into(), "1".into())])), // 4 bytes
+            allow_raw_access: None,
+            is_aliased: None,
+        });
+        assert_eq!(header_bytes_of(&op), 4);
+    }
+
+    #[test]
     fn header_bytes_of_returns_zero_for_headerless_kinds() {
         assert_eq!(header_bytes_of(&set_content_op("/k")), 0);
         assert_eq!(
@@ -1024,64 +853,10 @@ mod tests {
             })),
             0
         );
-        assert_eq!(
-            header_bytes_of(&BatchOperationKind::UnsetAssetContent(
-                UnsetAssetContentArguments {
-                    key: "/k".to_string(),
-                    content_encoding: "identity".to_string(),
-                }
-            )),
-            0
-        );
-    }
-
-    #[test]
-    fn header_bytes_of_sums_redirect_rule_headers() {
-        // SetRedirectRules: only 3xx rules carry inlined headers; sum across rules.
-        let rules = vec![
-            RedirectRule {
-                from: crate::canister::RulePattern::Exact("/a".into()),
-                to: "/b".into(),
-                status: 301,
-                headers: Some(vec![("X-A".into(), "1".into())]), // 4 bytes
-            },
-            RedirectRule {
-                from: crate::canister::RulePattern::Exact("/c".into()),
-                to: "/d".into(),
-                status: 200,
-                headers: None,
-            },
-            RedirectRule {
-                from: crate::canister::RulePattern::Exact("/e".into()),
-                to: "/f".into(),
-                status: 307,
-                headers: Some(vec![("X-B".into(), "22".into())]), // 5 bytes
-            },
-        ];
-        let op = BatchOperationKind::SetRedirectRules(SetRedirectRulesArguments { rules });
-        assert_eq!(header_bytes_of(&op), 9);
-    }
-
-    #[test]
-    fn create_commit_batches_empty_input_returns_empty() {
-        assert!(create_commit_batches(vec![]).is_empty());
-    }
-
-    #[test]
-    fn create_commit_batches_small_input_stays_single_group() {
-        // 100 small ops with tiny headers → fits both budgets in one group.
-        let ops: Vec<BatchOperationKind> = (0..100)
-            .map(|i| create_asset_with_headers(&format!("/f{i}"), 10))
-            .collect();
-        let groups = create_commit_batches(ops);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].len(), 100);
     }
 
     #[test]
     fn create_commit_batches_splits_at_500_ops() {
-        // 1200 headerless ops should split into 500/500/200 — three groups
-        // driven purely by the operation-count cap.
         let ops: Vec<BatchOperationKind> = (0..1200)
             .map(|i| set_content_op(&format!("/f{i}")))
             .collect();
@@ -1094,41 +869,16 @@ mod tests {
 
     #[test]
     fn create_commit_batches_splits_at_header_budget() {
-        // 4 ops × 500 KB headers = 2 MB > 1.5 MB cap. Split happens before
-        // the 500-op cap could kick in.
         let ops: Vec<BatchOperationKind> = (0..4)
             .map(|i| create_asset_with_headers(&format!("/f{i}"), 500_000))
             .collect();
         let groups = create_commit_batches(ops);
-        // 3 ops × 500 KB = 1.5 MB fits exactly; the 4th would push over → split.
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].len(), 3);
         assert_eq!(groups[1].len(), 1);
     }
 
-    #[test]
-    fn create_commit_batches_oversized_op_gets_own_group() {
-        // One op alone exceeds the header budget. The greedy loop must still
-        // emit it (in its own group) rather than skip it.
-        let ops = vec![
-            create_asset_with_headers("/small", 10),
-            create_asset_with_headers("/huge", 2_000_000),
-            create_asset_with_headers("/small2", 10),
-        ];
-        let groups = create_commit_batches(ops);
-        // First group flushes when /huge would overflow it → [/small], then
-        // /huge alone (oversized but emitted), then /small2 alone (since /huge
-        // already pushed header_bytes way over budget).
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].len(), 1);
-        assert_eq!(groups[1].len(), 1);
-        assert_eq!(groups[2].len(), 1);
-    }
-
-    // Mock that records every `commit_batch` call's `(batch_id, op_count)`.
-    // Used to verify that `commit_in_stages` issues the right shape of
-    // call sequence (placeholder batch_id for splits, real batch_id for
-    // cleanup).
+    // Records every commit_batch call's (batch_id, op_count).
     struct CommitRecorder {
         calls: RefCell<Vec<(Nat, usize)>>,
     }
@@ -1166,8 +916,6 @@ mod tests {
 
     #[test]
     fn commit_in_stages_single_group_uses_real_batch_id() {
-        // Small enough to fit in one group → one commit_batch call carrying
-        // the real batch_id, no placeholder dance.
         let ops: Vec<BatchOperationKind> =
             (0..10).map(|i| set_content_op(&format!("/f{i}"))).collect();
         let mock = CommitRecorder::new();
@@ -1179,9 +927,6 @@ mod tests {
 
     #[test]
     fn commit_in_stages_multi_group_uses_placeholder_then_real_cleanup() {
-        // 1200 ops → three 500/500/200 splits using placeholder batch_id 0,
-        // then a final empty-ops call on the real batch_id to release the
-        // canister-side batch entry.
         let ops: Vec<BatchOperationKind> = (0..1200)
             .map(|i| set_content_op(&format!("/f{i}")))
             .collect();
@@ -1199,10 +944,21 @@ mod tests {
         );
     }
 
+    // ── build_operations ────────────────────────────────────────────────────
+
     fn mk_project_asset(
         key: &str,
         media_type: &str,
         encodings: &[(&str, Vec<u8>, bool)],
+    ) -> (String, ProjectAsset) {
+        mk_project_asset_cfg(key, media_type, encodings, AssetConfig::default())
+    }
+
+    fn mk_project_asset_cfg(
+        key: &str,
+        media_type: &str,
+        encodings: &[(&str, Vec<u8>, bool)],
+        config: AssetConfig,
     ) -> (String, ProjectAsset) {
         let mime: mime::Mime = media_type.parse().expect("valid MIME");
         let mut enc_map = HashMap::new();
@@ -1222,13 +978,12 @@ mod tests {
                 },
             );
         }
+        let mut source = mk_source(key);
+        source.config = config;
         (
             key.to_string(),
             ProjectAsset {
-                source: AssetSource {
-                    path: PathBuf::from(key.trim_start_matches('/')),
-                    key: key.to_string(),
-                },
+                source,
                 media_type: mime,
                 encodings: enc_map,
             },
@@ -1274,6 +1029,26 @@ mod tests {
             .count()
     }
 
+    fn create_op(ops: &[BatchOperationKind]) -> &CreateAssetArguments {
+        ops.iter()
+            .find_map(|op| match op {
+                BatchOperationKind::CreateAsset(a) => Some(a),
+                _ => None,
+            })
+            .expect("CreateAsset op")
+    }
+
+    fn set_props_ops(
+        ops: &[BatchOperationKind],
+    ) -> std::collections::BTreeMap<&str, &SetAssetPropertiesArguments> {
+        ops.iter()
+            .filter_map(|op| match op {
+                BatchOperationKind::SetAssetProperties(a) => Some((a.key.as_str(), a)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn new_asset_emits_create_and_set() {
         let project = HashMap::from([mk_project_asset(
@@ -1281,7 +1056,7 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(ops.len(), 2);
@@ -1300,7 +1075,7 @@ mod tests {
             "text/html",
             &[("identity", Some(sha))],
         )]);
-        assert!(build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]).is_empty());
+        assert!(build_operations(&project, &canister, &HashMap::new()).is_empty());
     }
 
     #[test]
@@ -1315,7 +1090,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
+        let ops = build_operations(&project, &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
         assert_eq!(count_op(&ops, "DeleteAsset"), 0);
@@ -1329,7 +1104,7 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[], &[]);
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(ops.len(), 1);
     }
@@ -1346,7 +1121,7 @@ mod tests {
             "application/octet-stream",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
+        let ops = build_operations(&project, &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
@@ -1356,7 +1131,6 @@ mod tests {
     #[test]
     fn stale_encoding_emits_unset() {
         let sha = vec![1u8, 2, 3];
-        // Project has only identity (already in place); gzip is stale on canister.
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1367,33 +1141,9 @@ mod tests {
             "text/html",
             &[("identity", Some(sha)), ("gzip", Some(vec![9, 8, 7]))],
         )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
+        let ops = build_operations(&project, &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 1);
         assert_eq!(count_op(&ops, "SetAssetContent"), 0);
-        assert_eq!(ops.len(), 1);
-    }
-
-    #[test]
-    fn new_encoding_emits_set_content() {
-        let identity_sha = vec![1u8, 2, 3];
-        // Project gains a gzip encoding; identity is already in place.
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[
-                ("identity", identity_sha.clone(), true),
-                ("gzip", vec![9, 8, 7], false),
-            ],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(identity_sha))],
-        )]);
-        let ops = build_operations(&project, &canister, &HashMap::new(), &[], &[], &[]);
-        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
-        assert_eq!(count_op(&ops, "CreateAsset"), 0);
-        assert_eq!(count_op(&ops, "UnsetAssetContent"), 0);
         assert_eq!(ops.len(), 1);
     }
 
@@ -1407,276 +1157,30 @@ mod tests {
                 &[("identity", Some(vec![2]))],
             ),
         ]);
-        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new(), &[], &[], &[]);
+        let ops = build_operations(&HashMap::new(), &canister, &HashMap::new());
         assert_eq!(count_op(&ops, "DeleteAsset"), 2);
         assert_eq!(ops.len(), 2);
     }
 
-    // ── redirect-rule diff ──────────────────────────────────────────────────
+    // ── config-driven create / properties ───────────────────────────────────
 
-    fn mk_rule(from: crate::canister::RulePattern, to: &str, status: u16) -> RedirectRule {
-        RedirectRule {
-            from,
-            to: to.to_string(),
-            status,
-            headers: None,
+    fn config_with(
+        max_age: Option<u64>,
+        headers: Option<&[(&str, &str)]>,
+        enable_aliasing: Option<bool>,
+        allow_raw_access: Option<bool>,
+    ) -> AssetConfig {
+        AssetConfig {
+            cache: max_age.map(|m| CacheConfig { max_age: Some(m) }),
+            headers: headers.map(|hs| {
+                hs.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<BTreeMap<_, _>>()
+            }),
+            enable_aliasing,
+            allow_raw_access,
+            ..AssetConfig::default()
         }
-    }
-
-    fn set_rules_op(ops: &[BatchOperationKind]) -> Option<&[RedirectRule]> {
-        ops.iter().find_map(|op| match op {
-            BatchOperationKind::SetRedirectRules(args) => Some(args.rules.as_slice()),
-            _ => None,
-        })
-    }
-
-    #[test]
-    fn rule_only_edit_emits_set_redirect_rules() {
-        // No asset changes, but the project has a new rule the canister
-        // doesn't — sync must emit the rules op.
-        let sha = vec![1u8, 2, 3];
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", sha.clone(), true)],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(sha))],
-        )]);
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
-        let ops = build_operations(
-            &project,
-            &canister,
-            &HashMap::new(),
-            &project_rules,
-            &[],
-            &[],
-        );
-        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
-        assert_eq!(rules, project_rules.as_slice());
-        // No asset-side ops should have been emitted.
-        assert_eq!(count_op(&ops, "CreateAsset"), 0);
-        assert_eq!(count_op(&ops, "SetAssetContent"), 0);
-        assert_eq!(count_op(&ops, "DeleteAsset"), 0);
-        assert_eq!(ops.len(), 1);
-    }
-
-    #[test]
-    fn redirects_file_removed_emits_empty_vec_op() {
-        // Canister has rules, project no longer does — sync emits an
-        // explicit empty-vec op so the canister clears its ruleset.
-        let canister_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
-        let ops = build_operations(
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            &canister_rules,
-            &[],
-        );
-        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
-        assert!(rules.is_empty(), "expected empty-vec replace-all op");
-    }
-
-    #[test]
-    fn unchanged_rules_emit_no_op() {
-        // Same rules on both sides — no SetRedirectRules op emitted.
-        let rules = vec![mk_rule(
-            crate::canister::RulePattern::Subtree("/blog/".into()),
-            "/blog/index.html",
-            200,
-        )];
-        let ops = build_operations(
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &rules,
-            &rules,
-            &[],
-        );
-        assert!(
-            set_rules_op(&ops).is_none(),
-            "no SetRedirectRules op expected when rules match"
-        );
-        assert!(ops.is_empty());
-    }
-
-    #[test]
-    fn reordered_rules_emit_op() {
-        // Order matters semantically — first matching rule wins at request
-        // time. A swap is a real change even with identical entries.
-        let a = mk_rule(crate::canister::RulePattern::Exact("/a".into()), "/x", 301);
-        let b = mk_rule(crate::canister::RulePattern::Exact("/b".into()), "/y", 301);
-        let ops = build_operations(
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &[a.clone(), b.clone()],
-            &[b, a],
-            &[],
-        );
-        assert!(
-            set_rules_op(&ops).is_some(),
-            "rule reorder must emit a replace-all op"
-        );
-    }
-
-    #[test]
-    fn sync_short_circuits_when_redirects_file_only_matches_canister() {
-        // Drive sync() end-to-end with a _redirects file that matches what
-        // the canister already has. The "nothing to commit" short-circuit
-        // must trigger, with no create_batch / commit_batch calls.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
-
-        let mock = SyncMock::new();
-        mock.push_ok("api_version", 2u16);
-        mock.push_ok("list", Vec::<AssetDetails>::new());
-        mock.push_ok(
-            "get_redirect_rules",
-            vec![mk_rule(
-                crate::canister::RulePattern::Exact("/old".into()),
-                "/new",
-                301,
-            )],
-        );
-
-        let result = sync(
-            &mock,
-            &[dir.path().to_str().unwrap().to_string()],
-            &Principal::anonymous().to_text(),
-            None,
-        );
-        // No create_batch / commit_batch programmed — if sync reached them
-        // SyncMock would panic with "no programmed response".
-        assert!(result.is_ok(), "expected success, got: {result:?}");
-    }
-
-    // Mirrors the private `CreateBatchResponse` in canister.rs — same field
-    // name gives the same Candid encoding, so the test mock can decode it.
-    #[derive(CandidType)]
-    struct CreateBatchOk {
-        batch_id: Nat,
-    }
-
-    #[test]
-    fn sync_emits_rules_op_when_redirects_file_only_changed() {
-        // _redirects has a rule; canister has none. The asset list is also
-        // empty so no asset ops are produced — the only operation must be
-        // SetRedirectRules, exercising the early "nothing to commit" check.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
-
-        let mock = SyncMock::new();
-        mock.push_ok("api_version", 2u16);
-        mock.push_ok("list", Vec::<AssetDetails>::new());
-        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
-        mock.push_ok(
-            "create_batch",
-            CreateBatchOk {
-                batch_id: Nat::from(1u32),
-            },
-        );
-        mock.push_ok("commit_batch", ());
-
-        let result = sync(
-            &mock,
-            &[dir.path().to_str().unwrap().to_string()],
-            &Principal::anonymous().to_text(),
-            None,
-        );
-        assert!(result.is_ok(), "expected success, got: {result:?}");
-    }
-
-    // prepare_asset itself skips gzip when the compressed output is not smaller
-    // than the identity bytes. All 256 distinct byte values are maximally
-    // incompressible: gzip's ~18-byte header alone exceeds the savings.
-    #[test]
-    fn prepare_asset_skips_gzip_when_not_smaller() {
-        use std::io::Write;
-        let mut f = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
-        f.write_all(&(0u8..=255u8).collect::<Vec<u8>>()).unwrap();
-        let source = AssetSource {
-            path: f.path().to_path_buf(),
-            key: "/test.txt".to_string(),
-        };
-        let asset = prepare_asset(source, &[], &HashMap::new()).unwrap();
-        assert!(
-            asset.encodings.contains_key("identity"),
-            "identity must be present"
-        );
-        assert!(
-            !asset.encodings.contains_key("gzip"),
-            "gzip must be absent when not smaller"
-        );
-    }
-
-    // `_headers` Content-Type override drives both the stored media type and
-    // the encoder selection. Without the override, a `.did` file is
-    // `application/octet-stream` (mime_guess has no entry) and gets only the
-    // identity encoding; with the override to `text/plain`, encoders_for
-    // selects gzip too.
-    #[test]
-    fn header_content_type_override_applies_to_prepare_asset() {
-        use std::io::Write;
-
-        // Highly compressible content so gzip is genuinely smaller and gets
-        // kept by prepare_asset's "skip if not smaller" check.
-        let mut f = tempfile::Builder::new().suffix(".did").tempfile().unwrap();
-        f.write_all(
-            b"service : { greet : (text) -> (text); }\n"
-                .repeat(100)
-                .as_ref(),
-        )
-        .unwrap();
-        let mk_source = || AssetSource {
-            path: f.path().to_path_buf(),
-            key: "/ic.did".to_string(),
-        };
-
-        // No override: mime_guess returns octet-stream, gzip is not selected.
-        let without = prepare_asset(mk_source(), &[], &HashMap::new()).unwrap();
-        assert_eq!(without.media_type.to_string(), "application/octet-stream");
-        assert!(!without.encodings.contains_key("gzip"));
-
-        // With override to text/plain via `_headers`, both the media type
-        // and the encoder pick change.
-        let rules =
-            crate::headers::parse("/*.did\n  Content-Type: text/plain; charset=utf-8\n").unwrap();
-        let with = prepare_asset(mk_source(), &rules, &HashMap::new()).unwrap();
-        assert_eq!(with.media_type.to_string(), "text/plain; charset=utf-8");
-        assert!(
-            with.encodings.contains_key("gzip"),
-            "gzip should be selected for text/* override"
-        );
-    }
-
-    // When gzip output is not smaller than identity, prepare_asset skips it, so
-    // build_operations sees only the identity encoding and emits no gzip op.
-    #[test]
-    fn gzip_absent_from_project_emits_no_gzip_op() {
-        let project = HashMap::from([mk_project_asset(
-            "/tiny.txt",
-            "text/plain",
-            &[("identity", vec![1, 2, 3], false)],
-        )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
-        assert_eq!(count_op(&ops, "CreateAsset"), 1);
-        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
-        assert!(!ops.iter().any(|op| matches!(
-            op,
-            BatchOperationKind::SetAssetContent(a) if a.content_encoding == "gzip"
-        )));
     }
 
     #[test]
@@ -1686,32 +1190,55 @@ mod tests {
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
-        let create_op = ops
-            .iter()
-            .find_map(|op| {
-                if let BatchOperationKind::CreateAsset(a) = op {
-                    Some(a)
-                } else {
-                    None
-                }
-            })
-            .expect("CreateAsset op");
-
-        assert_eq!(create_op.max_age, None);
-        assert!(create_op.headers.is_none());
-        assert_eq!(create_op.allow_raw_access, Some(true));
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        let create = create_op(&ops);
+        assert_eq!(create.max_age, None);
+        assert!(create.headers.is_none());
+        assert_eq!(create.enable_aliasing, None);
+        assert_eq!(create.allow_raw_access, Some(true));
     }
 
-    fn set_props_ops(
-        ops: &[BatchOperationKind],
-    ) -> std::collections::BTreeMap<&str, &SetAssetPropertiesArguments> {
-        ops.iter()
-            .filter_map(|op| match op {
-                BatchOperationKind::SetAssetProperties(a) => Some((a.key.as_str(), a)),
-                _ => None,
-            })
-            .collect()
+    #[test]
+    fn create_asset_args_carry_config() {
+        let config = config_with(
+            Some(99),
+            Some(&[("X-Frame-Options", "DENY")]),
+            Some(true),
+            Some(false),
+        );
+        let project = HashMap::from([mk_project_asset_cfg(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+            config,
+        )]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        let create = create_op(&ops);
+        assert_eq!(create.max_age, Some(99));
+        assert_eq!(
+            create.headers,
+            Some(vec![("X-Frame-Options".into(), "DENY".into())])
+        );
+        assert_eq!(create.enable_aliasing, Some(true));
+        assert_eq!(create.allow_raw_access, Some(false));
+    }
+
+    #[test]
+    fn create_asset_args_inject_security_policy_headers() {
+        let config = AssetConfig {
+            security_policy: Some(crate::security_policy::SecurityPolicy::Standard),
+            ..AssetConfig::default()
+        };
+        let project = HashMap::from([mk_project_asset_cfg(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], false)],
+            config,
+        )]);
+        let ops = build_operations(&project, &HashMap::new(), &HashMap::new());
+        let create = create_op(&ops);
+        let headers = create.headers.as_ref().expect("policy headers");
+        assert!(headers.iter().any(|(k, _)| k == "Content-Security-Policy"));
     }
 
     #[test]
@@ -1732,17 +1259,57 @@ mod tests {
                 max_age: None,
                 headers: None,
                 allow_raw_access: Some(true),
+                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
-        assert!(
-            set_props_ops(&ops).is_empty(),
-            "no SetAssetProperties op when canister already matches defaults"
-        );
+        let ops = build_operations(&project, &canister, &canister_props);
+        assert!(set_props_ops(&ops).is_empty());
     }
 
     #[test]
-    fn update_properties_clears_max_age_when_canister_has_it() {
+    fn update_properties_sets_aliasing_and_headers() {
+        let config = config_with(
+            None,
+            Some(&[("X-Frame-Options", "DENY")]),
+            Some(true),
+            Some(true),
+        );
+        let project = HashMap::from([mk_project_asset_cfg(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+            config,
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: None,
+                allow_raw_access: Some(true),
+                is_aliased: Some(false),
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        let by_key = set_props_ops(&ops);
+        assert_eq!(by_key.len(), 1);
+        let op = by_key["/index.html"];
+        assert_eq!(
+            op.headers,
+            Some(Some(vec![("X-Frame-Options".into(), "DENY".into())]))
+        );
+        assert_eq!(op.is_aliased, Some(Some(true)));
+        // allow_raw_access matches (both Some(true)) → not set; max_age matches → not set.
+        assert_eq!(op.allow_raw_access, None);
+        assert_eq!(op.max_age, None);
+    }
+
+    #[test]
+    fn update_properties_clears_canister_headers_and_max_age() {
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1757,20 +1324,23 @@ mod tests {
             "/index.html".to_string(),
             AssetProperties {
                 max_age: Some(60),
-                headers: None,
+                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
                 allow_raw_access: Some(true),
+                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
+        let ops = build_operations(&project, &canister, &canister_props);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
-        // canister has Some(60), defaults are None — the op must explicitly
-        // request clearing (the inner None means "set to null on the canister").
         assert_eq!(by_key["/index.html"].max_age, Some(None));
+        assert_eq!(by_key["/index.html"].headers, Some(None));
     }
 
     #[test]
-    fn update_properties_clears_canister_headers() {
+    fn update_properties_ignores_canister_injected_env_cookie() {
+        // The legacy canister injects `Set-Cookie: ic_env=...` into HTML assets'
+        // headers. A project with no header config must not see this as drift,
+        // otherwise every sync would emit a (futile) clear op.
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1781,28 +1351,59 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let canister_headers = vec![("X-Frame-Options".to_string(), "DENY".to_string())];
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
                 max_age: None,
-                headers: Some(canister_headers),
+                headers: Some(vec![(
+                    "Set-Cookie".into(),
+                    "ic_env=deadbeef; SameSite=Lax".into(),
+                )]),
                 allow_raw_access: Some(true),
+                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
-        let by_key = set_props_ops(&ops);
-        assert_eq!(by_key.len(), 1);
-        // The inner None clears the headers map on the canister.
-        assert_eq!(by_key["/index.html"].headers, Some(None));
+        let ops = build_operations(&project, &canister, &canister_props);
+        assert!(
+            set_props_ops(&ops).is_empty(),
+            "the canister-injected ic_env cookie must not count as header drift"
+        );
+    }
+
+    #[test]
+    fn update_properties_keeps_config_headers_alongside_env_cookie() {
+        // Project defines X-Custom; canister stores X-Custom plus the injected
+        // ic_env cookie. After stripping the cookie the two match → no op.
+        let config = config_with(None, Some(&[("X-Custom", "yes")]), None, Some(true));
+        let project = HashMap::from([mk_project_asset_cfg(
+            "/index.html",
+            "text/html",
+            &[("identity", vec![1, 2, 3], true)],
+            config,
+        )]);
+        let canister = HashMap::from([mk_canister_asset(
+            "/index.html",
+            "text/html",
+            &[("identity", Some(vec![1, 2, 3]))],
+        )]);
+        let canister_props = HashMap::from([(
+            "/index.html".to_string(),
+            AssetProperties {
+                max_age: None,
+                headers: Some(vec![
+                    ("Set-Cookie".into(), "ic_env=abc; SameSite=Lax".into()),
+                    ("X-Custom".into(), "yes".into()),
+                ]),
+                allow_raw_access: Some(true),
+                is_aliased: None,
+            },
+        )]);
+        let ops = build_operations(&project, &canister, &canister_props);
+        assert!(set_props_ops(&ops).is_empty());
     }
 
     #[test]
     fn update_properties_skips_assets_being_recreated_due_to_content_type_drift() {
-        // Asset on canister has a different content_type → step 1 deletes it
-        // and step 2 recreates it with default properties. update_properties
-        // must not emit a redundant SetAssetProperties op for that key, even
-        // if canister_asset_properties still contains pre-deletion data.
         let project = HashMap::from([mk_project_asset(
             "/file",
             "text/html",
@@ -1819,308 +1420,48 @@ mod tests {
                 max_age: Some(60),
                 headers: None,
                 allow_raw_access: Some(true),
+                is_aliased: None,
             },
         )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
+        let ops = build_operations(&project, &canister, &canister_props);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
-        assert!(
-            set_props_ops(&ops).is_empty(),
-            "no SetAssetProperties op when the asset is being recreated in the same batch"
-        );
-    }
-
-    #[test]
-    fn update_properties_skips_assets_not_on_canister() {
-        // Asset is new to the canister — properties get set via CreateAsset,
-        // not SetAssetProperties.
-        let project = HashMap::from([mk_project_asset(
-            "/new.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], false)],
-        )]);
-        let ops = build_operations(&project, &HashMap::new(), &HashMap::new(), &[], &[], &[]);
         assert!(set_props_ops(&ops).is_empty());
     }
 
-    // ── _headers integration ───────────────────────────────────────────────
+    // ── prepare_asset ────────────────────────────────────────────────────────
 
-    fn mk_header_rule(pattern_src: &str, headers: &[(&str, &str)]) -> HeaderRule {
-        HeaderRule {
-            pattern: crate::glob::parse(pattern_src).unwrap(),
-            headers: headers
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            content_type: None,
-        }
+    #[test]
+    fn prepare_asset_skips_gzip_when_not_smaller() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+        f.write_all(&(0u8..=255u8).collect::<Vec<u8>>()).unwrap();
+        let mut source = mk_source("/test.txt");
+        source.path = f.path().to_path_buf();
+        let asset = prepare_asset(source, &HashMap::new()).unwrap();
+        assert!(asset.encodings.contains_key("identity"));
+        assert!(!asset.encodings.contains_key("gzip"));
     }
 
     #[test]
-    fn create_asset_args_carry_resolved_headers() {
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], false)],
-        )]);
-        let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
-        let ops = build_operations(
-            &project,
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            &[],
-            &header_rules,
-        );
-        let create_op = ops
-            .iter()
-            .find_map(|op| match op {
-                BatchOperationKind::CreateAsset(a) => Some(a),
-                _ => None,
-            })
-            .expect("CreateAsset op");
-        assert_eq!(
-            create_op.headers,
-            Some(vec![("X-Frame-Options".into(), "DENY".into())])
-        );
+    fn prepare_asset_honors_config_encodings() {
+        use std::io::Write;
+        // A .wasm file defaults to identity-only, but config forces gzip too.
+        let mut f = tempfile::Builder::new().suffix(".wasm").tempfile().unwrap();
+        f.write_all(b"hello hello hello hello hello hello".repeat(10).as_ref())
+            .unwrap();
+        let mut source = mk_source("/mod.wasm");
+        source.path = f.path().to_path_buf();
+        source.config.encodings = Some(vec![Encoder::Identity, Encoder::Gzip]);
+        let asset = prepare_asset(source, &HashMap::new()).unwrap();
+        assert!(asset.encodings.contains_key("identity"));
+        assert!(asset.encodings.contains_key("gzip"));
     }
 
-    #[test]
-    fn create_asset_args_omit_headers_when_no_rules_match() {
-        let project = HashMap::from([mk_project_asset(
-            "/public.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], false)],
-        )]);
-        let header_rules = vec![mk_header_rule("/private", &[("X-Frame-Options", "DENY")])];
-        let ops = build_operations(
-            &project,
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            &[],
-            &header_rules,
-        );
-        let create_op = ops
-            .iter()
-            .find_map(|op| match op {
-                BatchOperationKind::CreateAsset(a) => Some(a),
-                _ => None,
-            })
-            .expect("CreateAsset op");
-        assert!(create_op.headers.is_none());
-    }
+    // ── authorization ────────────────────────────────────────────────────────
 
-    #[test]
-    fn update_properties_sets_headers_when_canister_missing_them() {
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], true)],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
-        )]);
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: None,
-                headers: None,
-                allow_raw_access: Some(true),
-            },
-        )]);
-        let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
-        let ops = build_operations(
-            &project,
-            &canister,
-            &canister_props,
-            &[],
-            &[],
-            &header_rules,
-        );
-        let by_key = set_props_ops(&ops);
-        assert_eq!(by_key.len(), 1);
-        assert_eq!(
-            by_key["/index.html"].headers,
-            Some(Some(vec![("X-Frame-Options".into(), "DENY".into())]))
-        );
-    }
-
-    #[test]
-    fn update_properties_clears_headers_when_no_rules_match() {
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], true)],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
-        )]);
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: None,
-                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
-                allow_raw_access: Some(true),
-            },
-        )]);
-        // No header rules — canister-stored headers should be cleared.
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
-        let by_key = set_props_ops(&ops);
-        assert_eq!(by_key.len(), 1);
-        assert_eq!(by_key["/index.html"].headers, Some(None));
-    }
-
-    #[test]
-    fn three_xx_redirect_rule_carries_resolved_headers() {
-        // 3xx rules synthesize their response; populate `headers` from any
-        // `_headers` rule whose pattern matches the redirect's `from`.
-        let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
-        let ops = build_operations(
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &project_rules,
-            &[],
-            &header_rules,
-        );
-        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(
-            rules[0].headers,
-            Some(vec![("X-Robots-Tag".into(), "noindex".into())])
-        );
-    }
-
-    #[test]
-    fn non_3xx_redirect_rule_does_not_carry_resolved_headers() {
-        // 200 / 4xx rules inherit headers from their target asset, so the
-        // plugin must leave `RedirectRule.headers` as `None` even when a
-        // matching `_headers` rule exists.
-        let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
-        for status in [200u16, 404, 410] {
-            let project_rules = vec![mk_rule(
-                crate::canister::RulePattern::Exact("/old".into()),
-                "/target.html",
-                status,
-            )];
-            let ops = build_operations(
-                &HashMap::new(),
-                &HashMap::new(),
-                &HashMap::new(),
-                &project_rules,
-                &[],
-                &header_rules,
-            );
-            let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
-            assert_eq!(rules.len(), 1);
-            assert!(
-                rules[0].headers.is_none(),
-                "status {status}: expected no headers on non-3xx rule"
-            );
-        }
-    }
-
-    #[test]
-    fn three_xx_redirect_rule_omits_headers_when_no_match() {
-        let header_rules = vec![mk_header_rule("/other", &[("X-Foo", "bar")])];
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
-        let ops = build_operations(
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &project_rules,
-            &[],
-            &header_rules,
-        );
-        let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
-        assert!(rules[0].headers.is_none());
-    }
-
-    #[test]
-    fn redirect_rules_match_when_headers_populated_matches_canister() {
-        // Canister stores the same rule (with the resolved 3xx headers) — no
-        // SetRedirectRules op should be emitted.
-        let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
-        let canister_rules = vec![RedirectRule {
-            from: crate::canister::RulePattern::Exact("/old".into()),
-            to: "/new".to_string(),
-            status: 301,
-            headers: Some(vec![("X-Robots-Tag".into(), "noindex".into())]),
-        }];
-        let ops = build_operations(
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &project_rules,
-            &canister_rules,
-            &header_rules,
-        );
-        assert!(
-            set_rules_op(&ops).is_none(),
-            "no SetRedirectRules op when rules with headers match canister-stored"
-        );
-    }
-
-    #[test]
-    fn update_properties_no_op_when_canister_headers_match_resolved() {
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], true)],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
-        )]);
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: None,
-                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
-                allow_raw_access: Some(true),
-            },
-        )]);
-        let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
-        let ops = build_operations(
-            &project,
-            &canister,
-            &canister_props,
-            &[],
-            &[],
-            &header_rules,
-        );
-        assert!(
-            set_props_ops(&ops).is_empty(),
-            "no SetAssetProperties op when resolved headers byte-match canister-stored"
-        );
-    }
-
-    // ---- Authorization tests ----
-
-    // Mock for ensure_commit_permission: handles list_permitted and grant_permission only.
     struct PermissionMock {
         permitted: Vec<Principal>,
-        // Tracks the `direct` flag for each grant_permission call.
         grant_calls: RefCell<Vec<bool>>,
     }
 
@@ -2155,7 +1496,6 @@ mod tests {
         }
     }
 
-    // General-purpose scripted mock: pre-programs per-method response queues.
     type MockQueue = RefCell<HashMap<String, VecDeque<Result<Vec<u8>, String>>>>;
 
     struct SyncMock {
@@ -2206,17 +1546,19 @@ mod tests {
         }
     }
 
-    // Proxy mode: identity absent from Commit list → grant_permission called via proxy.
+    #[derive(CandidType)]
+    struct CreateBatchOk {
+        batch_id: Nat,
+    }
+
     #[test]
     fn ensure_commit_permission_grants_via_proxy_when_absent() {
         let identity = Principal::anonymous();
         let mock = PermissionMock::new(vec![]);
         ensure_commit_permission(&mock, &identity.to_text()).unwrap();
-        // grant_permission must be called exactly once with direct=false (routed via proxy).
         assert_eq!(*mock.grant_calls.borrow(), vec![false]);
     }
 
-    // Proxy mode: identity already in Commit list → grant_permission not called.
     #[test]
     fn ensure_commit_permission_skips_grant_when_already_permitted() {
         let identity = Principal::anonymous();
@@ -2229,36 +1571,18 @@ mod tests {
     fn sync_rejects_zero_input_dirs() {
         let mock = SyncMock::new();
         let err = sync(&mock, &[], &Principal::anonymous().to_text(), None).unwrap_err();
-        assert!(
-            err.contains("expected exactly one input directory"),
-            "got: {err}"
-        );
+        assert!(err.contains("at least one input directory"), "got: {err}");
     }
 
     #[test]
-    fn sync_rejects_multiple_input_dirs() {
-        let mock = SyncMock::new();
-        let err = sync(
-            &mock,
-            &["dist-a".to_string(), "dist-b".to_string()],
-            &Principal::anonymous().to_text(),
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("got 2"), "got: {err}");
-    }
-
-    #[test]
-    fn sync_short_circuits_when_headers_file_only_matches_canister() {
-        // The canister already stores the headers a `_headers`-only project
-        // would resolve. The "nothing to commit" short-circuit must trigger.
-        // The asset is `.txt`, not `.html`, so the auto-synthesised
-        // html-handling rules don't get in the way of the comparison.
+    fn sync_short_circuits_when_config_only_matches_canister() {
+        // The canister already stores the headers a `.ic-assets.json5`-only
+        // project would resolve. The "nothing to commit" short-circuit triggers.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
         std::fs::write(
-            dir.path().join("_headers"),
-            b"/*\n  X-Frame-Options: DENY\n",
+            dir.path().join(".ic-assets.json5"),
+            br#"[{ "match": "*", "headers": { "X-Frame-Options": "DENY" } }]"#,
         )
         .unwrap();
 
@@ -2279,13 +1603,13 @@ mod tests {
             }],
         );
         mock.push_ok("list", Vec::<AssetDetails>::new());
-        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok(
             "get_asset_properties",
             AssetProperties {
                 max_age: None,
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
                 allow_raw_access: Some(true),
+                is_aliased: None,
             },
         );
 
@@ -2299,22 +1623,14 @@ mod tests {
         assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
-    // ── html-handling auto-synthesis ────────────────────────────────────────
-
     #[test]
-    fn sync_synthesises_html_handling_rules_when_html_present() {
-        // No `_redirects` file; an `index.html` asset alone should produce
-        // exactly the three rules from `html_handling::synthesize` (the root
-        // index variant: /, /index, /index.html). The canister has empty
-        // rules and no asset, so the batch contains both the asset upload
-        // and a SetRedirectRules op.
+    fn sync_uploads_new_asset() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
         mock.push_ok("list", Vec::<AssetDetails>::new());
-        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok(
             "create_batch",
             CreateBatchOk {
@@ -2339,123 +1655,13 @@ mod tests {
     }
 
     #[test]
-    fn synthesised_rules_win_over_user_rule_at_same_from() {
-        // Synthesised rules are emitted **before** the user's `_redirects` —
-        // synth must come first so html-handling Exact rules don't get
-        // shadowed by a broader user subtree (e.g. `/*` catch-all), which
-        // would otherwise make the gateway verifier reject responses on
-        // those paths (wildcard expr_path vs. exact entry in the tree).
-        //
-        // The cost: if the user happens to declare a rule at the exact same
-        // `from` as something synthesis produces, the synthesised rule wins.
-        // To override an HTML asset's default html_handling, remove the
-        // source `.html` and use a non-HTML asset key instead.
-        let user_rules = redirects::parse("/index /elsewhere 301\n").unwrap();
-        let synthesised = crate::html_handling::synthesize(&["/index.html".to_string()]);
-
-        let mut combined = synthesised;
-        combined.extend(user_rules);
-
-        // First rule matching `/index` is the synthesised 307 -> /.
-        let first_at_index = combined
-            .iter()
-            .find(|r| matches!(&r.from, crate::canister::RulePattern::Exact(p) if p == "/index"))
-            .expect("a rule at /index");
-        assert_eq!(first_at_index.status, 307);
-        assert_eq!(first_at_index.to, "/");
-    }
-
-    #[test]
-    fn user_subtree_falls_through_to_paths_synth_doesnt_cover() {
-        // The motivating fix: a user `/*` 404 catch-all must NOT shadow the
-        // synthesised Exact rules — otherwise the cert tree carries Exact
-        // entries that the response (served on the `<*>` subtree witness)
-        // doesn't use, and the gateway verifier returns 503.
-        //
-        // With synth first, the catch-all only fires for paths nothing else
-        // claims. We verify the rule order: synthesised /index Exact comes
-        // before the user's /* Subtree.
-        let user_rules = redirects::parse("/* /404.html 404\n").unwrap();
-        let synthesised = crate::html_handling::synthesize(&["/index.html".to_string()]);
-
-        let mut combined = synthesised;
-        combined.extend(user_rules);
-
-        let index_pos = combined
-            .iter()
-            .position(
-                |r| matches!(&r.from, crate::canister::RulePattern::Exact(p) if p == "/index"),
-            )
-            .expect("a rule at /index");
-        let catchall_pos = combined
-            .iter()
-            .position(|r| matches!(&r.from, crate::canister::RulePattern::Subtree(p) if p == "/"))
-            .expect("the /* catch-all");
-        assert!(
-            index_pos < catchall_pos,
-            "synth Exact must precede user Subtree /*; got index@{index_pos}, /*@{catchall_pos}"
-        );
-    }
-
-    #[test]
-    fn sync_short_circuits_when_synthesised_rules_match_canister() {
-        // The canister already stores the rules synthesis would produce.
-        // No SetRedirectRules op should be emitted, and with the asset
-        // already up to date the sync should short-circuit before
-        // create_batch.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
-
-        use sha2::Digest;
-        let identity_sha = sha2::Sha256::digest(b"<html></html>").to_vec();
-
-        let canister_rules = crate::html_handling::synthesize(&["/index.html".to_string()]);
-
-        let mock = SyncMock::new();
-        mock.push_ok("api_version", 2u16);
-        mock.push_ok(
-            "list",
-            vec![AssetDetails {
-                key: "/index.html".to_string(),
-                content_type: "text/html".to_string(),
-                encodings: vec![AssetEncodingDetails {
-                    content_encoding: "identity".to_string(),
-                    sha256: Some(identity_sha),
-                }],
-            }],
-        );
-        mock.push_ok("list", Vec::<AssetDetails>::new());
-        mock.push_ok("get_redirect_rules", canister_rules);
-        mock.push_ok(
-            "get_asset_properties",
-            AssetProperties {
-                max_age: None,
-                headers: None,
-                allow_raw_access: Some(true),
-            },
-        );
-
-        let result = sync(
-            &mock,
-            &[dir.path().to_str().unwrap().to_string()],
-            &Principal::anonymous().to_text(),
-            None,
-        );
-        // No create_batch / commit_batch programmed — would panic if reached.
-        assert!(result.is_ok(), "expected success, got: {result:?}");
-    }
-
-    // Direct mode: canister rejects create_batch with a permission error → sync propagates it.
-    #[test]
     fn sync_propagates_permission_error_from_create_batch() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
-        // Empty canister → build_operations will produce work → create_batch is called.
         mock.push_ok("list", Vec::<AssetDetails>::new());
-        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_err("create_batch", "Caller does not have Commit permission");
 
         let result = sync(
@@ -2464,11 +1670,7 @@ mod tests {
             &Principal::anonymous().to_text(),
             None,
         );
-
         let err = result.unwrap_err();
-        assert!(
-            err.contains("Commit permission"),
-            "expected permission error, got: {err}"
-        );
+        assert!(err.contains("Commit permission"), "got: {err}");
     }
 }

@@ -1,4 +1,0 @@
-# Content-Type overrides for files mime_guess doesn't classify usefully.
-
-/*.did
-  Content-Type: text/plain; charset=utf-8

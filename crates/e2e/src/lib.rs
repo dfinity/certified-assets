@@ -81,9 +81,10 @@ pub fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Set up an isolated copy of a fixture in a temporary directory, with
-/// pre-built WASM modules placed at `wasms/canister.wasm` and
-/// `wasms/plugin.wasm` (paths supplied by the build script).
+/// Set up an isolated copy of a fixture in a temporary directory, with the
+/// pre-built modules placed at `wasms/canister.wasm.gz` (the legacy dfx 0.32.0
+/// `assetstorage`, installed gzipped) and `wasms/plugin.wasm` (paths supplied
+/// by the build script).
 ///
 /// `fixture_path` is relative to the e2e crate root (e.g. `"tests/fixture/basic"`).
 /// The returned `TempDir` must be kept alive for the duration of the test.
@@ -97,8 +98,8 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
     let wasms_dir = tmp.path().join("wasms");
     fs::create_dir_all(&wasms_dir).expect("failed to create wasms/ dir");
 
-    fs::copy(env!("CANISTER_WASM"), wasms_dir.join("canister.wasm"))
-        .expect("failed to copy canister.wasm");
+    fs::copy(env!("CANISTER_WASM"), wasms_dir.join("canister.wasm.gz"))
+        .expect("failed to copy canister.wasm.gz");
     fs::copy(env!("PLUGIN_WASM"), wasms_dir.join("plugin.wasm"))
         .expect("failed to copy plugin.wasm");
 

@@ -1,0 +1,16 @@
+[
+  // Applies a standard security policy and a custom header to every asset.
+  {
+    "match": "**/*",
+    "security_policy": "standard",
+    "headers": {
+      "X-Custom": "yes",
+    },
+  },
+  // HTML files additionally get a cache max-age and explicit aliasing.
+  {
+    "match": "*.html",
+    "cache": { "max_age": 600 },
+    "enable_aliasing": true,
+  },
+]
