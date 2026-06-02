@@ -1,5 +1,5 @@
+use canister_core::StableState;
 use ic_cdk::stable;
-use ic_certified_assets::StableState;
 
 pub fn save_stable_state(stable_state: &StableState) -> Result<(), serde_cbor::Error> {
     let mut stable_writer = stable::StableWriter::default();

@@ -2,15 +2,19 @@ use std::{env, path::Path, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=../canister/src");
-    println!("cargo:rerun-if-changed=../ic-certified-assets/src");
-    println!("cargo:rerun-if-changed=../plugin/src");
-    println!("cargo:rerun-if-changed=../assets-sync/src");
+    println!("cargo:rerun-if-changed=../canister-core/src");
+    println!("cargo:rerun-if-changed=../sync-plugin/src");
+    println!("cargo:rerun-if-changed=../sync-core/src");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir.parent().expect("e2e/ must have a parent");
+    // crates/e2e -> crates -> workspace root
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/e2e/ must have a workspace root two levels up");
 
     build_wasm(workspace_root, "canister", "wasm32-unknown-unknown");
-    build_wasm(workspace_root, "plugin", "wasm32-wasip2");
+    build_wasm(workspace_root, "sync-plugin", "wasm32-wasip2");
 
     println!(
         "cargo:rustc-env=CANISTER_WASM={}",
@@ -21,7 +25,7 @@ fn main() {
     println!(
         "cargo:rustc-env=PLUGIN_WASM={}",
         workspace_root
-            .join("target/wasm32-wasip2/release/plugin.wasm")
+            .join("target/wasm32-wasip2/release/sync_plugin.wasm")
             .display()
     );
 }

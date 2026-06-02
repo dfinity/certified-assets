@@ -95,7 +95,7 @@ gives `dfx deploy` 50× concurrency on chunk uploads, that lever isn't
 reachable from inside the current plugin model.
 
 **What to do.** Extend the WIT interface
-([`plugin/wit/sync-plugin.wit`](../../plugin/wit/sync-plugin.wit)) with a
+([`sync-plugin/wit/sync-plugin.wit`](../../sync-plugin/wit/sync-plugin.wit)) with a
 batch-call import — something like
 `canister-call-batch(requests: list<request>) -> list<response>` — and
 implement it on the host (native Rust, tokio-based) so multiple update calls
@@ -111,8 +111,8 @@ Where this doesn't help (because we already collapsed to 1 call):
 
 - `many_tiny`, `many_small`: nothing left to parallelize.
 
-**Why deferred.** This is a plugin-host interface change, not an
-`assets-sync` change. The chunk-batching work in this PR already removed the
+**Why deferred.** This is a plugin-host interface change, not a
+`sync-core` change. The chunk-batching work in this PR already removed the
 majority of the call-count gap — large-file uploads remain the only regime
 where concurrency would still pay off, and even there only by a constant
 factor. Do this only after measuring against a real replica and confirming

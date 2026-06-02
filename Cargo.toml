@@ -1,5 +1,5 @@
 [workspace]
-members = ["assets-sync", "canister", "e2e", "ic-certified-assets", "plugin"]
+members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]

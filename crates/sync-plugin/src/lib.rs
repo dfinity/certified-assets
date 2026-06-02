@@ -8,9 +8,9 @@ wit_bindgen::generate!({
     path: "wit/sync-plugin.wit",
 });
 
-use assets_sync::canister::{CallType, CanisterCall};
 use candid::{CandidType, Decode, Encode};
 use serde::de::DeserializeOwned;
+use sync_core::canister::{CallType, CanisterCall};
 
 use crate::icp::sync_plugin::types as ty;
 
@@ -52,7 +52,7 @@ impl Guest for Plugin {
             "sync plugin: starting for canister {} (environment: {})",
             input.canister_id, input.environment
         );
-        let summary = assets_sync::sync::sync(
+        let summary = sync_core::sync::sync(
             &WasiCall,
             &input.dirs,
             &input.identity_principal,

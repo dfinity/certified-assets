@@ -1,5 +1,5 @@
 [package]
-name = "plugin"
+name = "sync-plugin"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-assets-sync = { path = "../assets-sync" }
+sync-core = { path = "../sync-core" }
 candid.workspace = true
 serde.workspace = true
 wit-bindgen = { workspace = true, features = ["realloc"] }

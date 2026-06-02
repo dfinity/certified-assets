@@ -20,7 +20,7 @@ The runtime side of the plugin system lives in [`github.com/dfinity/icp-cli`](ht
 - The runtime crate: `crates/icp-sync-plugin`
 - An example: `examples/icp-sync-plugin`
 
-All sync logic (directory scanning, MIME detection, content encoding, canister diffing, and per-endpoint call wrappers) lives in the [`assets-sync`](../assets-sync/) library crate. This plugin crate is a thin WASI/WIT wrapper: it implements the `CanisterCall` trait (`WasiCall`) on top of the host's `canister-call` import, then delegates to `assets_sync::sync::sync()`.
+All sync logic (directory scanning, MIME detection, content encoding, canister diffing, and per-endpoint call wrappers) lives in the [`sync-core`](../sync-core/) library crate. This plugin crate is a thin WASI/WIT wrapper: it implements the `CanisterCall` trait (`WasiCall`) on top of the host's `canister-call` import, then delegates to `sync_core::sync::sync()`.
 
 The protocol-level pieces (Candid types, batch/chunk upload flow, content encoding) were ported from the `ic-asset` crate in [`github.com/dfinity/sdk`](https://github.com/dfinity/sdk) (`src/canisters/frontend/ic-asset`). The transport layer was rewritten on top of the host's `canister-call` import.
 
@@ -203,7 +203,7 @@ Parsing aborts at the first bad line so users fix issues one at a time.
 
 - [x] **Asset properties update** — emit `SetAssetProperties` ops for assets whose canister-side properties drifted from the plugin's defaults. `get_asset_properties` is called after `list_assets` to collect the current `AssetProperties` for every canister asset, and `update_properties` resets any non-default `max_age`, `headers`, or `allow_raw_access`. (`is_aliased` is no longer carried; the canister will drop it in a follow-up cleanup PR.)
 
-- [x] **Header representation: `Map` → `Vec<(name, value)>`** — `Option<BTreeMap<String, String>>` / `Option<HashMap<String, String>>` were replaced with a list of pairs across `ic-certified-assets` (`Asset`, `AssetProperties`, `CreateAssetArguments`, `SetAssetPropertiesArguments`, `build_headers`, `evidence::hash_headers`) and `assets-sync` (`canister::AssetProperties`, `update_properties`). Candid wire type `vec record { text; text }` is already a list, so this was a Rust-only change. Lets users carry multiple `Set-Cookie` values. Evidence hashing stable-sorts by lowercased name only so same-name groups preserve declaration order.
+- [x] **Header representation: `Map` → `Vec<(name, value)>`** — `Option<BTreeMap<String, String>>` / `Option<HashMap<String, String>>` were replaced with a list of pairs across `canister-core` (`Asset`, `AssetProperties`, `CreateAssetArguments`, `SetAssetPropertiesArguments`, `build_headers`, `evidence::hash_headers`) and `sync-core` (`canister::AssetProperties`, `update_properties`). Candid wire type `vec record { text; text }` is already a list, so this was a Rust-only change. Lets users carry multiple `Set-Cookie` values. Evidence hashing stable-sorts by lowercased name only so same-name groups preserve declaration order.
 
 - [ ] **`commit_batch` chunking** — split operations across multiple `commit_batch` calls to stay within the ~2 MB ICP ingress message limit, matching `ic-asset` behaviour.
   - Replace the single `commit_batch` call in `sync()` with a `commit_in_stages` helper modelled on `ic-asset/src/sync.rs::commit_in_stages`.

@@ -15,16 +15,16 @@
 //!
 //! Tests are `#[ignore]`'d so they don't slow down the regular suite.
 
-use assets_sync::canister::{AssetDetails, AssetProperties, CallType, CanisterCall, RedirectRule};
-use assets_sync::sync::sync;
 use candid::{CandidType, Decode, Encode, Nat, Principal};
 use serde::Deserialize;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::Path;
+use sync_core::canister::{AssetDetails, AssetProperties, CallType, CanisterCall, RedirectRule};
+use sync_core::sync::sync;
 
 // Wire-compatible mirrors of the response types defined privately in
-// assets_sync::canister. Same field name → same Candid encoding.
+// sync_core::canister. Same field name → same Candid encoding.
 #[derive(CandidType)]
 struct CreateBatchOk {
     batch_id: Nat,
