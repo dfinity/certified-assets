@@ -32,11 +32,13 @@
 //! for `/foo.html` still serves the asset directly with a 200 rather than the
 //! 307 Cloudflare would emit. We synthesise the rules anyway so the ruleset
 //! reflects the full table and self-activates if that precedence ever changes;
-//! the README documents the gap for users who care about strict URL
+//! `docs/redirects.md` documents the gap for users who care about strict URL
 //! canonicalisation.
 //!
-//! Synthesised rules are appended **after** the user's `_redirects`, so any
-//! user-declared rule with the same `from` wins via declaration order.
+//! Synthesised rules are prepended **before** the user's `_redirects` (see
+//! `sync.rs`), so the html-handling defaults win at the exact paths they cover
+//! and user rules catch what's left. A user-declared rule with the same `from`
+//! as a synthesised rule is therefore shadowed by the synth rule.
 
 use crate::canister::{RedirectRule, RulePattern};
 
