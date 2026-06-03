@@ -49,7 +49,7 @@ struct Plugin;
 impl Guest for Plugin {
     fn exec(input: SyncExecInput) -> Result<(), String> {
         println!(
-            "sync plugin: starting for canister {} (environment: {})",
+            "sync plugin (legacy assetstorage / .ic-assets.json5): starting for canister {} (environment: {})",
             input.canister_id, input.environment
         );
         let summary = sync_core::sync::sync(

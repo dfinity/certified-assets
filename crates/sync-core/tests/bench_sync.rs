@@ -20,7 +20,7 @@ use serde::Deserialize;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::Path;
-use sync_core::canister::{AssetDetails, AssetProperties, CallType, CanisterCall, RedirectRule};
+use sync_core::canister::{AssetDetails, AssetProperties, CallType, CanisterCall};
 use sync_core::sync::sync;
 
 // Wire-compatible mirrors of the response types defined privately in
@@ -95,11 +95,11 @@ impl CanisterCall for BenchMock {
         let resp = match method {
             "api_version" => Encode!(&2u16),
             "list" => Encode!(&Vec::<AssetDetails>::new()),
-            "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
             "get_asset_properties" => Encode!(&AssetProperties {
                 max_age: None,
                 headers: None,
                 allow_raw_access: Some(true),
+                is_aliased: None,
             }),
             "create_batch" => Encode!(&CreateBatchOk {
                 batch_id: Nat::from(1u32),

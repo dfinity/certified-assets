@@ -27,6 +27,8 @@ pub struct CreateAssetArguments {
     pub content_type: String,
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
+    /// Whether the legacy canister serves `/route` as an alias of `/route.html`.
+    pub enable_aliasing: Option<bool>,
     pub allow_raw_access: Option<bool>,
 }
 
@@ -59,25 +61,8 @@ pub struct SetAssetPropertiesArguments {
     pub max_age: Option<Option<u64>>,
     pub headers: Option<Option<Vec<(String, String)>>>,
     pub allow_raw_access: Option<Option<bool>>,
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
-pub enum RulePattern {
-    Exact(String),
-    Subtree(String),
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct RedirectRule {
-    pub from: RulePattern,
-    pub to: String,
-    pub status: u16,
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub struct SetRedirectRulesArguments {
-    pub rules: Vec<RedirectRule>,
+    /// Toggles `/route` ↔ `/route.html` aliasing on the legacy canister.
+    pub is_aliased: Option<Option<bool>>,
 }
 
 #[derive(CandidType, Clone, Debug)]
@@ -88,7 +73,6 @@ pub enum BatchOperationKind {
     UnsetAssetContent(UnsetAssetContentArguments),
     SetAssetContent(SetAssetContentArguments),
     SetAssetProperties(SetAssetPropertiesArguments),
-    SetRedirectRules(SetRedirectRulesArguments),
 }
 
 #[derive(CandidType, Debug)]
@@ -102,6 +86,7 @@ pub struct AssetProperties {
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
     pub allow_raw_access: Option<bool>,
+    pub is_aliased: Option<bool>,
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize)]
@@ -233,10 +218,6 @@ pub fn get_asset_properties(c: &impl CanisterCall, key: &str) -> Result<AssetPro
         CallType::Query,
         true,
     )
-}
-
-pub fn get_redirect_rules(c: &impl CanisterCall) -> Result<Vec<RedirectRule>, String> {
-    c.call("get_redirect_rules", (), CallType::Query, true)
 }
 
 pub fn list_permitted(

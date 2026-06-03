@@ -11,14 +11,18 @@ publish.workspace = true
 brotli.workspace = true
 candid.workspace = true
 flate2.workspace = true
+globset = "0.4"
 hex.workspace = true
 http = "1"
+json5 = "0.4"
 mime.workspace = true
 mime_guess.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 url = "2"
+walkdir = "2"
 
 [dev-dependencies]
 tempfile.workspace = true
