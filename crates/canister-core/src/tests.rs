@@ -678,8 +678,7 @@ fn old_stable_assets_with_is_aliased_load_cleanly() {
         },
     );
     let stable_state = StableState {
-        authorized: vec![],
-        permissions: None,
+        authorized: Default::default(),
         stable_assets,
         next_batch_id: None,
         configuration: None,
@@ -750,6 +749,41 @@ fn preserves_state_on_stable_roundtrip() {
     );
     assert_eq!(response.status_code, 200);
     assert_eq!(response.body.as_ref(), INDEX_BODY);
+}
+
+#[test]
+fn authorize_and_deauthorize_toggle_membership() {
+    let mut state = State::default();
+    let p = some_principal();
+
+    assert!(!state.is_authorized(&p));
+
+    state.authorize(p);
+    assert!(state.is_authorized(&p));
+    assert_eq!(
+        state.list_authorized().iter().copied().collect::<Vec<_>>(),
+        vec![p]
+    );
+
+    // Re-authorizing is idempotent (set semantics).
+    state.authorize(p);
+    assert_eq!(state.list_authorized().len(), 1);
+
+    state.deauthorize(&p);
+    assert!(!state.is_authorized(&p));
+    assert!(state.list_authorized().is_empty());
+}
+
+#[test]
+fn authorized_set_survives_stable_roundtrip() {
+    let mut state = State::default();
+    let p = some_principal();
+    state.authorize(p);
+
+    let stable_state: StableState = state.into();
+    let restored: State = stable_state.into();
+
+    assert!(restored.is_authorized(&p));
 }
 
 #[test]

@@ -44,56 +44,18 @@ pub fn api_version() -> u16 {
     2
 }
 
-pub fn authorize(other: Principal) {
-    with_state_mut(|s| s.grant_permission(other, &Permission::Commit))
+/// Adds `principal` to the authorized set. Controller-guarded at the endpoint.
+pub fn authorize(principal: Principal) {
+    with_state_mut(|s| s.authorize(principal))
 }
 
-pub fn grant_permission(arg: GrantPermissionArguments) {
-    with_state_mut(|s| s.grant_permission(arg.to_principal, &arg.permission))
-}
-
-pub async fn deauthorize(other: Principal) {
-    let check_access_result = if other == msg_caller() {
-        // this isn't "ManagePermissions" because these legacy methods only
-        // deal with the Commit permission
-        has_permission_or_is_controller(&Permission::Commit)
-    } else {
-        is_controller()
-    };
-    match check_access_result {
-        Err(e) => trap(&e),
-        Ok(_) => with_state_mut(|s| s.revoke_permission(other, &Permission::Commit)),
-    }
-}
-
-pub async fn revoke_permission(arg: RevokePermissionArguments) {
-    let check_access_result = if arg.of_principal == msg_caller() {
-        has_permission_or_is_controller(&arg.permission)
-    } else {
-        has_permission_or_is_controller(&Permission::ManagePermissions)
-    };
-    match check_access_result {
-        Err(e) => trap(&e),
-        Ok(_) => with_state_mut(|s| s.revoke_permission(arg.of_principal, &arg.permission)),
-    }
+/// Removes `principal` from the authorized set. Controller-guarded at the endpoint.
+pub fn deauthorize(principal: Principal) {
+    with_state_mut(|s| s.deauthorize(&principal))
 }
 
 pub fn list_authorized() -> Vec<Principal> {
-    with_state(|s| {
-        s.list_permitted(&Permission::Commit)
-            .iter()
-            .cloned()
-            .collect()
-    })
-}
-
-pub fn list_permitted(arg: ListPermittedArguments) -> Vec<Principal> {
-    with_state(|s| s.list_permitted(&arg.permission).iter().cloned().collect())
-}
-
-pub async fn take_ownership() {
-    let caller = msg_caller();
-    with_state_mut(|s| s.take_ownership(caller))
+    with_state(|s| s.list_authorized().iter().cloned().collect())
 }
 
 pub fn retrieve(key: AssetKey) -> RcBytes {
@@ -292,40 +254,25 @@ pub fn configure(arg: ConfigureArguments) {
     with_state_mut(|s| s.configure(arg))
 }
 
-pub fn can(permission: Permission) -> Result<(), String> {
-    with_state(|s| {
-        s.can(&msg_caller(), &permission)
-            .then_some(())
-            .ok_or_else(|| format!("Caller does not have {permission} permission"))
-    })
-}
-
-pub fn can_commit() -> Result<(), String> {
-    can(Permission::Commit)
-}
-
-pub fn can_prepare() -> Result<(), String> {
-    can(Permission::Prepare)
-}
-
-pub fn has_permission_or_is_controller(permission: &Permission) -> Result<(), String> {
+/// Whether the current caller may sync assets: either in the authorized set, or
+/// a canister controller. The authorized set holds only the extra (non-controller)
+/// principals — controllers are always allowed without being stored.
+pub fn can_sync() -> bool {
     let caller = msg_caller();
-    let has_permission = with_state(|s| s.has_permission(&caller, permission));
-    let is_controller = ic_cdk::api::is_controller(&caller);
-    if has_permission || is_controller {
+    with_state(|s| s.is_authorized(&caller)) || ic_cdk::api::is_controller(&caller)
+}
+
+/// `#[update(guard = ...)]` guard over every asset-sync operation.
+pub fn guard_can_sync() -> Result<(), String> {
+    if can_sync() {
         Ok(())
     } else {
-        Err(format!(
-            "Caller does not have {permission} permission and is not a controller."
-        ))
+        Err("Caller is not authorized to sync assets and is not a controller.".to_string())
     }
 }
 
-pub fn is_manager_or_controller() -> Result<(), String> {
-    has_permission_or_is_controller(&Permission::ManagePermissions)
-}
-
-pub fn is_controller() -> Result<(), String> {
+/// `#[update(guard = ...)]` guard restricting a call to canister controllers.
+pub fn guard_is_controller() -> Result<(), String> {
     let caller = msg_caller();
     if ic_cdk::api::is_controller(&caller) {
         Ok(())
@@ -334,42 +281,23 @@ pub fn is_controller() -> Result<(), String> {
     }
 }
 
-pub fn init(args: Option<AssetCanisterArgs>) {
-    with_state_mut(|s| {
-        s.clear();
-        s.grant_permission(msg_caller(), &Permission::Commit);
-    });
-
-    if let Some(upgrade_arg) = args {
-        let AssetCanisterArgs::Init(init_args) = upgrade_arg else {
-            ic_cdk::trap(
-                "Cannot initialize the canister with an Upgrade argument. Please provide an Init argument.",
-            )
-        };
-        with_state_mut(|s| {
-            if let Some(set_permissions) = init_args.set_permissions {
-                s.set_permissions(set_permissions);
-            }
-        });
-    }
+pub fn init() {
+    // The authorized set starts empty. Controllers can always sync; this set
+    // only grants sync access to *non*-controllers, managed afterwards through
+    // the `authorize`/`deauthorize` endpoints.
+    with_state_mut(|s| s.clear());
 }
 
 pub fn pre_upgrade() -> StableState {
     STATE.with(|s| s.take().into())
 }
 
-pub fn post_upgrade(stable_state: StableState, args: Option<AssetCanisterArgs>) {
-    let set_permissions = args.and_then(|args| {
-        let AssetCanisterArgs::Upgrade(UpgradeArgs { set_permissions }) = args else {ic_cdk::trap("Cannot upgrade the canister with an Init argument. Please provide an Upgrade argument.")};
-        set_permissions
-    });
-
+pub fn post_upgrade(stable_state: StableState) {
+    // The restored authorized set is left untouched; change it after upgrade
+    // through the `authorize`/`deauthorize` endpoints.
     with_state_mut(|s| {
         *s = State::from(stable_state);
         certified_data_set(s.root_hash());
-        if let Some(set_permissions) = set_permissions {
-            s.set_permissions(set_permissions);
-        }
     });
 }
 

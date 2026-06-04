@@ -54,10 +54,10 @@ pub struct State {
     pub(crate) batches: HashMap<BatchId, Batch>,
     pub(crate) next_batch_id: BatchId,
 
-    // permissions
-    pub(crate) commit_principals: BTreeSet<Principal>,
-    pub(crate) prepare_principals: BTreeSet<Principal>,
-    pub(crate) manage_permissions_principals: BTreeSet<Principal>,
+    // Principals authorized to sync assets. Canister controllers are always
+    // allowed regardless of membership; this set grants the same access to
+    // non-controllers. Only controllers can change it.
+    pub(crate) authorized: BTreeSet<Principal>,
 
     pub(crate) asset_hashes: CertifiedResponses,
 
@@ -80,39 +80,20 @@ impl State {
             .ok_or_else(|| "asset not found".to_string())
     }
 
-    pub fn set_permissions(
-        &mut self,
-        SetPermissions {
-            prepare,
-            commit,
-            manage_permissions,
-        }: SetPermissions,
-    ) {
-        *self.get_mut_permission_list(&Permission::Prepare) = prepare.into_iter().collect();
-        *self.get_mut_permission_list(&Permission::Commit) = commit.into_iter().collect();
-        *self.get_mut_permission_list(&Permission::ManagePermissions) =
-            manage_permissions.into_iter().collect();
+    pub fn authorize(&mut self, principal: Principal) {
+        self.authorized.insert(principal);
     }
 
-    pub fn grant_permission(&mut self, principal: Principal, permission: &Permission) {
-        let permitted = self.get_mut_permission_list(permission);
-        permitted.insert(principal);
+    pub fn deauthorize(&mut self, principal: &Principal) {
+        self.authorized.remove(principal);
     }
 
-    pub fn revoke_permission(&mut self, principal: Principal, permission: &Permission) {
-        let permitted = self.get_mut_permission_list(permission);
-        permitted.remove(&principal);
+    pub fn list_authorized(&self) -> &BTreeSet<Principal> {
+        &self.authorized
     }
 
-    pub fn list_permitted(&self, permission: &Permission) -> &BTreeSet<Principal> {
-        self.get_permission_list(permission)
-    }
-
-    pub fn take_ownership(&mut self, controller: Principal) {
-        self.commit_principals.clear();
-        self.prepare_principals.clear();
-        self.manage_permissions_principals.clear();
-        self.commit_principals.insert(controller);
+    pub fn is_authorized(&self, principal: &Principal) -> bool {
+        self.authorized.contains(principal)
     }
 
     pub fn root_hash(&self) -> Hash {
@@ -246,33 +227,6 @@ impl State {
         self.chunks.clear();
         self.next_batch_id = Nat::from(1_u8);
         self.next_chunk_id = Nat::from(1_u8);
-    }
-
-    pub fn has_permission(&self, principal: &Principal, permission: &Permission) -> bool {
-        let list = self.get_permission_list(permission);
-        list.contains(principal)
-    }
-
-    pub fn can(&self, principal: &Principal, permission: &Permission) -> bool {
-        self.has_permission(principal, permission)
-            || (*permission == Permission::Prepare
-                && self.has_permission(principal, &Permission::Commit))
-    }
-
-    fn get_permission_list(&self, permission: &Permission) -> &BTreeSet<Principal> {
-        match permission {
-            Permission::Commit => &self.commit_principals,
-            Permission::Prepare => &self.prepare_principals,
-            Permission::ManagePermissions => &self.manage_permissions_principals,
-        }
-    }
-
-    fn get_mut_permission_list(&mut self, permission: &Permission) -> &mut BTreeSet<Principal> {
-        match permission {
-            Permission::Commit => &mut self.commit_principals,
-            Permission::Prepare => &mut self.prepare_principals,
-            Permission::ManagePermissions => &mut self.manage_permissions_principals,
-        }
     }
 
     pub fn retrieve(&self, key: &AssetKey) -> Result<RcBytes, String> {
@@ -826,24 +780,8 @@ impl State {
 
 impl From<StableState> for State {
     fn from(stable_state: StableState) -> Self {
-        let (commit_principals, prepare_principals, manage_permissions_principals) =
-            if let Some(permissions) = stable_state.permissions {
-                (
-                    permissions.commit,
-                    permissions.prepare,
-                    permissions.manage_permissions,
-                )
-            } else {
-                (
-                    stable_state.authorized.into_iter().collect(),
-                    BTreeSet::new(),
-                    BTreeSet::new(),
-                )
-            };
         let mut state = Self {
-            commit_principals,
-            prepare_principals,
-            manage_permissions_principals,
+            authorized: stable_state.authorized,
             assets: stable_state
                 .stable_assets
                 .into_iter()

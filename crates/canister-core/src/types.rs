@@ -3,7 +3,7 @@
 use crate::certification::AssetKey;
 use crate::rc_bytes::RcBytes;
 use crate::redirect::RedirectRule;
-use candid::{CandidType, Deserialize, Nat, Principal};
+use candid::{CandidType, Deserialize, Nat};
 use serde_bytes::ByteBuf;
 
 pub type BatchId = Nat;
@@ -154,68 +154,8 @@ pub struct SetAssetPropertiesArguments {
     pub is_aliased: Option<Option<bool>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, CandidType, Deserialize)]
-pub enum Permission {
-    Commit,
-    ManagePermissions,
-    Prepare,
-}
-
-impl std::fmt::Display for Permission {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
-            Permission::Commit => f.write_str("Commit"),
-            Permission::Prepare => f.write_str("Prepare"),
-            Permission::ManagePermissions => f.write_str("ManagePermissions"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct GrantPermissionArguments {
-    pub to_principal: Principal,
-    pub permission: Permission,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct RevokePermissionArguments {
-    pub of_principal: Principal,
-    pub permission: Permission,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct ListPermittedArguments {
-    pub permission: Permission,
-}
-
 #[derive(Clone, Debug, Default, CandidType, Deserialize)]
 pub struct ListRequest {
     pub start: Option<Nat>,
     pub length: Option<Nat>,
-}
-
-/// The argument to `init` and `post_upgrade` needs to have the same argument type by definition.
-/// `AssetCanisterArgs` is there so that the two functions can take different argument types.
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub enum AssetCanisterArgs {
-    Init(InitArgs),
-    Upgrade(UpgradeArgs),
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct InitArgs {
-    pub set_permissions: Option<SetPermissions>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct UpgradeArgs {
-    pub set_permissions: Option<SetPermissions>,
-}
-
-/// Sets the list of principals with a certain permission for every permission that is `Some`.
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct SetPermissions {
-    pub prepare: Vec<Principal>,
-    pub commit: Vec<Principal>,
-    pub manage_permissions: Vec<Principal>,
 }
