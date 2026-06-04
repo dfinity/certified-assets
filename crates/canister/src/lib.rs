@@ -10,11 +10,11 @@ use canister_core::{
     redirect::RedirectRule,
     state::CertifiedTree,
     types::{
-        AssetCanisterArgs, AssetProperties, CommitBatchArguments, ConfigurationResponse,
-        ConfigureArguments, CreateAssetArguments, CreateBatchResponse, CreateChunksArg,
-        CreateChunksResponse, DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg,
-        GetChunkResponse, ListRequest, SetAssetContentArguments, SetAssetPropertiesArguments,
-        StateInfo, StoreArg, UnsetAssetContentArguments,
+        AssetProperties, CommitBatchArguments, ConfigurationResponse, ConfigureArguments,
+        CreateAssetArguments, CreateBatchResponse, CreateChunksArg, CreateChunksResponse,
+        DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg, GetChunkResponse,
+        ListRequest, SetAssetContentArguments, SetAssetPropertiesArguments, StateInfo, StoreArg,
+        UnsetAssetContentArguments,
     },
 };
 use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
@@ -22,8 +22,8 @@ use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
 use crate::state::{load_stable_state, save_stable_state};
 
 #[init]
-fn init(args: Option<AssetCanisterArgs>) {
-    canister_core::init(args);
+fn init() {
+    canister_core::init();
 }
 
 #[pre_upgrade]
@@ -33,9 +33,9 @@ fn pre_upgrade() {
 }
 
 #[post_upgrade]
-fn post_upgrade(args: Option<AssetCanisterArgs>) {
+fn post_upgrade() {
     let stable_state = load_stable_state().expect("failed to deserialize stable state");
-    canister_core::post_upgrade(stable_state, args);
+    canister_core::post_upgrade(stable_state);
 }
 
 #[cfg(target_family = "wasm")]

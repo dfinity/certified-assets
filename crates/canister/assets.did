@@ -136,25 +136,7 @@ type StateInfo = record {
   state_hash: opt text;
 };
 
-type AssetCanisterArgs = variant {
-  Init: InitArgs;
-  Upgrade: UpgradeArgs;
-};
-
-/// `authorized` is the set of extra (non-controller) principals allowed to
-/// sync; an empty vector (or no init args at all) means none. Controllers can
-/// always sync regardless.
-type InitArgs = record {
-  authorized: vec principal;
-};
-
-/// `authorized` replaces the authorized set; an empty vector clears it. Pass no
-/// upgrade args at all to leave the existing set untouched.
-type UpgradeArgs = record {
-  authorized: vec principal;
-};
-
-service: (asset_canister_args: opt AssetCanisterArgs) -> {
+service: () -> {
   // ───────── Canister metadata ─────────
 
   api_version: () -> (nat16) query;

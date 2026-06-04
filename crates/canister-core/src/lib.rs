@@ -281,43 +281,23 @@ pub fn guard_is_controller() -> Result<(), String> {
     }
 }
 
-pub fn init(args: Option<AssetCanisterArgs>) {
+pub fn init() {
+    // The authorized set starts empty. Controllers can always sync; this set
+    // only grants sync access to *non*-controllers, managed afterwards through
+    // the `authorize`/`deauthorize` endpoints.
     with_state_mut(|s| s.clear());
-    match args {
-        // No args: the authorized set starts empty. Controllers can still sync;
-        // this set is only for granting sync access to *non*-controllers.
-        None => {}
-        // Explicit args set the authorized set exactly (empty = no principals).
-        Some(AssetCanisterArgs::Init(InitArgs { authorized })) => {
-            with_state_mut(|s| s.set_authorized(authorized))
-        }
-        Some(AssetCanisterArgs::Upgrade(_)) => ic_cdk::trap(
-            "Cannot initialize the canister with an Upgrade argument. Please provide an Init argument.",
-        ),
-    }
 }
 
 pub fn pre_upgrade() -> StableState {
     STATE.with(|s| s.take().into())
 }
 
-pub fn post_upgrade(stable_state: StableState, args: Option<AssetCanisterArgs>) {
-    // No upgrade args leaves the restored authorized set untouched; explicit
-    // args replace it (an empty vector clears it).
-    let authorized = match args {
-        None => None,
-        Some(AssetCanisterArgs::Upgrade(UpgradeArgs { authorized })) => Some(authorized),
-        Some(AssetCanisterArgs::Init(_)) => ic_cdk::trap(
-            "Cannot upgrade the canister with an Init argument. Please provide an Upgrade argument.",
-        ),
-    };
-
+pub fn post_upgrade(stable_state: StableState) {
+    // The restored authorized set is left untouched; change it after upgrade
+    // through the `authorize`/`deauthorize` endpoints.
     with_state_mut(|s| {
         *s = State::from(stable_state);
         certified_data_set(s.root_hash());
-        if let Some(authorized) = authorized {
-            s.set_authorized(authorized);
-        }
     });
 }
 

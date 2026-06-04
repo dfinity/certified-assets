@@ -775,22 +775,6 @@ fn authorize_and_deauthorize_toggle_membership() {
 }
 
 #[test]
-fn set_authorized_replaces_the_whole_set() {
-    let mut state = State::default();
-    let a = some_principal();
-    let b = Principal::from_text("aaaaa-aa").unwrap();
-
-    state.authorize(a);
-    state.set_authorized(vec![b]);
-
-    assert!(
-        !state.is_authorized(&a),
-        "set_authorized should replace, not merge"
-    );
-    assert!(state.is_authorized(&b));
-}
-
-#[test]
 fn authorized_set_survives_stable_roundtrip() {
     let mut state = State::default();
     let p = some_principal();

@@ -88,11 +88,6 @@ impl State {
         self.authorized.remove(principal);
     }
 
-    /// Replaces the entire authorized set. Used by init/upgrade args.
-    pub fn set_authorized(&mut self, principals: Vec<Principal>) {
-        self.authorized = principals.into_iter().collect();
-    }
-
     pub fn list_authorized(&self) -> &BTreeSet<Principal> {
         &self.authorized
     }
