@@ -114,8 +114,9 @@ impl CanisterCall for BenchMock {
                 Encode!(&CreateChunksOk { chunk_ids: ids })
             }
             "commit_batch" => Encode!(&()),
-            "list_permitted" => Encode!(&Vec::<Principal>::new()),
-            "grant_permission" => Encode!(&()),
+            // The bench drives sync() in direct mode, which checks can_sync up
+            // front; report the identity as allowed so it proceeds.
+            "can_sync" => Encode!(&true),
             other => panic!("BenchMock: unexpected method '{other}'"),
         }
         .map_err(|e| e.to_string())?;

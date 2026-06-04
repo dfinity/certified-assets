@@ -3,10 +3,9 @@ mod state;
 use candid::Principal;
 use canister_core::{
     asset::{AssetDetails, EncodedAsset},
-    can_commit, can_prepare,
     certification::AssetKey,
+    guard_can_sync, guard_is_controller,
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
-    is_controller, is_manager_or_controller,
     rc_bytes::RcBytes,
     redirect::RedirectRule,
     state::CertifiedTree,
@@ -14,8 +13,7 @@ use canister_core::{
         AssetCanisterArgs, AssetProperties, CommitBatchArguments, ConfigurationResponse,
         ConfigureArguments, CreateAssetArguments, CreateBatchResponse, CreateChunksArg,
         CreateChunksResponse, DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg,
-        GetChunkResponse, GrantPermissionArguments, ListPermittedArguments, ListRequest,
-        RevokePermissionArguments, SetAssetContentArguments, SetAssetPropertiesArguments,
+        GetChunkResponse, ListRequest, SetAssetContentArguments, SetAssetPropertiesArguments,
         StateInfo, StoreArg, UnsetAssetContentArguments,
     },
 };
@@ -106,24 +104,14 @@ fn get_redirect_rules() -> Vec<RedirectRule> {
 
 // Update methods
 
-#[update(guard = "is_manager_or_controller")]
-fn authorize(other: Principal) {
-    canister_core::authorize(other)
+#[update(guard = "guard_is_controller")]
+fn authorize(principal: Principal) {
+    canister_core::authorize(principal)
 }
 
-#[update(guard = "is_manager_or_controller")]
-fn grant_permission(arg: GrantPermissionArguments) {
-    canister_core::grant_permission(arg)
-}
-
-#[update]
-async fn deauthorize(other: Principal) {
-    canister_core::deauthorize(other).await
-}
-
-#[update]
-async fn revoke_permission(arg: RevokePermissionArguments) {
-    canister_core::revoke_permission(arg).await
+#[update(guard = "guard_is_controller")]
+fn deauthorize(principal: Principal) {
+    canister_core::deauthorize(principal)
 }
 
 #[update]
@@ -131,57 +119,54 @@ fn list_authorized() -> Vec<Principal> {
     canister_core::list_authorized()
 }
 
-#[update]
-fn list_permitted(arg: ListPermittedArguments) -> Vec<Principal> {
-    canister_core::list_permitted(arg)
+// Whether the calling identity may sync assets (authorized or a controller).
+// Lets a client check access up front instead of discovering it mid-sync.
+#[query]
+fn can_sync() -> bool {
+    canister_core::can_sync()
 }
 
-#[update(guard = "is_controller")]
-async fn take_ownership() {
-    canister_core::take_ownership().await
-}
-
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn store(arg: StoreArg) {
     canister_core::store(arg)
 }
 
-#[update(guard = "can_prepare")]
+#[update(guard = "guard_can_sync")]
 fn create_batch() -> CreateBatchResponse {
     canister_core::create_batch()
 }
 
-#[update(guard = "can_prepare")]
+#[update(guard = "guard_can_sync")]
 fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
     canister_core::create_chunks(arg)
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn create_asset(arg: CreateAssetArguments) {
     canister_core::create_asset(arg)
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn set_asset_content(arg: SetAssetContentArguments) {
     canister_core::set_asset_content(arg)
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn unset_asset_content(arg: UnsetAssetContentArguments) {
     canister_core::unset_asset_content(arg)
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn delete_asset(arg: DeleteAssetArguments) {
     canister_core::delete_asset(arg)
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn clear() {
     canister_core::clear()
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 async fn commit_batch(arg: CommitBatchArguments) {
     canister_core::commit_batch(arg).await
 }
@@ -191,22 +176,22 @@ async fn compute_state_hash() -> Option<String> {
     canister_core::compute_state_hash().await
 }
 
-#[update(guard = "can_prepare")]
+#[update(guard = "guard_can_sync")]
 fn delete_batch(arg: DeleteBatchArguments) {
     canister_core::delete_batch(arg)
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn set_asset_properties(arg: SetAssetPropertiesArguments) {
     canister_core::set_asset_properties(arg)
 }
 
-#[update(guard = "can_prepare")]
+#[update(guard = "guard_can_sync")]
 fn get_configuration() -> ConfigurationResponse {
     canister_core::get_configuration()
 }
 
-#[update(guard = "can_commit")]
+#[update(guard = "guard_can_sync")]
 fn configure(arg: ConfigureArguments) {
     canister_core::configure(arg)
 }

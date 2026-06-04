@@ -136,40 +136,22 @@ type StateInfo = record {
   state_hash: opt text;
 };
 
-type Permission = variant {
-  Commit;
-  ManagePermissions;
-  Prepare;
-};
-
-type GrantPermission = record {
-  to_principal: principal;
-  permission: Permission;
-};
-type RevokePermission = record {
-  of_principal: principal;
-  permission: Permission;
-};
-type ListPermitted = record { permission: Permission };
-
 type AssetCanisterArgs = variant {
   Init: InitArgs;
   Upgrade: UpgradeArgs;
 };
 
+/// `authorized` is the set of extra (non-controller) principals allowed to
+/// sync; an empty vector (or no init args at all) means none. Controllers can
+/// always sync regardless.
 type InitArgs = record {
-  set_permissions: opt SetPermissions;
+  authorized: vec principal;
 };
 
+/// `authorized` replaces the authorized set; an empty vector clears it. Pass no
+/// upgrade args at all to leave the existing set untouched.
 type UpgradeArgs = record {
-  set_permissions: opt SetPermissions;
-};
-
-/// Sets the list of principals granted each permission.
-type SetPermissions = record {
-  prepare: vec principal;
-  commit: vec principal;
-  manage_permissions: vec principal;
+  authorized: vec principal;
 };
 
 service: (asset_canister_args: opt AssetCanisterArgs) -> {
@@ -266,15 +248,16 @@ service: (asset_canister_args: opt AssetCanisterArgs) -> {
   // Delete a batch that has been created but not yet committed
   delete_batch: (DeleteBatchArguments) -> ();
 
-  // ───────── Permissions ─────────
+  // ───────── Authorization ─────────
+  // A set of extra principals authorized to sync assets. Canister controllers
+  // are always authorized (without being listed) and are the only callers that
+  // can change this set.
 
   authorize: (principal) -> ();
   deauthorize: (principal) -> ();
-  grant_permission: (GrantPermission) -> ();
-  revoke_permission: (RevokePermission) -> ();
-  take_ownership: () -> ();
   list_authorized: () -> (vec principal);
-  list_permitted: (ListPermitted) -> (vec principal);
+  // Whether the calling identity may sync assets (authorized or a controller).
+  can_sync: () -> (bool) query;
 
   // ───────── Redirect rules ─────────
 

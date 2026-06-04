@@ -11,8 +11,7 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableState {
-    pub(crate) authorized: Vec<Principal>, // ignored if permissions is Some(_)
-    pub(crate) permissions: Option<StableStatePermissions>,
+    pub(crate) authorized: BTreeSet<Principal>,
     pub(crate) stable_assets: HashMap<String, StableAsset>,
 
     pub(crate) next_batch_id: Option<u64>,
@@ -27,14 +26,8 @@ pub struct StableState {
 
 impl From<crate::state::State> for StableState {
     fn from(state: crate::state::State) -> Self {
-        let permissions = StableStatePermissions {
-            commit: state.commit_principals,
-            prepare: state.prepare_principals,
-            manage_permissions: state.manage_permissions_principals,
-        };
         Self {
-            authorized: vec![],
-            permissions: Some(permissions),
+            authorized: state.authorized,
             stable_assets: state
                 .assets
                 .into_iter()
@@ -46,13 +39,6 @@ impl From<crate::state::State> for StableState {
             redirect_rules: Some(state.redirect_rules),
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StableStatePermissions {
-    pub(crate) commit: BTreeSet<Principal>,
-    pub(crate) prepare: BTreeSet<Principal>,
-    pub(crate) manage_permissions: BTreeSet<Principal>,
 }
 
 /// Same as [crate::state::Configuration] but serde-serializable

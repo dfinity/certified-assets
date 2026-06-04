@@ -154,40 +154,6 @@ pub struct SetAssetPropertiesArguments {
     pub is_aliased: Option<Option<bool>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, CandidType, Deserialize)]
-pub enum Permission {
-    Commit,
-    ManagePermissions,
-    Prepare,
-}
-
-impl std::fmt::Display for Permission {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
-            Permission::Commit => f.write_str("Commit"),
-            Permission::Prepare => f.write_str("Prepare"),
-            Permission::ManagePermissions => f.write_str("ManagePermissions"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct GrantPermissionArguments {
-    pub to_principal: Principal,
-    pub permission: Permission,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct RevokePermissionArguments {
-    pub of_principal: Principal,
-    pub permission: Permission,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct ListPermittedArguments {
-    pub permission: Permission,
-}
-
 #[derive(Clone, Debug, Default, CandidType, Deserialize)]
 pub struct ListRequest {
     pub start: Option<Nat>,
@@ -204,18 +170,15 @@ pub enum AssetCanisterArgs {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct InitArgs {
-    pub set_permissions: Option<SetPermissions>,
+    /// The authorized set: extra (non-controller) principals allowed to sync.
+    /// Defaults to empty when no init args are given; controllers can always
+    /// sync regardless.
+    pub authorized: Vec<Principal>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct UpgradeArgs {
-    pub set_permissions: Option<SetPermissions>,
-}
-
-/// Sets the list of principals with a certain permission for every permission that is `Some`.
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct SetPermissions {
-    pub prepare: Vec<Principal>,
-    pub commit: Vec<Principal>,
-    pub manage_permissions: Vec<Principal>,
+    /// Replaces the authorized set; an empty vector clears it. Pass no upgrade
+    /// args at all to leave the existing set untouched.
+    pub authorized: Vec<Principal>,
 }

@@ -9,11 +9,11 @@ use mime::Mime;
 use std::collections::HashMap;
 
 use crate::canister::{
-    api_version, commit_batch, create_batch, create_chunks, get_asset_properties,
-    get_redirect_rules, grant_permission_via_proxy, list_assets, list_permitted, AssetDetails,
-    AssetProperties, BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
-    DeleteAssetArguments, Permission, RedirectRule, SetAssetContentArguments,
-    SetAssetPropertiesArguments, SetRedirectRulesArguments, UnsetAssetContentArguments,
+    api_version, authorize_via_proxy, can_sync, commit_batch, create_batch, create_chunks,
+    get_asset_properties, get_redirect_rules, list_assets, AssetDetails, AssetProperties,
+    BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
+    DeleteAssetArguments, RedirectRule, SetAssetContentArguments, SetAssetPropertiesArguments,
+    SetRedirectRulesArguments, UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
 use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
@@ -39,29 +39,40 @@ struct ProjectAsset {
     encodings: HashMap<String, ProjectAssetEncoding>,
 }
 
-/// Ensures the signing identity has `Commit` permission on the assets canister.
+/// Ensures the signing identity can sync assets, before any expensive scanning
+/// or diffing work happens — so an unauthorized run fails fast instead of after
+/// reading and encoding the whole project.
 ///
-/// Called only in proxy mode. Queries the current `Commit` permission list and,
-/// if the identity is absent, routes a `grant_permission` call through the proxy
-/// canister. The proxy is the controller of the assets canister and can therefore
-/// authorise the grant even without holding `ManagePermissions` explicitly.
-fn ensure_commit_permission<C: CanisterCall>(
+/// Asks the canister whether the identity may sync (`can_sync`, which is true
+/// for authorized principals *and* controllers):
+/// - If it can, returns immediately.
+/// - In proxy mode, routes an `authorize` call through the proxy canister (the
+///   proxy is the canister's controller and the only caller allowed to change
+///   the authorized set), then the identity can sync directly.
+/// - In direct mode, there is no controller to grant through, so this fails
+///   fast.
+fn ensure_can_sync<C: CanisterCall>(
     canister: &C,
     identity_principal: &str,
+    proxy_mode: bool,
 ) -> Result<(), String> {
-    let principal = Principal::from_text(identity_principal)
-        .map_err(|e| format!("invalid identity principal '{identity_principal}': {e}"))?;
-
-    let permitted = list_permitted(canister, Permission::Commit)?;
-    if permitted.contains(&principal) {
-        println!("proxy mode: identity already has Commit permission");
+    if can_sync(canister)? {
         return Ok(());
     }
 
-    println!("proxy mode: granting Commit permission to {identity_principal} via proxy");
-    grant_permission_via_proxy(canister, principal, Permission::Commit)?;
-    println!("proxy mode: Commit permission granted");
-    Ok(())
+    if proxy_mode {
+        let principal = Principal::from_text(identity_principal)
+            .map_err(|e| format!("invalid identity principal '{identity_principal}': {e}"))?;
+        println!("proxy mode: authorizing {identity_principal} via proxy");
+        authorize_via_proxy(canister, principal)?;
+        println!("proxy mode: identity authorized");
+        Ok(())
+    } else {
+        Err(format!(
+            "identity {identity_principal} is not authorized to sync assets on this canister; \
+             a controller must authorize it (or deploy with --proxy to authorize it automatically)"
+        ))
+    }
 }
 
 pub fn sync<C: CanisterCall>(
@@ -85,9 +96,9 @@ pub fn sync<C: CanisterCall>(
         }
     };
 
-    if let Some(_proxy) = proxy_canister_id {
-        ensure_commit_permission(canister, identity_principal)?;
-    }
+    // Check authorization before any scanning or diffing so an unauthorized
+    // run fails fast rather than after reading and encoding the whole project.
+    ensure_can_sync(canister, identity_principal, proxy_canister_id.is_some())?;
 
     let version = api_version(canister)?;
     if version < 2 {
@@ -1541,6 +1552,7 @@ mod tests {
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
+        mock.push_ok("can_sync", true);
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok(
             "get_redirect_rules",
@@ -1579,6 +1591,7 @@ mod tests {
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
+        mock.push_ok("can_sync", true);
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok(
@@ -2117,18 +2130,19 @@ mod tests {
 
     // ---- Authorization tests ----
 
-    // Mock for ensure_commit_permission: handles list_permitted and grant_permission only.
+    // Mock for ensure_can_sync: handles can_sync and authorize only.
     struct PermissionMock {
-        permitted: Vec<Principal>,
-        // Tracks the `direct` flag for each grant_permission call.
-        grant_calls: RefCell<Vec<bool>>,
+        // What the canister's `can_sync` reports for the identity.
+        can_sync: bool,
+        // Tracks the `direct` flag for each authorize call.
+        authorize_calls: RefCell<Vec<bool>>,
     }
 
     impl PermissionMock {
-        fn new(permitted: Vec<Principal>) -> Self {
+        fn new(can_sync: bool) -> Self {
             Self {
-                permitted,
-                grant_calls: RefCell::new(vec![]),
+                can_sync,
+                authorize_calls: RefCell::new(vec![]),
             }
         }
     }
@@ -2140,13 +2154,12 @@ mod tests {
             R: CandidType + DeserializeOwned,
         {
             match method {
-                "list_permitted" => {
-                    let bytes =
-                        candid::encode_one(self.permitted.clone()).map_err(|e| e.to_string())?;
+                "can_sync" => {
+                    let bytes = candid::encode_one(self.can_sync).map_err(|e| e.to_string())?;
                     candid::decode_one(&bytes).map_err(|e| e.to_string())
                 }
-                "grant_permission" => {
-                    self.grant_calls.borrow_mut().push(direct);
+                "authorize" => {
+                    self.authorize_calls.borrow_mut().push(direct);
                     let bytes = candid::encode_one(()).map_err(|e| e.to_string())?;
                     candid::decode_one(&bytes).map_err(|e| e.to_string())
                 }
@@ -2206,23 +2219,43 @@ mod tests {
         }
     }
 
-    // Proxy mode: identity absent from Commit list → grant_permission called via proxy.
+    // Proxy mode: identity cannot sync yet → authorize called via proxy.
     #[test]
-    fn ensure_commit_permission_grants_via_proxy_when_absent() {
+    fn ensure_can_sync_grants_via_proxy_when_absent() {
         let identity = Principal::anonymous();
-        let mock = PermissionMock::new(vec![]);
-        ensure_commit_permission(&mock, &identity.to_text()).unwrap();
-        // grant_permission must be called exactly once with direct=false (routed via proxy).
-        assert_eq!(*mock.grant_calls.borrow(), vec![false]);
+        let mock = PermissionMock::new(false);
+        ensure_can_sync(&mock, &identity.to_text(), true).unwrap();
+        // authorize must be called exactly once with direct=false (routed via proxy).
+        assert_eq!(*mock.authorize_calls.borrow(), vec![false]);
     }
 
-    // Proxy mode: identity already in Commit list → grant_permission not called.
+    // Proxy mode: identity can already sync → authorize not called.
     #[test]
-    fn ensure_commit_permission_skips_grant_when_already_permitted() {
+    fn ensure_can_sync_skips_grant_when_already_authorized() {
         let identity = Principal::anonymous();
-        let mock = PermissionMock::new(vec![identity]);
-        ensure_commit_permission(&mock, &identity.to_text()).unwrap();
-        assert!(mock.grant_calls.borrow().is_empty());
+        let mock = PermissionMock::new(true);
+        ensure_can_sync(&mock, &identity.to_text(), true).unwrap();
+        assert!(mock.authorize_calls.borrow().is_empty());
+    }
+
+    // Direct mode: identity can sync (authorized or a controller) → succeeds,
+    // no authorize call.
+    #[test]
+    fn ensure_can_sync_direct_mode_ok_when_can_sync() {
+        let identity = Principal::anonymous();
+        let mock = PermissionMock::new(true);
+        ensure_can_sync(&mock, &identity.to_text(), false).unwrap();
+        assert!(mock.authorize_calls.borrow().is_empty());
+    }
+
+    // Direct mode: identity cannot sync → fails fast (no proxy to grant through).
+    #[test]
+    fn ensure_can_sync_direct_mode_fails_fast_when_cannot_sync() {
+        let identity = Principal::anonymous();
+        let mock = PermissionMock::new(false);
+        let err = ensure_can_sync(&mock, &identity.to_text(), false).unwrap_err();
+        assert!(err.contains("not authorized"), "got: {err}");
+        assert!(mock.authorize_calls.borrow().is_empty());
     }
 
     #[test]
@@ -2267,6 +2300,7 @@ mod tests {
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
+        mock.push_ok("can_sync", true);
         mock.push_ok(
             "list",
             vec![AssetDetails {
@@ -2313,6 +2347,7 @@ mod tests {
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
+        mock.push_ok("can_sync", true);
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok(
@@ -2413,6 +2448,7 @@ mod tests {
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
+        mock.push_ok("can_sync", true);
         mock.push_ok(
             "list",
             vec![AssetDetails {
@@ -2445,18 +2481,24 @@ mod tests {
         assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
-    // Direct mode: canister rejects create_batch with a permission error → sync propagates it.
+    // Direct mode: identity passes the early authorization check, but a later
+    // create_batch failure (e.g. the authorized set changed under us) must
+    // still propagate.
     #[test]
-    fn sync_propagates_permission_error_from_create_batch() {
+    fn sync_propagates_error_from_create_batch() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
+        mock.push_ok("can_sync", true);
         // Empty canister → build_operations will produce work → create_batch is called.
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
-        mock.push_err("create_batch", "Caller does not have Commit permission");
+        mock.push_err(
+            "create_batch",
+            "Caller is not authorized to sync assets and is not a controller.",
+        );
 
         let result = sync(
             &mock,
@@ -2467,8 +2509,31 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            err.contains("Commit permission"),
-            "expected permission error, got: {err}"
+            err.contains("not authorized"),
+            "expected create_batch error to propagate, got: {err}"
         );
+    }
+
+    // Direct mode: identity absent from the authorized set → sync fails fast,
+    // before any local scanning or canister diffing.
+    #[test]
+    fn sync_fails_fast_when_identity_not_authorized_in_direct_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+
+        let mock = SyncMock::new();
+        // Only can_sync is programmed: if sync reached scanning/diffing (list,
+        // get_redirect_rules, …) SyncMock would panic on the unprogrammed
+        // method. can_sync=false means the identity cannot sync.
+        mock.push_ok("can_sync", false);
+
+        let err = sync(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("not authorized"), "got: {err}");
     }
 }

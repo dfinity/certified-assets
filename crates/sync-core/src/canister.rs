@@ -104,13 +104,6 @@ pub struct AssetProperties {
     pub allow_raw_access: Option<bool>,
 }
 
-#[derive(CandidType, Clone, Debug, Deserialize)]
-pub enum Permission {
-    Commit,
-    ManagePermissions,
-    Prepare,
-}
-
 #[derive(CandidType, Debug)]
 struct ListAssetsRequest {
     start: Option<Nat>,
@@ -134,17 +127,6 @@ struct CreateChunksRequest<'a> {
 #[derive(CandidType, Debug, Deserialize)]
 struct CreateChunksResponse {
     chunk_ids: Vec<Nat>,
-}
-
-#[derive(CandidType, Debug)]
-struct ListPermittedArguments {
-    permission: Permission,
-}
-
-#[derive(CandidType, Debug)]
-struct GrantPermissionArguments {
-    to_principal: Principal,
-    permission: Permission,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -239,34 +221,16 @@ pub fn get_redirect_rules(c: &impl CanisterCall) -> Result<Vec<RedirectRule>, St
     c.call("get_redirect_rules", (), CallType::Query, true)
 }
 
-pub fn list_permitted(
-    c: &impl CanisterCall,
-    permission: Permission,
-) -> Result<Vec<Principal>, String> {
-    c.call(
-        "list_permitted",
-        ListPermittedArguments { permission },
-        CallType::Update,
-        true,
-    )
+// Whether the signing identity may sync assets (authorized or a controller).
+// Called directly (not via proxy) so it reflects the identity's own access.
+pub fn can_sync(c: &impl CanisterCall) -> Result<bool, String> {
+    c.call("can_sync", (), CallType::Query, true)
 }
 
 // Routes through the proxy (direct: false) so the proxy canister — the
 // controller — can authorise the call on the assets canister.
-pub fn grant_permission_via_proxy(
-    c: &impl CanisterCall,
-    to_principal: Principal,
-    permission: Permission,
-) -> Result<(), String> {
-    c.call(
-        "grant_permission",
-        GrantPermissionArguments {
-            to_principal,
-            permission,
-        },
-        CallType::Update,
-        false,
-    )
+pub fn authorize_via_proxy(c: &impl CanisterCall, principal: Principal) -> Result<(), String> {
+    c.call("authorize", principal, CallType::Update, false)
 }
 
 #[cfg(test)]
