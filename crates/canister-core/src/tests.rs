@@ -216,7 +216,7 @@ fn create_assets(
     system_context: &SystemContext,
     assets: Vec<AssetBuilder>,
 ) -> BatchId {
-    let batch_id = state.create_batch(system_context).unwrap();
+    let batch_id = state.create_batch(system_context);
 
     let operations = assemble_create_assets_and_set_contents_operations(
         state,
@@ -468,7 +468,7 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
-    let batch_id = state.create_batch(&system_context).unwrap();
+    let batch_id = state.create_batch(&system_context);
     let ops = vec![BatchOperation::SetRedirectRules(
         SetRedirectRulesArguments {
             rules: vec![RedirectRule {
@@ -500,7 +500,7 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
-    let batch_id = state.create_batch(&system_context).unwrap();
+    let batch_id = state.create_batch(&system_context);
     let rules = pairs
         .iter()
         .map(|(from, to)| RedirectRule {
@@ -531,7 +531,7 @@ fn batches_are_dropped_after_timeout() {
     let mut state = State::default();
     let mut system_context = mock_system_context();
 
-    let batch_1 = state.create_batch(&system_context).unwrap();
+    let batch_1 = state.create_batch(&system_context);
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
 
@@ -566,7 +566,7 @@ fn can_delete_batch_with_chunks() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
-    let batch_1 = state.create_batch(&system_context).unwrap();
+    let batch_1 = state.create_batch(&system_context);
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     let _chunk_1 = state
@@ -1534,7 +1534,7 @@ mod last_state_update_timestamp {
         assert_eq!(state.last_state_update_timestamp_ns(), 0);
 
         // Create and commit a batch with asset operations
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
 
         run_computation_until_completion(|progress| {
             state.commit_batch(
@@ -1570,7 +1570,7 @@ mod last_state_update_timestamp {
 
         // First operation at time T1: create an asset.
         let initial_time = system_context.current_timestamp_ns;
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {
@@ -1593,7 +1593,7 @@ mod last_state_update_timestamp {
         system_context.current_timestamp_ns += 1_000_000_000;
         let updated_time = system_context.current_timestamp_ns;
 
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {
@@ -1626,7 +1626,7 @@ mod last_state_update_timestamp {
         let system_context = mock_system_context();
 
         // Commit a batch to update the timestamp.
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {
@@ -1886,7 +1886,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -1931,7 +1931,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -1976,7 +1976,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2034,7 +2034,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunks
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2083,7 +2083,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2120,7 +2120,7 @@ mod compute_state_hash {
         let system_context = mock_system_context();
 
         // Setup state
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2161,7 +2161,7 @@ mod compute_state_hash {
         // We need a new system context with a later timestamp
         let system_context_later = crate::system_context::SystemContext::new_with_options(200);
 
-        let batch_id = state.create_batch(&system_context_later).unwrap();
+        let batch_id = state.create_batch(&system_context_later);
         let args = CommitBatchArguments {
             batch_id: batch_id.clone(),
             operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
@@ -2194,7 +2194,7 @@ mod redirect_rules {
 
     fn commit(state: &mut State, ops: Vec<BatchOperation>) -> Result<(), String> {
         let system_context = mock_system_context();
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {

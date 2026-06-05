@@ -686,7 +686,6 @@ impl State {
             kind: crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status },
         })
     }
-
 }
 
 impl From<StableState> for State {

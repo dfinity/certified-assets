@@ -88,7 +88,7 @@ pub enum CommitBatchProgress {
 }
 
 impl State {
-    pub fn create_batch(&mut self, system_context: &SystemContext) -> Result<BatchId, String> {
+    pub fn create_batch(&mut self, system_context: &SystemContext) -> BatchId {
         let now = system_context.current_timestamp_ns;
         self.batches.retain(|_, b| b.expires_at > now);
         self.chunks
@@ -104,7 +104,7 @@ impl State {
             },
         );
 
-        Ok(batch_id)
+        batch_id
     }
 
     pub fn create_chunks(

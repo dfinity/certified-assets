@@ -68,9 +68,8 @@ pub fn retrieve(key: AssetKey) -> RcBytes {
 pub fn create_batch() -> CreateBatchResponse {
     let system_context = SystemContext::new();
 
-    with_state_mut(|s| match s.create_batch(&system_context) {
-        Ok(batch_id) => CreateBatchResponse { batch_id },
-        Err(msg) => trap(&msg),
+    with_state_mut(|s| CreateBatchResponse {
+        batch_id: s.create_batch(&system_context),
     })
 }
 
