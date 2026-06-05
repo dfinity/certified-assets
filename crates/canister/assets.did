@@ -191,27 +191,12 @@ service: () -> {
     tree: blob;
   }) query;
 
-  // ───────── Asset mutations ─────────
-
-  // Single call to create an asset with content for a single content encoding that
-  // fits within the message ingress limit.
-  store: (record {
-    key: Key;
-    content_type: text;
-    content_encoding: text;
-    content: blob;
-    sha256: opt blob;
-  }) -> ();
-
-  create_asset: (CreateAssetArguments) -> ();
-  set_asset_content: (SetAssetContentArguments) -> ();
-  unset_asset_content: (UnsetAssetContentArguments) -> ();
-  set_asset_properties: (SetAssetPropertiesArguments) -> ();
-
-  delete_asset: (DeleteAssetArguments) -> ();
-  clear: () -> ();
-
   // ───────── Batch upload ─────────
+  //
+  // Assets are only ever mutated through committed batches — there are no
+  // single-asset mutation endpoints. A batch's `operations` carry the
+  // per-asset changes (create, set/unset content, set properties, delete,
+  // clear), applied atomically when the batch is committed.
 
   create_batch : () -> (record { batch_id: BatchId });
   create_chunks: (record { batch_id: BatchId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });

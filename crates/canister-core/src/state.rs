@@ -239,30 +239,6 @@ impl State {
         Ok(id_enc.content_chunks[0].clone())
     }
 
-    pub fn store(&mut self, arg: StoreArg, system_context: &SystemContext) -> Result<(), String> {
-        let dependent_keys = self.dependent_keys(&arg.key);
-        let asset = self.assets.entry(arg.key.clone()).or_default();
-        asset.content_type = arg.content_type;
-
-        let hash = sha2::Sha256::digest(&arg.content).into();
-        if let Some(provided_hash) = arg.sha256 {
-            if hash != provided_hash.as_ref() {
-                return Err("sha256 mismatch".to_string());
-            }
-        }
-
-        let encoding = asset.encodings.entry(arg.content_encoding).or_default();
-        encoding.total_length = arg.content.len();
-        encoding.content_chunks = vec![RcBytes::from(arg.content)];
-        encoding.modified = Int::from(system_context.current_timestamp_ns);
-        encoding.sha256 = hash;
-
-        on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
-        self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
-
-        Ok(())
-    }
-
     pub fn compute_state_hash(&mut self) -> ComputationStatus<String, (), ()> {
         if self.last_state_hash_timestamp != self.last_state_update_timestamp_ns {
             self.state_hash_computation = None;

@@ -11,10 +11,8 @@ use canister_core::{
     state::CertifiedTree,
     types::{
         AssetProperties, CommitBatchArguments, ConfigurationResponse, ConfigureArguments,
-        CreateAssetArguments, CreateBatchResponse, CreateChunksArg, CreateChunksResponse,
-        DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg, GetChunkResponse,
-        ListRequest, SetAssetContentArguments, SetAssetPropertiesArguments, StateInfo, StoreArg,
-        UnsetAssetContentArguments,
+        CreateBatchResponse, CreateChunksArg, CreateChunksResponse, DeleteBatchArguments, GetArg,
+        GetChunkArg, GetChunkResponse, ListRequest, StateInfo,
     },
 };
 use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
@@ -127,11 +125,6 @@ fn can_sync() -> bool {
 }
 
 #[update(guard = "guard_can_sync")]
-fn store(arg: StoreArg) {
-    canister_core::store(arg)
-}
-
-#[update(guard = "guard_can_sync")]
 fn create_batch() -> CreateBatchResponse {
     canister_core::create_batch()
 }
@@ -139,31 +132,6 @@ fn create_batch() -> CreateBatchResponse {
 #[update(guard = "guard_can_sync")]
 fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
     canister_core::create_chunks(arg)
-}
-
-#[update(guard = "guard_can_sync")]
-fn create_asset(arg: CreateAssetArguments) {
-    canister_core::create_asset(arg)
-}
-
-#[update(guard = "guard_can_sync")]
-fn set_asset_content(arg: SetAssetContentArguments) {
-    canister_core::set_asset_content(arg)
-}
-
-#[update(guard = "guard_can_sync")]
-fn unset_asset_content(arg: UnsetAssetContentArguments) {
-    canister_core::unset_asset_content(arg)
-}
-
-#[update(guard = "guard_can_sync")]
-fn delete_asset(arg: DeleteAssetArguments) {
-    canister_core::delete_asset(arg)
-}
-
-#[update(guard = "guard_can_sync")]
-fn clear() {
-    canister_core::clear()
 }
 
 #[update(guard = "guard_can_sync")]
@@ -179,11 +147,6 @@ async fn compute_state_hash() -> Option<String> {
 #[update(guard = "guard_can_sync")]
 fn delete_batch(arg: DeleteBatchArguments) {
     canister_core::delete_batch(arg)
-}
-
-#[update(guard = "guard_can_sync")]
-fn set_asset_properties(arg: SetAssetPropertiesArguments) {
-    canister_core::set_asset_properties(arg)
 }
 
 #[update(guard = "guard_can_sync")]
