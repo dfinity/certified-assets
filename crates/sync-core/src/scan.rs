@@ -25,26 +25,18 @@ pub struct AssetSource {
     pub key: String,
 }
 
-/// Scans `dirs` for asset files.
-pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
+/// Scans `dir` for asset files.
+pub fn scan(dir: &str) -> Result<Vec<AssetSource>, String> {
     let mut out = Vec::new();
-    let mut seen_keys = std::collections::HashSet::new();
-    for dir in dirs {
-        let root = Path::new(dir);
-        let root_abs = root
-            .canonicalize()
-            .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-        walk(&root_abs, &root_abs, &mut out, &mut seen_keys)?;
-    }
+    let root = Path::new(dir);
+    let root_abs = root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+    walk(&root_abs, &root_abs, &mut out)?;
     Ok(out)
 }
 
-fn walk(
-    root: &Path,
-    current: &Path,
-    out: &mut Vec<AssetSource>,
-    seen_keys: &mut std::collections::HashSet<String>,
-) -> Result<(), String> {
+fn walk(root: &Path, current: &Path, out: &mut Vec<AssetSource>) -> Result<(), String> {
     let entries =
         std::fs::read_dir(current).map_err(|e| format!("read_dir {}: {e}", current.display()))?;
     for entry in entries {
@@ -68,16 +60,12 @@ fn walk(
         }
 
         if ft.is_dir() {
-            walk(root, &path, out, seen_keys)?;
+            walk(root, &path, out)?;
         } else if ft.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .map_err(|e| format!("strip_prefix {}: {e}", path.display()))?;
             let key = format!("/{}", relative.to_string_lossy());
-
-            if !seen_keys.insert(key.clone()) {
-                return Err(format!("duplicate asset key {key}"));
-            }
             out.push(AssetSource { path, key });
         }
         // Symlinks (to files or directories) are skipped, matching ic-asset::sync.
@@ -110,7 +98,7 @@ mod tests {
     fn single_file() {
         let dir = tmp();
         fs::write(dir.path().join("index.html"), b"hello").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
@@ -119,7 +107,7 @@ mod tests {
         let dir = tmp();
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/app.js"), b"js").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/sub/app.js"]);
     }
 
@@ -129,7 +117,7 @@ mod tests {
         fs::write(dir.path().join(".hidden"), b"secret").unwrap();
         fs::write(dir.path().join(".gitignore"), b"*.tmp").unwrap();
         fs::write(dir.path().join("visible.txt"), b"ok").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/visible.txt"]);
     }
 
@@ -138,37 +126,14 @@ mod tests {
         let dir = tmp();
         fs::write(dir.path().join(REDIRECTS_FILENAME), b"").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
     }
 
     #[test]
     fn empty_directory() {
         let dir = tmp();
-        assert!(scan(&[dir_str(&dir)]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn duplicate_key_across_two_source_dirs() {
-        let dir1 = tmp();
-        let dir2 = tmp();
-        fs::write(dir1.path().join("index.html"), b"v1").unwrap();
-        fs::write(dir2.path().join("index.html"), b"v2").unwrap();
-        let err = scan(&[dir_str(&dir1), dir_str(&dir2)]).unwrap_err();
-        assert!(
-            err.contains("/index.html"),
-            "error should name the key: {err}"
-        );
-    }
-
-    #[test]
-    fn multiple_source_dirs() {
-        let dir1 = tmp();
-        let dir2 = tmp();
-        fs::write(dir1.path().join("a.txt"), b"a").unwrap();
-        fs::write(dir2.path().join("b.txt"), b"b").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir1), dir_str(&dir2)]).unwrap());
-        assert_eq!(keys, vec!["/a.txt", "/b.txt"]);
+        assert!(scan(&dir_str(&dir)).unwrap().is_empty());
     }
 
     #[test]
@@ -177,7 +142,7 @@ mod tests {
         fs::create_dir(dir.path().join(".well-known")).unwrap();
         fs::write(dir.path().join(".well-known/ic-domains"), b"foo.bar.com").unwrap();
         fs::write(dir.path().join("index.html"), b"hello").unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/.well-known/ic-domains", "/index.html"]);
     }
 
@@ -190,7 +155,7 @@ mod tests {
         fs::write(&target, b"content").unwrap();
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let keys = sorted_keys(scan(&[dir_str(&dir)]).unwrap());
+        let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/real.txt"]);
     }
 }
