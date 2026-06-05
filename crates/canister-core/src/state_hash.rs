@@ -5,9 +5,6 @@ use itertools::Itertools;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 
-const TAG_FALSE: [u8; 1] = [0];
-const TAG_TRUE: [u8; 1] = [1];
-
 const TAG_NONE: [u8; 1] = [2];
 const TAG_SOME: [u8; 1] = [3];
 
@@ -85,7 +82,6 @@ fn next_step(
                 content_type: asset.content_type.clone(),
                 max_age: asset.max_age,
                 headers: asset.headers.clone(),
-                enable_aliasing: None,
             };
             hash_create_asset(&mut hasher, &args);
             let mut sorted_encoding_names: Vec<String> = asset.encodings.keys().cloned().collect();
@@ -184,7 +180,6 @@ fn hash_create_asset(hasher: &mut Sha256, args: &CreateAssetArguments) {
         hasher.update(TAG_NONE);
     }
     hash_headers(hasher, args.headers.as_ref());
-    hash_opt_bool(hasher, args.enable_aliasing);
 }
 
 fn hash_set_asset_content(hasher: &mut Sha256, args: &SetAssetContentArguments) {
@@ -192,15 +187,6 @@ fn hash_set_asset_content(hasher: &mut Sha256, args: &SetAssetContentArguments) 
     hasher.update(&args.key);
     hasher.update(&args.content_encoding);
     hash_opt_bytebuf(hasher, args.sha256.as_ref());
-}
-
-fn hash_opt_bool(hasher: &mut Sha256, b: Option<bool>) {
-    if let Some(b) = b {
-        hasher.update(TAG_SOME);
-        hasher.update(if b { TAG_TRUE } else { TAG_FALSE });
-    } else {
-        hasher.update(TAG_NONE);
-    }
 }
 
 fn hash_opt_bytebuf(hasher: &mut Sha256, buf: Option<&ByteBuf>) {

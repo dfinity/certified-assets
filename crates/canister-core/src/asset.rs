@@ -135,7 +135,6 @@ pub struct AssetDetails {
     pub encodings: Vec<AssetEncodingDetails>,
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
-    pub is_aliased: Option<bool>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]

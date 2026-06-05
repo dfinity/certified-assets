@@ -134,7 +134,6 @@ struct AssetBuilder {
     encodings: Vec<(String, Vec<ByteBuf>)>,
     max_age: Option<u64>,
     headers: Option<Vec<(String, String)>>,
-    aliasing: Option<bool>,
 }
 
 impl AssetBuilder {
@@ -145,7 +144,6 @@ impl AssetBuilder {
             encodings: vec![],
             max_age: None,
             headers: None,
-            aliasing: None,
         }
     }
 
@@ -261,7 +259,6 @@ fn assemble_create_assets_and_set_contents_operations(
             content_type: asset.content_type,
             max_age: asset.max_age,
             headers: asset.headers,
-            enable_aliasing: asset.aliasing,
         }));
 
         for (enc, chunks) in asset.encodings {
@@ -620,53 +617,6 @@ fn returns_index_file_for_missing_assets_via_rule() {
 
     assert_eq!(response.status_code, 200);
     assert_eq!(response.body.as_ref(), INDEX_BODY);
-}
-
-#[test]
-fn old_stable_assets_with_is_aliased_load_cleanly() {
-    // Mirrors the plan's "guard against accidental data loss" test: a
-    // StableAsset record serialized when built-in aliasing was a real
-    // canister feature must still deserialize and serve correctly after
-    // the in-memory `Asset` lost the `is_aliased` field.
-    use crate::stable::{StableAsset, StableAssetEncoding};
-
-    let mut stable_assets = std::collections::HashMap::new();
-    stable_assets.insert(
-        "/foo.html".to_string(),
-        StableAsset {
-            content_type: "text/html".into(),
-            encodings: HashMap::from([(
-                "identity".into(),
-                StableAssetEncoding {
-                    modified: 0,
-                    content_chunks: vec![],
-                    total_length: 0,
-                    certified: false,
-                    sha256: [0u8; 32],
-                    certificate_expression: None,
-                    response_hashes: None,
-                },
-            )]),
-            max_age: None,
-            headers: None,
-            // Pretend this came from an older serialized blob.
-            is_aliased: Some(true),
-        },
-    );
-    let stable_state = StableState {
-        authorized: Default::default(),
-        stable_assets,
-        next_batch_id: None,
-        configuration: None,
-        last_state_update_timestamp: None,
-        redirect_rules: None,
-    };
-    // Round-trip through serde_cbor (the format stable memory uses).
-    let bytes = serde_cbor::to_vec(&stable_state).unwrap();
-    let restored: StableState = serde_cbor::from_slice(&bytes).unwrap();
-    let state: State = restored.into();
-    // The asset survives; the in-memory shape no longer carries the flag.
-    assert!(state.assets.contains_key("/foo.html"));
 }
 
 #[test]
@@ -1029,7 +979,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: None,
             headers: Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
-            is_aliased: None
         })
     );
     assert_eq!(
@@ -1037,7 +986,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(604800),
             headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-            is_aliased: None
         })
     );
 
@@ -1049,7 +997,6 @@ fn supports_getting_and_setting_asset_properties() {
                 "X-Content-Type-Options".into(),
                 "nosniff".into()
             )])),
-            is_aliased: None
         })
         .is_ok());
     assert_eq!(
@@ -1057,7 +1004,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(1),
             headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-            is_aliased: None
         })
     );
 
@@ -1066,7 +1012,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: Some(None),
             headers: Some(None),
-            is_aliased: None
         })
         .is_ok());
     assert_eq!(
@@ -1074,7 +1019,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: None,
             headers: None,
-            is_aliased: None
         })
     );
 
@@ -1086,7 +1030,6 @@ fn supports_getting_and_setting_asset_properties() {
                 "X-Content-Type-Options".into(),
                 "nosniff".into()
             )])),
-            is_aliased: None
         })
         .is_ok());
     assert_eq!(
@@ -1094,7 +1037,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(1),
             headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-            is_aliased: None
         })
     );
 
@@ -1103,7 +1045,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: None,
             headers: Some(Some(vec![("new-header".into(), "value".into())])),
-            is_aliased: None
         })
         .is_ok());
     assert_eq!(
@@ -1111,7 +1052,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(1),
             headers: Some(vec![("new-header".into(), "value".into())]),
-            is_aliased: None
         })
     );
 
@@ -1120,7 +1060,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: Some(Some(2)),
             headers: None,
-            is_aliased: None
         })
         .is_ok());
     assert_eq!(
@@ -1128,43 +1067,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(2),
             headers: Some(vec![("new-header".into(), "value".into())]),
-            is_aliased: None
-        })
-    );
-
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/max-age.html".into(),
-            max_age: None,
-            headers: None,
-            is_aliased: Some(Some(false))
-        })
-        .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
-        Ok(AssetProperties {
-            max_age: Some(2),
-            headers: Some(vec![("new-header".into(), "value".into())]),
-            // `is_aliased` is accepted on the candid surface but ignored —
-            // the canister no longer aliases on its own.
-            is_aliased: None
-        })
-    );
-
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/max-age.html".into(),
-            max_age: None,
-            headers: Some(None),
-            is_aliased: Some(None)
-        })
-        .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
-        Ok(AssetProperties {
-            max_age: Some(2),
-            headers: None,
-            is_aliased: None
         })
     );
 }
@@ -1189,7 +1091,6 @@ fn create_asset_fails_if_asset_exists() {
                 content_type: "text/html".to_string(),
                 max_age: None,
                 headers: None,
-                enable_aliasing: None,
             })
             .unwrap_err()
             == "asset already exists"
@@ -1506,7 +1407,6 @@ mod certificate_expression {
                 key: "/contents.html".into(),
                 max_age: Some(None),
                 headers: Some(Some(vec![("custom-header".into(), "value".into())])),
-                is_aliased: None,
             })
             .unwrap();
         let response = certified_http_request(
@@ -1976,7 +1876,6 @@ mod last_state_update_timestamp {
                         content_type: "text/plain".to_string(),
                         max_age: None,
                         headers: None,
-                        enable_aliasing: None,
                     })],
                 },
                 progress,
@@ -2009,7 +1908,6 @@ mod last_state_update_timestamp {
                     content_encoding: "identity".to_string(),
                     content: ByteBuf::from(b"test content".to_vec()),
                     sha256: None,
-                    aliased: None,
                 },
                 &system_context,
             )
@@ -2040,7 +1938,6 @@ mod last_state_update_timestamp {
                     content_encoding: "identity".to_string(),
                     content: ByteBuf::from(b"test content".to_vec()),
                     sha256: None,
-                    aliased: None,
                 },
                 &system_context,
             )
@@ -2064,7 +1961,6 @@ mod last_state_update_timestamp {
                                 "value".to_string(),
                             )])),
                             max_age: None,
-                            is_aliased: None,
                         },
                     )],
                 },
@@ -2093,7 +1989,6 @@ mod last_state_update_timestamp {
                     content_encoding: "identity".to_string(),
                     content: ByteBuf::from(b"test content".to_vec()),
                     sha256: None,
-                    aliased: None,
                 },
                 &system_context,
             )
@@ -2337,7 +2232,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                enable_aliasing: None,
             })
             .unwrap();
 
@@ -2383,7 +2277,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                enable_aliasing: None,
             })
             .unwrap();
 
@@ -2429,7 +2322,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                enable_aliasing: None,
             })
             .unwrap();
 
@@ -2488,7 +2380,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                enable_aliasing: None,
             })
             .unwrap();
 
@@ -2538,7 +2429,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                enable_aliasing: None,
             })
             .unwrap();
 
@@ -2599,7 +2489,6 @@ mod compute_state_hash {
                     content_type: "text/plain".to_string(),
                     max_age: None,
                     headers: None,
-                    enable_aliasing: None,
                 }),
                 BatchOperation::SetAssetContent(SetAssetContentArguments {
                     key: "asset1".to_string(),
@@ -2630,7 +2519,6 @@ mod compute_state_hash {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                enable_aliasing: None,
             })],
         };
         run_computation_until_completion(|progress| {

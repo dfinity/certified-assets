@@ -109,10 +109,6 @@ impl State {
             return Err("asset already exists".to_string());
         }
 
-        // `arg.enable_aliasing` is accepted for backward compatibility but
-        // ignored — the canister no longer aliases on its own; users express
-        // aliasing as an explicit status-200 rule in `_redirects`.
-        let _ = arg.enable_aliasing;
         self.assets.insert(
             arg.key,
             Asset {
@@ -247,8 +243,6 @@ impl State {
         let dependent_keys = self.dependent_keys(&arg.key);
         let asset = self.assets.entry(arg.key.clone()).or_default();
         asset.content_type = arg.content_type;
-        // `arg.aliased` is accepted for backward compatibility but ignored.
-        let _ = arg.aliased;
 
         let hash = sha2::Sha256::digest(&arg.content).into();
         if let Some(provided_hash) = arg.sha256 {
@@ -348,7 +342,6 @@ impl State {
                         encodings,
                         max_age: asset.max_age,
                         headers: asset.headers.clone(),
-                        is_aliased: None,
                     }
                 })
             })
@@ -595,7 +588,6 @@ impl State {
         Ok(AssetProperties {
             max_age: asset.max_age,
             headers: asset.headers.clone(),
-            is_aliased: None,
         })
     }
 
@@ -612,9 +604,6 @@ impl State {
         if let Some(max_age) = arg.max_age {
             asset.max_age = max_age
         }
-
-        // `arg.is_aliased` is accepted for backward compatibility but ignored.
-        let _ = arg.is_aliased;
 
         on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
 

@@ -70,18 +70,12 @@ impl From<StableConfiguration> for crate::state::Configuration {
 }
 
 /// Same as [crate::asset::Asset] but serde-serializable.
-///
-/// `is_aliased` is kept as an optional ignored field so stable-memory blobs
-/// written before built-in aliasing was removed still deserialize. Newly
-/// written blobs always set it to `None`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableAsset {
     pub content_type: String,
     pub encodings: HashMap<String, StableAssetEncoding>,
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
-    #[serde(default)]
-    pub is_aliased: Option<bool>,
 }
 
 impl From<crate::asset::Asset> for StableAsset {
@@ -95,7 +89,6 @@ impl From<crate::asset::Asset> for StableAsset {
                 .collect(),
             max_age: asset.max_age,
             headers: asset.headers,
-            is_aliased: None,
         }
     }
 }
