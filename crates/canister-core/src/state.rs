@@ -36,17 +36,9 @@ pub struct CertifiedTree {
     pub tree: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Configuration {
-    pub max_batches: Option<u64>,
-    pub max_chunks: Option<u64>,
-    pub max_bytes: Option<u64>,
-}
-
 #[derive(Default)]
 pub struct State {
     pub(crate) assets: HashMap<AssetKey, Asset>,
-    pub(crate) configuration: Configuration,
 
     pub(crate) chunks: HashMap<ChunkId, Chunk>,
     pub(crate) next_chunk_id: ChunkId,
@@ -596,17 +588,6 @@ impl State {
         Vec::new()
     }
 
-    pub fn get_configuration(&self) -> ConfigurationResponse {
-        let max_batches = self.configuration.max_batches;
-        let max_chunks = self.configuration.max_chunks;
-        let max_bytes = self.configuration.max_bytes;
-        ConfigurationResponse {
-            max_batches,
-            max_chunks,
-            max_bytes,
-        }
-    }
-
     pub fn get_redirect_rules(&self) -> Vec<crate::redirect::RedirectRule> {
         self.redirect_rules.clone()
     }
@@ -705,18 +686,6 @@ impl State {
             kind: crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status },
         })
     }
-
-    pub fn configure(&mut self, args: ConfigureArguments) {
-        if let Some(max_batches) = args.max_batches {
-            self.configuration.max_batches = max_batches;
-        }
-        if let Some(max_chunks) = args.max_chunks {
-            self.configuration.max_chunks = max_chunks;
-        }
-        if let Some(max_bytes) = args.max_bytes {
-            self.configuration.max_bytes = max_bytes;
-        }
-    }
 }
 
 impl From<StableState> for State {
@@ -732,10 +701,6 @@ impl From<StableState> for State {
                 .next_batch_id
                 .map(BatchId::from)
                 .unwrap_or_else(|| Nat::from(1_u8)),
-            configuration: stable_state
-                .configuration
-                .map(Into::into)
-                .unwrap_or_default(),
             last_state_update_timestamp_ns: stable_state.last_state_update_timestamp.unwrap_or(0),
             redirect_rules: stable_state.redirect_rules.unwrap_or_default(),
             ..Self::default()

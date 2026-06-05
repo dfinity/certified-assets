@@ -216,7 +216,7 @@ fn create_assets(
     system_context: &SystemContext,
     assets: Vec<AssetBuilder>,
 ) -> BatchId {
-    let batch_id = state.create_batch(system_context).unwrap();
+    let batch_id = state.create_batch(system_context);
 
     let operations = assemble_create_assets_and_set_contents_operations(
         state,
@@ -468,7 +468,7 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
-    let batch_id = state.create_batch(&system_context).unwrap();
+    let batch_id = state.create_batch(&system_context);
     let ops = vec![BatchOperation::SetRedirectRules(
         SetRedirectRulesArguments {
             rules: vec![RedirectRule {
@@ -500,7 +500,7 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
-    let batch_id = state.create_batch(&system_context).unwrap();
+    let batch_id = state.create_batch(&system_context);
     let rules = pairs
         .iter()
         .map(|(from, to)| RedirectRule {
@@ -531,7 +531,7 @@ fn batches_are_dropped_after_timeout() {
     let mut state = State::default();
     let mut system_context = mock_system_context();
 
-    let batch_1 = state.create_batch(&system_context).unwrap();
+    let batch_1 = state.create_batch(&system_context);
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
 
@@ -566,7 +566,7 @@ fn can_delete_batch_with_chunks() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
-    let batch_1 = state.create_batch(&system_context).unwrap();
+    let batch_1 = state.create_batch(&system_context);
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     let _chunk_1 = state
@@ -1522,336 +1522,6 @@ mod certification {
 }
 
 #[cfg(test)]
-mod configuration_methods {
-    use super::*;
-    use crate::types::ConfigureArguments;
-
-    #[test]
-    fn empty_config() {
-        let state = State::default();
-
-        let x = state.get_configuration();
-        assert!(x.max_batches.is_none());
-        assert!(x.max_chunks.is_none());
-        assert!(x.max_bytes.is_none());
-    }
-
-    #[test]
-    fn set_only_max_batches() {
-        let mut state = State::default();
-
-        state.configure(ConfigureArguments {
-            max_batches: Some(Some(47)),
-            max_chunks: None,
-            max_bytes: None,
-        });
-
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(47));
-        assert_eq!(x.max_chunks, None);
-        assert_eq!(x.max_bytes, None);
-    }
-
-    #[test]
-    fn unset_only_max_batches() {
-        let mut state = State::default();
-        state.configure(ConfigureArguments {
-            max_batches: Some(Some(47)),
-            max_chunks: Some(Some(67)),
-            max_bytes: Some(Some(77)),
-        });
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(47));
-        assert_eq!(x.max_chunks, Some(67));
-        assert_eq!(x.max_bytes, Some(77));
-
-        state.configure(ConfigureArguments {
-            max_batches: Some(None),
-            max_chunks: None,
-            max_bytes: None,
-        });
-
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, None);
-        assert_eq!(x.max_chunks, Some(67));
-        assert_eq!(x.max_bytes, Some(77));
-    }
-
-    #[test]
-    fn change_only_max_batches() {
-        let mut state = State::default();
-        state.configure(ConfigureArguments {
-            max_batches: Some(Some(47)),
-            max_chunks: Some(Some(67)),
-            max_bytes: Some(Some(77)),
-        });
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(47));
-        assert_eq!(x.max_chunks, Some(67));
-        assert_eq!(x.max_bytes, Some(77));
-
-        state.configure(ConfigureArguments {
-            max_batches: Some(Some(35)),
-            max_chunks: None,
-            max_bytes: None,
-        });
-
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(35));
-        assert_eq!(x.max_chunks, Some(67));
-        assert_eq!(x.max_bytes, Some(77));
-    }
-
-    #[test]
-    fn set_only_max_chunks() {
-        let mut state = State::default();
-
-        state.configure(ConfigureArguments {
-            max_batches: None,
-            max_chunks: Some(Some(23)),
-            max_bytes: None,
-        });
-
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, None);
-        assert_eq!(x.max_chunks, Some(23));
-        assert_eq!(x.max_bytes, None);
-    }
-
-    #[test]
-    fn unset_only_max_chunks() {
-        let mut state = State::default();
-        state.configure(ConfigureArguments {
-            max_batches: Some(Some(47)),
-            max_chunks: Some(Some(67)),
-            max_bytes: Some(Some(77)),
-        });
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(47));
-        assert_eq!(x.max_chunks, Some(67));
-        assert_eq!(x.max_bytes, Some(77));
-
-        state.configure(ConfigureArguments {
-            max_batches: None,
-            max_chunks: Some(None),
-            max_bytes: None,
-        });
-
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(47));
-        assert_eq!(x.max_chunks, None);
-        assert_eq!(x.max_bytes, Some(77));
-    }
-
-    #[test]
-    fn change_only_max_chunks() {
-        let mut state = State::default();
-        state.configure(ConfigureArguments {
-            max_batches: Some(Some(47)),
-            max_chunks: Some(Some(67)),
-            max_bytes: Some(Some(77)),
-        });
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(47));
-        assert_eq!(x.max_chunks, Some(67));
-        assert_eq!(x.max_bytes, Some(77));
-
-        state.configure(ConfigureArguments {
-            max_batches: None,
-            max_chunks: Some(Some(54)),
-            max_bytes: None,
-        });
-
-        let x = state.get_configuration();
-        assert_eq!(x.max_batches, Some(47));
-        assert_eq!(x.max_chunks, Some(54));
-        assert_eq!(x.max_bytes, Some(77));
-    }
-}
-
-#[cfg(test)]
-mod enforce_limits {
-    use super::*;
-    use crate::types::ConfigureArguments;
-
-    #[test]
-    fn max_batches() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        state.configure(ConfigureArguments {
-            max_batches: Some(Some(3)),
-            max_chunks: None,
-            max_bytes: None,
-        });
-        state.create_batch(&system_context).unwrap();
-        state.create_batch(&system_context).unwrap();
-        state.create_batch(&system_context).unwrap();
-        assert_eq!(
-            state.create_batch(&system_context).unwrap_err(),
-            "batch limit exceeded"
-        );
-    }
-
-    #[test]
-    fn max_chunks() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        state.configure(ConfigureArguments {
-            max_batches: None,
-            max_chunks: Some(Some(3)),
-            max_bytes: None,
-        });
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        let batch_2 = state.create_batch(&system_context).unwrap();
-
-        state
-            .create_chunks(
-                CreateChunksArg {
-                    batch_id: batch_1.clone(),
-                    content: vec![ByteBuf::new()],
-                },
-                &system_context,
-            )
-            .unwrap();
-        state
-            .create_chunks(
-                CreateChunksArg {
-                    batch_id: batch_2.clone(),
-                    content: vec![ByteBuf::new()],
-                },
-                &system_context,
-            )
-            .unwrap();
-        assert_eq!(
-            state
-                .create_chunks(
-                    CreateChunksArg {
-                        batch_id: batch_2.clone(),
-                        content: vec![ByteBuf::new(), ByteBuf::new()]
-                    },
-                    &system_context,
-                )
-                .unwrap_err(),
-            "chunk limit exceeded"
-        );
-        state
-            .create_chunks(
-                CreateChunksArg {
-                    batch_id: batch_2.clone(),
-                    content: vec![ByteBuf::new()],
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        assert_eq!(
-            state
-                .create_chunks(
-                    CreateChunksArg {
-                        batch_id: batch_1,
-                        content: vec![ByteBuf::new()],
-                    },
-                    &system_context,
-                )
-                .unwrap_err(),
-            "chunk limit exceeded"
-        );
-        assert_eq!(
-            state
-                .create_chunks(
-                    CreateChunksArg {
-                        batch_id: batch_2.clone(),
-                        content: vec![ByteBuf::new()],
-                    },
-                    &system_context,
-                )
-                .unwrap_err(),
-            "chunk limit exceeded"
-        );
-    }
-
-    #[test]
-    fn max_bytes() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        state.configure(ConfigureArguments {
-            max_batches: None,
-            max_chunks: None,
-            max_bytes: Some(Some(289)),
-        });
-        let c0 = vec![0u8; 100];
-        let c1 = vec![1u8; 100];
-        let c2 = vec![2u8; 90];
-        let c3 = vec![3u8; 89];
-        let c4 = vec![4u8; 1];
-
-        let batch_1 = state.create_batch(&system_context).unwrap();
-        let batch_2 = state.create_batch(&system_context).unwrap();
-        assert_eq!(
-            state
-                .create_chunks(
-                    CreateChunksArg {
-                        batch_id: batch_1.clone(),
-                        content: vec![
-                            ByteBuf::from(c0.clone()),
-                            ByteBuf::from(c1.clone()),
-                            ByteBuf::from(c2.clone())
-                        ]
-                    },
-                    &system_context,
-                )
-                .unwrap_err(),
-            "byte limit exceeded"
-        );
-        state
-            .create_chunks(
-                CreateChunksArg {
-                    batch_id: batch_1.clone(),
-                    content: vec![ByteBuf::from(c0), ByteBuf::from(c1)],
-                },
-                &system_context,
-            )
-            .unwrap();
-        assert_eq!(
-            state
-                .create_chunks(
-                    CreateChunksArg {
-                        batch_id: batch_2.clone(),
-                        content: vec![ByteBuf::from(c2)],
-                    },
-                    &system_context,
-                )
-                .unwrap_err(),
-            "byte limit exceeded"
-        );
-        state
-            .create_chunks(
-                CreateChunksArg {
-                    batch_id: batch_2.clone(),
-                    content: vec![ByteBuf::from(c3)],
-                },
-                &system_context,
-            )
-            .unwrap();
-        assert_eq!(
-            state
-                .create_chunks(
-                    CreateChunksArg {
-                        batch_id: batch_1,
-                        content: vec![ByteBuf::from(c4)],
-                    },
-                    &system_context,
-                )
-                .unwrap_err(),
-            "byte limit exceeded"
-        );
-    }
-}
-
-#[cfg(test)]
 mod last_state_update_timestamp {
     use super::*;
 
@@ -1864,7 +1534,7 @@ mod last_state_update_timestamp {
         assert_eq!(state.last_state_update_timestamp_ns(), 0);
 
         // Create and commit a batch with asset operations
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
 
         run_computation_until_completion(|progress| {
             state.commit_batch(
@@ -1900,7 +1570,7 @@ mod last_state_update_timestamp {
 
         // First operation at time T1: create an asset.
         let initial_time = system_context.current_timestamp_ns;
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {
@@ -1923,7 +1593,7 @@ mod last_state_update_timestamp {
         system_context.current_timestamp_ns += 1_000_000_000;
         let updated_time = system_context.current_timestamp_ns;
 
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {
@@ -1956,7 +1626,7 @@ mod last_state_update_timestamp {
         let system_context = mock_system_context();
 
         // Commit a batch to update the timestamp.
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {
@@ -2216,7 +1886,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2261,7 +1931,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2306,7 +1976,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2364,7 +2034,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunks
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2413,7 +2083,7 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2450,7 +2120,7 @@ mod compute_state_hash {
         let system_context = mock_system_context();
 
         // Setup state
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
@@ -2491,7 +2161,7 @@ mod compute_state_hash {
         // We need a new system context with a later timestamp
         let system_context_later = crate::system_context::SystemContext::new_with_options(200);
 
-        let batch_id = state.create_batch(&system_context_later).unwrap();
+        let batch_id = state.create_batch(&system_context_later);
         let args = CommitBatchArguments {
             batch_id: batch_id.clone(),
             operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
@@ -2524,7 +2194,7 @@ mod redirect_rules {
 
     fn commit(state: &mut State, ops: Vec<BatchOperation>) -> Result<(), String> {
         let system_context = mock_system_context();
-        let batch_id = state.create_batch(&system_context).unwrap();
+        let batch_id = state.create_batch(&system_context);
         run_computation_until_completion(|progress| {
             state.commit_batch(
                 &CommitBatchArguments {

@@ -68,9 +68,8 @@ pub fn retrieve(key: AssetKey) -> RcBytes {
 pub fn create_batch() -> CreateBatchResponse {
     let system_context = SystemContext::new();
 
-    with_state_mut(|s| match s.create_batch(&system_context) {
-        Ok(batch_id) => CreateBatchResponse { batch_id },
-        Err(msg) => trap(&msg),
+    with_state_mut(|s| CreateBatchResponse {
+        batch_id: s.create_batch(&system_context),
     })
 }
 
@@ -174,14 +173,6 @@ pub fn http_request_streaming_callback(
 
 pub fn get_asset_properties(key: AssetKey) -> AssetProperties {
     with_state(|s| s.get_asset_properties(key).unwrap_or_else(|msg| trap(&msg)))
-}
-
-pub fn get_configuration() -> ConfigurationResponse {
-    with_state(|s| s.get_configuration())
-}
-
-pub fn configure(arg: ConfigureArguments) {
-    with_state_mut(|s| s.configure(arg))
 }
 
 /// Whether the current caller may sync assets: either in the authorized set, or

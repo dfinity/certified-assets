@@ -10,9 +10,9 @@ use canister_core::{
     redirect::RedirectRule,
     state::CertifiedTree,
     types::{
-        AssetProperties, CommitBatchArguments, ConfigurationResponse, ConfigureArguments,
-        CreateBatchResponse, CreateChunksArg, CreateChunksResponse, DeleteBatchArguments, GetArg,
-        GetChunkArg, GetChunkResponse, ListRequest, StateInfo,
+        AssetProperties, CommitBatchArguments, CreateBatchResponse, CreateChunksArg,
+        CreateChunksResponse, DeleteBatchArguments, GetArg, GetChunkArg, GetChunkResponse,
+        ListRequest, StateInfo,
     },
 };
 use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
@@ -147,16 +147,6 @@ async fn compute_state_hash() -> Option<String> {
 #[update(guard = "guard_can_sync")]
 fn delete_batch(arg: DeleteBatchArguments) {
     canister_core::delete_batch(arg)
-}
-
-#[update(guard = "guard_can_sync")]
-fn get_configuration() -> ConfigurationResponse {
-    canister_core::get_configuration()
-}
-
-#[update(guard = "guard_can_sync")]
-fn configure(arg: ConfigureArguments) {
-    canister_core::configure(arg)
 }
 
 ic_cdk::export_candid!();
