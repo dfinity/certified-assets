@@ -12,20 +12,6 @@ pub type ChunkId = Nat;
 // IDL Types
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct ConfigureArguments {
-    pub max_batches: Option<Option<u64>>,
-    pub max_chunks: Option<Option<u64>>,
-    pub max_bytes: Option<Option<u64>>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct ConfigurationResponse {
-    pub max_batches: Option<u64>,
-    pub max_chunks: Option<u64>,
-    pub max_bytes: Option<u64>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct StateInfo {
     pub last_state_update_timestamp: u64,
     pub state_hash: Option<String>,

@@ -115,18 +115,6 @@ type SetAssetPropertiesArguments = record {
   headers: opt opt vec HeaderField;
 };
 
-type ConfigurationResponse = record {
-  max_batches: opt nat64;
-  max_chunks: opt nat64;
-  max_bytes: opt nat64;
-};
-
-type ConfigureArguments = record {
-  max_batches: opt opt nat64;
-  max_chunks: opt opt nat64;
-  max_bytes: opt opt nat64;
-};
-
 type StateInfo = record {
   last_state_update_timestamp: nat64;
   state_hash: opt text;
@@ -227,9 +215,4 @@ service: () -> {
   get_state_info: () -> (StateInfo) query;
   // Compute a hash over the canister content. Call until it returns Some(hash).
   compute_state_hash: () -> (opt text);
-
-  // ───────── Configuration ─────────
-
-  get_configuration: () -> (ConfigurationResponse);
-  configure: (ConfigureArguments) -> ();
 }

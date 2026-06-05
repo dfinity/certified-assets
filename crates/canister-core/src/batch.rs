@@ -23,7 +23,6 @@ use crate::types::{
 };
 use candid::{Int, Nat};
 use ic_representation_independent_hash::Value;
-use itertools::fold;
 use serde_bytes::ByteBuf;
 use sha2::Digest;
 
@@ -38,7 +37,6 @@ pub struct Chunk {
 
 pub struct Batch {
     pub expires_at: Timestamp,
-    pub chunk_content_total_size: usize,
 }
 
 /// Status of an incremental computation
@@ -96,11 +94,6 @@ impl State {
         self.chunks
             .retain(|_, c| self.batches.contains_key(&c.batch_id));
 
-        if let Some(max_batches) = self.configuration.max_batches {
-            if self.batches.len() as u64 >= max_batches {
-                return Err("batch limit exceeded".to_string());
-            }
-        }
         let batch_id = self.next_batch_id.clone();
         self.next_batch_id += 1_u8;
 
@@ -108,7 +101,6 @@ impl State {
             batch_id.clone(),
             Batch {
                 expires_at: Int::from(now + BATCH_EXPIRY_NANOS),
-                chunk_content_total_size: 0,
             },
         );
 
@@ -133,7 +125,6 @@ impl State {
         chunks: Vec<ByteBuf>,
         system_context: &SystemContext,
     ) -> Result<Vec<ChunkId>, String> {
-        self.check_batch_limits(chunks.len(), chunks.iter().map(|chunk| chunk.len()).sum())?;
         let batch = self
             .batches
             .get_mut(&batch_id)
@@ -147,7 +138,6 @@ impl State {
         for chunk in chunks {
             let chunk_id = self.next_chunk_id.clone();
             self.next_chunk_id += 1_u8;
-            batch.chunk_content_total_size += chunk.len();
             self.chunks.insert(
                 chunk_id.clone(),
                 Chunk {
@@ -162,50 +152,6 @@ impl State {
         Ok(chunk_ids)
     }
 
-    fn check_batch_limits(&self, chunks_added: usize, bytes_added: usize) -> Result<(), String> {
-        if let Some(max_chunks) = self.configuration.max_chunks {
-            if self.chunks.len() + chunks_added > max_chunks as usize {
-                return Err("chunk limit exceeded".to_string());
-            }
-        }
-        if let Some(max_bytes) = self.configuration.max_bytes {
-            let current_total_bytes = &self.batches.iter().fold(0, |acc, (_batch_id, batch)| {
-                acc + batch.chunk_content_total_size
-            });
-            if current_total_bytes + bytes_added > max_bytes as usize {
-                return Err("byte limit exceeded".to_string());
-            }
-        }
-        Ok(())
-    }
-
-    /// Computes the data required to perform `self.check_batch_limits` against
-    /// the data carried in `last_chunk` fields.
-    fn compute_last_chunk_data(&self, arg: &CommitBatchArguments) -> (usize, usize) {
-        fold(
-            arg.operations.iter().map(|op| {
-                if let BatchOperation::SetAssetContent(SetAssetContentArguments {
-                    last_chunk: Some(content),
-                    // Chunks defined in `chunk_ids` are already accounted for and can be ignored here
-                    ..
-                }) = op
-                {
-                    Some(content.len())
-                } else {
-                    None
-                }
-            }),
-            (0, 0),
-            |(chunks_added, bytes_added), asset_len| {
-                if let Some(len) = asset_len {
-                    (chunks_added + 1, bytes_added + len)
-                } else {
-                    (chunks_added, bytes_added)
-                }
-            },
-        )
-    }
-
     pub fn commit_batch(
         &mut self,
         arg: &CommitBatchArguments,
@@ -214,11 +160,6 @@ impl State {
     ) -> ComputationStatus<(), CommitBatchProgress, String> {
         match progress {
             CommitBatchProgress::Starting => {
-                let (chunks_added, bytes_added) = self.compute_last_chunk_data(arg);
-                if let Err(e) = self.check_batch_limits(chunks_added, bytes_added) {
-                    return ComputationStatus::Error(e);
-                }
-
                 let initial_progress = CommitBatchProgress::ProcessingOperations {
                     batch_id: arg.batch_id.clone(),
                     operation_index: 0,

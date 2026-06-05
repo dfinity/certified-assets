@@ -176,14 +176,6 @@ pub fn get_asset_properties(key: AssetKey) -> AssetProperties {
     with_state(|s| s.get_asset_properties(key).unwrap_or_else(|msg| trap(&msg)))
 }
 
-pub fn get_configuration() -> ConfigurationResponse {
-    with_state(|s| s.get_configuration())
-}
-
-pub fn configure(arg: ConfigureArguments) {
-    with_state_mut(|s| s.configure(arg))
-}
-
 /// Whether the current caller may sync assets: either in the authorized set, or
 /// a canister controller. The authorized set holds only the extra (non-controller)
 /// principals — controllers are always allowed without being stored.

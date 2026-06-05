@@ -15,7 +15,6 @@ pub struct StableState {
     pub(crate) stable_assets: HashMap<String, StableAsset>,
 
     pub(crate) next_batch_id: Option<u64>,
-    pub(crate) configuration: Option<StableConfiguration>,
     pub(crate) last_state_update_timestamp: Option<u64>,
 
     /// Optional so a `StableState` serialized before this field existed still
@@ -34,37 +33,8 @@ impl From<crate::state::State> for StableState {
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
             next_batch_id: Some(batch_id_to_u64(state.next_batch_id)),
-            configuration: Some(state.configuration.into()),
             last_state_update_timestamp: Some(state.last_state_update_timestamp_ns),
             redirect_rules: Some(state.redirect_rules),
-        }
-    }
-}
-
-/// Same as [crate::state::Configuration] but serde-serializable
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StableConfiguration {
-    pub max_batches: Option<u64>,
-    pub max_chunks: Option<u64>,
-    pub max_bytes: Option<u64>,
-}
-
-impl From<crate::state::Configuration> for StableConfiguration {
-    fn from(configuration: crate::state::Configuration) -> Self {
-        Self {
-            max_batches: configuration.max_batches,
-            max_chunks: configuration.max_chunks,
-            max_bytes: configuration.max_bytes,
-        }
-    }
-}
-
-impl From<StableConfiguration> for crate::state::Configuration {
-    fn from(stable_configuration: StableConfiguration) -> Self {
-        Self {
-            max_batches: stable_configuration.max_batches,
-            max_chunks: stable_configuration.max_chunks,
-            max_bytes: stable_configuration.max_bytes,
         }
     }
 }
