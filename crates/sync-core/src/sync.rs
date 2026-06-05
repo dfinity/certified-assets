@@ -108,8 +108,8 @@ pub fn sync<C: CanisterCall>(
     }
     println!("api_version: {version}");
 
-    let sources = crate::scan::scan(dirs)?;
-    println!("found {} file(s) from {:?}", sources.len(), dirs);
+    let sources = crate::scan::scan(dir)?;
+    println!("found {} file(s) from {dir}", sources.len());
 
     // Synthesised CF `auto-trailing-slash` rules first, then the user's
     // `_redirects`. The canister matches rules in declaration order, so this
