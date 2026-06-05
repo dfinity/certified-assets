@@ -603,7 +603,7 @@ fn build_operations(
 
     // 2. Create new assets (those not present after deletions). Per-asset
     //    headers come from resolving the project's `_headers` rules against
-    //    each new key; max_age and allow_raw_access fall back to defaults.
+    //    each new key; max_age falls back to defaults.
     for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
             let resolved = headers::resolve(key, project_header_rules);
@@ -612,7 +612,6 @@ fn build_operations(
                 content_type: pa.media_type.to_string(),
                 max_age: None,
                 headers: (!resolved.is_empty()).then_some(resolved),
-                allow_raw_access: Some(true),
             }));
         }
     }
@@ -726,12 +725,12 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
 }
 
 // For each asset that already exists on the canister, reset any per-asset
-// properties (`max_age`, `headers`, `allow_raw_access`) that drifted from the
-// project config. Newly-created assets get the same values via
-// `CreateAssetArguments`, so we don't emit `SetAssetProperties` for them.
+// properties (`max_age`, `headers`) that drifted from the project config.
+// Newly-created assets get the same values via `CreateAssetArguments`, so we
+// don't emit `SetAssetProperties` for them.
 //
 // Headers are resolved from `_headers` per-key; everything else falls back to
-// plugin defaults (None / Some(true)).
+// plugin defaults (None).
 //
 // `canister_assets` is the post-deletion view: keys removed in step 1 (missing
 // from the project, or content_type drift forcing delete-then-create) are
@@ -763,16 +762,12 @@ fn update_properties(
             None
         };
 
-        let allow_raw_access =
-            (canister_props.allow_raw_access != Some(true)).then_some(Some(true));
-
-        if max_age.is_some() || headers.is_some() || allow_raw_access.is_some() {
+        if max_age.is_some() || headers.is_some() {
             ops.push(BatchOperationKind::SetAssetProperties(
                 SetAssetPropertiesArguments {
                     key: key.clone(),
                     max_age,
                     headers,
-                    allow_raw_access,
                 },
             ));
         }
@@ -1006,7 +1001,6 @@ mod tests {
             content_type: "text/plain".to_string(),
             max_age: None,
             headers: Some(vec![(name, value)]),
-            allow_raw_access: Some(true),
         })
     }
 
@@ -1713,7 +1707,6 @@ mod tests {
 
         assert_eq!(create_op.max_age, None);
         assert!(create_op.headers.is_none());
-        assert_eq!(create_op.allow_raw_access, Some(true));
     }
 
     fn set_props_ops(
@@ -1744,7 +1737,6 @@ mod tests {
             AssetProperties {
                 max_age: None,
                 headers: None,
-                allow_raw_access: Some(true),
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
@@ -1771,7 +1763,6 @@ mod tests {
             AssetProperties {
                 max_age: Some(60),
                 headers: None,
-                allow_raw_access: Some(true),
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
@@ -1800,7 +1791,6 @@ mod tests {
             AssetProperties {
                 max_age: None,
                 headers: Some(canister_headers),
-                allow_raw_access: Some(true),
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
@@ -1831,7 +1821,6 @@ mod tests {
             AssetProperties {
                 max_age: Some(60),
                 headers: None,
-                allow_raw_access: Some(true),
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
@@ -1941,7 +1930,6 @@ mod tests {
             AssetProperties {
                 max_age: None,
                 headers: None,
-                allow_raw_access: Some(true),
             },
         )]);
         let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
@@ -1978,7 +1966,6 @@ mod tests {
             AssetProperties {
                 max_age: None,
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
-                allow_raw_access: Some(true),
             },
         )]);
         // No header rules — canister-stored headers should be cleared.
@@ -2110,7 +2097,6 @@ mod tests {
             AssetProperties {
                 max_age: None,
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
-                allow_raw_access: Some(true),
             },
         )]);
         let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
@@ -2319,7 +2305,6 @@ mod tests {
             AssetProperties {
                 max_age: None,
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
-                allow_raw_access: Some(true),
             },
         );
 
@@ -2467,7 +2452,6 @@ mod tests {
             AssetProperties {
                 max_age: None,
                 headers: None,
-                allow_raw_access: Some(true),
             },
         );
 

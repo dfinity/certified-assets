@@ -99,7 +99,6 @@ impl CanisterCall for BenchMock {
             "get_asset_properties" => Encode!(&AssetProperties {
                 max_age: None,
                 headers: None,
-                allow_raw_access: Some(true),
             }),
             "create_batch" => Encode!(&CreateBatchOk {
                 batch_id: Nat::from(1u32),

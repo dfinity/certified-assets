@@ -82,7 +82,6 @@ pub struct StableAsset {
     pub headers: Option<Vec<(String, String)>>,
     #[serde(default)]
     pub is_aliased: Option<bool>,
-    pub allow_raw_access: Option<bool>,
 }
 
 impl From<crate::asset::Asset> for StableAsset {
@@ -97,7 +96,6 @@ impl From<crate::asset::Asset> for StableAsset {
             max_age: asset.max_age,
             headers: asset.headers,
             is_aliased: None,
-            allow_raw_access: asset.allow_raw_access,
         }
     }
 }
@@ -113,7 +111,6 @@ impl From<StableAsset> for crate::asset::Asset {
                 .collect(),
             max_age: stable_asset.max_age,
             headers: stable_asset.headers,
-            allow_raw_access: stable_asset.allow_raw_access,
         }
     }
 }

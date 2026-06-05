@@ -120,7 +120,6 @@ impl State {
                 encodings: HashMap::new(),
                 max_age: arg.max_age,
                 headers: arg.headers,
-                allow_raw_access: arg.allow_raw_access,
             },
         );
         Ok(())
@@ -349,7 +348,6 @@ impl State {
                         encodings,
                         max_age: asset.max_age,
                         headers: asset.headers.clone(),
-                        allow_raw_access: asset.allow_raw_access,
                         is_aliased: None,
                     }
                 })
@@ -418,13 +416,9 @@ impl State {
         chunk_index: usize,
         callback: CallbackFunc,
         etags: Vec<Hash>,
-        req: HttpRequest,
     ) -> HttpResponse {
         // Asset at the requested path wins.
         if let Ok(asset) = self.get_asset(&path.into()) {
-            if !asset.allow_raw_access() && req.is_raw_domain() {
-                return req.redirect_from_raw_to_certified_domain();
-            }
             let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
             if let Some(response) = asset.build_http_response_for_encodings(
                 &requested_encodings,
@@ -443,18 +437,6 @@ impl State {
         for (idx, rule) in self.redirect_rules.iter().enumerate() {
             if !rule.matches(path) {
                 continue;
-            }
-            // Rules that borrow a body from a target asset (200 rewrite or
-            // 4xx custom error page) honor the target's `allow_raw_access`
-            // setting — checked even before the rule has a certified entry
-            // because the target may not yet have an encoding.
-            let borrows_from_target = matches!(rule.status, 200 | 404 | 410);
-            if borrows_from_target {
-                if let Some(target) = self.assets.get(&rule.to) {
-                    if !target.allow_raw_access() && req.is_raw_domain() {
-                        return req.redirect_from_raw_to_certified_domain();
-                    }
-                }
             }
             let Some(entry) = self
                 .rule_certified_entries
@@ -554,9 +536,7 @@ impl State {
         };
 
         match url_decode(path) {
-            Ok(path) => {
-                self.build_http_response(certificate, &path, encodings, 0, callback, etags, req)
-            }
+            Ok(path) => self.build_http_response(certificate, &path, encodings, 0, callback, etags),
             Err(err) => HttpResponse {
                 status_code: 400,
                 headers: vec![],
@@ -615,7 +595,6 @@ impl State {
         Ok(AssetProperties {
             max_age: asset.max_age,
             headers: asset.headers.clone(),
-            allow_raw_access: asset.allow_raw_access,
             is_aliased: None,
         })
     }
@@ -632,9 +611,6 @@ impl State {
         }
         if let Some(max_age) = arg.max_age {
             asset.max_age = max_age
-        }
-        if let Some(allow_raw_access) = arg.allow_raw_access {
-            asset.allow_raw_access = allow_raw_access
         }
 
         // `arg.is_aliased` is accepted for backward compatibility but ignored.
