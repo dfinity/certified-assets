@@ -91,15 +91,6 @@ pub struct DeleteBatchArguments {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct StoreArg {
-    pub key: AssetKey,
-    pub content_type: String,
-    pub content_encoding: String,
-    pub content: ByteBuf,
-    pub sha256: Option<ByteBuf>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct GetArg {
     pub key: AssetKey,
     pub accept_encodings: Vec<String>,

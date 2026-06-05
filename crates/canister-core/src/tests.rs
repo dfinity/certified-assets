@@ -1854,7 +1854,6 @@ mod enforce_limits {
 #[cfg(test)]
 mod last_state_update_timestamp {
     use super::*;
-    use crate::types::StoreArg;
 
     #[test]
     fn timestamp_updates_on_commit_batch() {
@@ -1892,35 +1891,6 @@ mod last_state_update_timestamp {
     }
 
     #[test]
-    fn timestamp_updates_on_store() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Initial timestamp should be 0
-        assert_eq!(state.last_state_update_timestamp_ns(), 0);
-
-        // Store an asset
-        state
-            .store(
-                StoreArg {
-                    key: "/test.txt".to_string(),
-                    content_type: "text/plain".to_string(),
-                    content_encoding: "identity".to_string(),
-                    content: ByteBuf::from(b"test content".to_vec()),
-                    sha256: None,
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        // Timestamp should be updated
-        assert_eq!(
-            state.last_state_update_timestamp_ns(),
-            system_context.current_timestamp_ns
-        );
-    }
-
-    #[test]
     fn timestamp_updates_on_multiple_operations() {
         let mut state = State::default();
         let mut system_context = mock_system_context();
@@ -1928,20 +1898,25 @@ mod last_state_update_timestamp {
         // Initial timestamp should be 0
         assert_eq!(state.last_state_update_timestamp_ns(), 0);
 
-        // First operation at time T1
+        // First operation at time T1: create an asset.
         let initial_time = system_context.current_timestamp_ns;
-        state
-            .store(
-                StoreArg {
-                    key: "/test.txt".to_string(),
-                    content_type: "text/plain".to_string(),
-                    content_encoding: "identity".to_string(),
-                    content: ByteBuf::from(b"test content".to_vec()),
-                    sha256: None,
+        let batch_id = state.create_batch(&system_context).unwrap();
+        run_computation_until_completion(|progress| {
+            state.commit_batch(
+                &CommitBatchArguments {
+                    batch_id: batch_id.clone(),
+                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
+                        key: "/test.txt".to_string(),
+                        content_type: "text/plain".to_string(),
+                        max_age: None,
+                        headers: None,
+                    })],
                 },
+                progress,
                 &system_context,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert_eq!(state.last_state_update_timestamp_ns(), initial_time);
 
         // Second operation at time T2 (advanced)
@@ -1980,19 +1955,24 @@ mod last_state_update_timestamp {
         let mut state = State::default();
         let system_context = mock_system_context();
 
-        // Store an asset to update timestamp
-        state
-            .store(
-                StoreArg {
-                    key: "/test.txt".to_string(),
-                    content_type: "text/plain".to_string(),
-                    content_encoding: "identity".to_string(),
-                    content: ByteBuf::from(b"test content".to_vec()),
-                    sha256: None,
+        // Commit a batch to update the timestamp.
+        let batch_id = state.create_batch(&system_context).unwrap();
+        run_computation_until_completion(|progress| {
+            state.commit_batch(
+                &CommitBatchArguments {
+                    batch_id: batch_id.clone(),
+                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
+                        key: "/test.txt".to_string(),
+                        content_type: "text/plain".to_string(),
+                        max_age: None,
+                        headers: None,
+                    })],
                 },
+                progress,
                 &system_context,
             )
-            .unwrap();
+        })
+        .unwrap();
 
         let expected_timestamp = state.last_state_update_timestamp_ns();
         assert_eq!(expected_timestamp, system_context.current_timestamp_ns);

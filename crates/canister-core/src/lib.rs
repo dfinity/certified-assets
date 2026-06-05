@@ -65,18 +65,6 @@ pub fn retrieve(key: AssetKey) -> RcBytes {
     })
 }
 
-pub fn store(arg: StoreArg) {
-    let system_context = SystemContext::new();
-
-    with_state_mut(|s| {
-        if let Err(msg) = s.store(arg, &system_context) {
-            trap(&msg);
-        }
-        s.on_redirect_rules_change();
-        certified_data_set(s.root_hash());
-    });
-}
-
 pub fn create_batch() -> CreateBatchResponse {
     let system_context = SystemContext::new();
 
@@ -93,54 +81,6 @@ pub fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
         Ok(chunk_ids) => CreateChunksResponse { chunk_ids },
         Err(msg) => trap(&msg),
     })
-}
-
-pub fn create_asset(arg: CreateAssetArguments) {
-    with_state_mut(|s| {
-        if let Err(msg) = s.create_asset(arg) {
-            trap(&msg);
-        }
-        s.on_redirect_rules_change();
-        certified_data_set(s.root_hash());
-    })
-}
-
-pub fn set_asset_content(arg: SetAssetContentArguments) {
-    let system_context = SystemContext::new();
-
-    with_state_mut(|s| {
-        if let Err(msg) = s.set_asset_content(arg, &system_context) {
-            trap(&msg);
-        }
-        s.on_redirect_rules_change();
-        certified_data_set(s.root_hash());
-    })
-}
-
-pub fn unset_asset_content(arg: UnsetAssetContentArguments) {
-    with_state_mut(|s| {
-        if let Err(msg) = s.unset_asset_content(arg) {
-            trap(&msg);
-        }
-        s.on_redirect_rules_change();
-        certified_data_set(s.root_hash());
-    })
-}
-
-pub fn delete_asset(arg: DeleteAssetArguments) {
-    with_state_mut(|s| {
-        s.delete_asset(arg);
-        s.on_redirect_rules_change();
-        certified_data_set(s.root_hash());
-    });
-}
-
-pub fn clear() {
-    with_state_mut(|s| {
-        s.clear();
-        s.on_redirect_rules_change();
-        certified_data_set(s.root_hash());
-    });
 }
 
 pub async fn commit_batch(arg: CommitBatchArguments) {
@@ -234,16 +174,6 @@ pub fn http_request_streaming_callback(
 
 pub fn get_asset_properties(key: AssetKey) -> AssetProperties {
     with_state(|s| s.get_asset_properties(key).unwrap_or_else(|msg| trap(&msg)))
-}
-
-pub fn set_asset_properties(arg: SetAssetPropertiesArguments) {
-    with_state_mut(|s| {
-        if let Err(msg) = s.set_asset_properties(arg) {
-            trap(&msg);
-        }
-        s.on_redirect_rules_change();
-        certified_data_set(s.root_hash());
-    })
 }
 
 pub fn get_configuration() -> ConfigurationResponse {
