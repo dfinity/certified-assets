@@ -37,7 +37,6 @@ pub struct CreateAssetArguments {
     pub content_type: String,
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
-    pub enable_aliasing: Option<bool>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -98,7 +97,6 @@ pub struct StoreArg {
     pub content_encoding: String,
     pub content: ByteBuf,
     pub sha256: Option<ByteBuf>,
-    pub aliased: Option<bool>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -140,7 +138,6 @@ pub struct CreateChunksResponse {
 pub struct AssetProperties {
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
-    pub is_aliased: Option<bool>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -148,7 +145,6 @@ pub struct SetAssetPropertiesArguments {
     pub key: AssetKey,
     pub max_age: Option<Option<u64>>,
     pub headers: Option<Option<Vec<(String, String)>>>,
-    pub is_aliased: Option<Option<bool>>,
 }
 
 #[derive(Clone, Debug, Default, CandidType, Deserialize)]

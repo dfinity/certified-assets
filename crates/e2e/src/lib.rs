@@ -109,7 +109,6 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
 pub struct AssetProperties {
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
-    pub is_aliased: Option<bool>,
 }
 
 /// Call `get_asset_properties` on the `frontend` canister for `key`.
