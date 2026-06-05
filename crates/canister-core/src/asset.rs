@@ -117,7 +117,6 @@ pub struct Asset {
     pub encodings: HashMap<String, AssetEncoding>,
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
-    pub allow_raw_access: Option<bool>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -136,7 +135,6 @@ pub struct AssetDetails {
     pub encodings: Vec<AssetEncodingDetails>,
     pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
-    pub allow_raw_access: Option<bool>,
     pub is_aliased: Option<bool>,
 }
 
@@ -149,10 +147,6 @@ pub struct AssetEncodingDetails {
 }
 
 impl Asset {
-    pub fn allow_raw_access(&self) -> bool {
-        self.allow_raw_access.unwrap_or(true)
-    }
-
     fn update_ic_certificate_expressions(&mut self) {
         // gather all headers
         let mut headers: Vec<(String, Value)> = vec![];

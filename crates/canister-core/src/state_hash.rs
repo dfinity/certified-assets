@@ -86,7 +86,6 @@ fn next_step(
                 max_age: asset.max_age,
                 headers: asset.headers.clone(),
                 enable_aliasing: None,
-                allow_raw_access: asset.allow_raw_access,
             };
             hash_create_asset(&mut hasher, &args);
             let mut sorted_encoding_names: Vec<String> = asset.encodings.keys().cloned().collect();
@@ -185,7 +184,6 @@ fn hash_create_asset(hasher: &mut Sha256, args: &CreateAssetArguments) {
         hasher.update(TAG_NONE);
     }
     hash_headers(hasher, args.headers.as_ref());
-    hash_opt_bool(hasher, args.allow_raw_access);
     hash_opt_bool(hasher, args.enable_aliasing);
 }
 

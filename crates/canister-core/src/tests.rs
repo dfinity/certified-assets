@@ -135,7 +135,6 @@ struct AssetBuilder {
     max_age: Option<u64>,
     headers: Option<Vec<(String, String)>>,
     aliasing: Option<bool>,
-    allow_raw_access: Option<bool>,
 }
 
 impl AssetBuilder {
@@ -147,7 +146,6 @@ impl AssetBuilder {
             max_age: None,
             headers: None,
             aliasing: None,
-            allow_raw_access: None,
         }
     }
 
@@ -170,11 +168,6 @@ impl AssetBuilder {
     fn with_header(mut self, header_key: &str, header_value: &str) -> Self {
         let hm = self.headers.get_or_insert_with(Vec::new);
         hm.push((header_key.to_string(), header_value.to_string()));
-        self
-    }
-
-    fn with_allow_raw_access(mut self, allow_raw_access: Option<bool>) -> Self {
-        self.allow_raw_access = allow_raw_access;
         self
     }
 }
@@ -269,7 +262,6 @@ fn assemble_create_assets_and_set_contents_operations(
             max_age: asset.max_age,
             headers: asset.headers,
             enable_aliasing: asset.aliasing,
-            allow_raw_access: asset.allow_raw_access,
         }));
 
         for (enc, chunks) in asset.encodings {
@@ -302,21 +294,6 @@ fn lookup_header<'a>(response: &'a HttpResponse, header: &str) -> Option<&'a str
         .headers
         .iter()
         .find_map(|(h, v)| h.eq_ignore_ascii_case(header).then_some(v.as_str()))
-}
-
-impl State {
-    fn fake_http_request(&self, host: &str, path: &str) -> HttpResponse {
-        let fake_cert = [0xca, 0xfe];
-        self.http_request(
-            RequestBuilder::get(path).with_header("Host", host).build(),
-            &fake_cert,
-            unused_callback(),
-        )
-    }
-
-    fn create_test_asset(&mut self, asset: AssetBuilder) {
-        create_assets(self, &mock_system_context(), vec![asset]);
-    }
 }
 
 #[test]
@@ -674,7 +651,6 @@ fn old_stable_assets_with_is_aliased_load_cleanly() {
             headers: None,
             // Pretend this came from an older serialized blob.
             is_aliased: Some(true),
-            allow_raw_access: None,
         },
     );
     let stable_state = StableState {
@@ -1053,7 +1029,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: None,
             headers: Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1062,7 +1037,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(604800),
             headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1075,7 +1049,6 @@ fn supports_getting_and_setting_asset_properties() {
                 "X-Content-Type-Options".into(),
                 "nosniff".into()
             )])),
-            allow_raw_access: None,
             is_aliased: None
         })
         .is_ok());
@@ -1084,7 +1057,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(1),
             headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1094,7 +1066,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: Some(None),
             headers: Some(None),
-            allow_raw_access: None,
             is_aliased: None
         })
         .is_ok());
@@ -1103,7 +1074,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: None,
             headers: None,
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1116,7 +1086,6 @@ fn supports_getting_and_setting_asset_properties() {
                 "X-Content-Type-Options".into(),
                 "nosniff".into()
             )])),
-            allow_raw_access: None,
             is_aliased: None
         })
         .is_ok());
@@ -1125,7 +1094,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(1),
             headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1135,7 +1103,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: None,
             headers: Some(Some(vec![("new-header".into(), "value".into())])),
-            allow_raw_access: None,
             is_aliased: None
         })
         .is_ok());
@@ -1144,7 +1111,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(1),
             headers: Some(vec![("new-header".into(), "value".into())]),
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1154,7 +1120,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: Some(Some(2)),
             headers: None,
-            allow_raw_access: None,
             is_aliased: None
         })
         .is_ok());
@@ -1163,7 +1128,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(2),
             headers: Some(vec![("new-header".into(), "value".into())]),
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1173,7 +1137,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: None,
             headers: None,
-            allow_raw_access: None,
             is_aliased: Some(Some(false))
         })
         .is_ok());
@@ -1182,7 +1145,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(2),
             headers: Some(vec![("new-header".into(), "value".into())]),
-            allow_raw_access: None,
             // `is_aliased` is accepted on the candid surface but ignored —
             // the canister no longer aliases on its own.
             is_aliased: None
@@ -1194,7 +1156,6 @@ fn supports_getting_and_setting_asset_properties() {
             key: "/max-age.html".into(),
             max_age: None,
             headers: Some(None),
-            allow_raw_access: None,
             is_aliased: Some(None)
         })
         .is_ok());
@@ -1203,7 +1164,6 @@ fn supports_getting_and_setting_asset_properties() {
         Ok(AssetProperties {
             max_age: Some(2),
             headers: None,
-            allow_raw_access: None,
             is_aliased: None
         })
     );
@@ -1229,7 +1189,6 @@ fn create_asset_fails_if_asset_exists() {
                 content_type: "text/html".to_string(),
                 max_age: None,
                 headers: None,
-                allow_raw_access: None,
                 enable_aliasing: None,
             })
             .unwrap_err()
@@ -1449,108 +1408,6 @@ fn headers_candid_hashmap_btreemap_roundtrip() {
 }
 
 #[cfg(test)]
-mod allow_raw_access {
-    use super::*;
-
-    const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
-
-    #[test]
-    fn redirects_from_raw_to_certified() {
-        // The raw-domain redirect now triggers for both direct asset hits and
-        // 200-rule aliases — explicit rules replace the canister's old
-        // built-in `.html` / `index.html` aliasing.
-        let mut state = State::default();
-
-        state.create_test_asset(
-            AssetBuilder::new("/page.html", "text/html").with_allow_raw_access(Some(false)),
-        );
-        set_exact_rewrite_rule(&mut state, "/page", "/page.html");
-        let response = state.fake_http_request("a-b-c.raw.icp0.io", "/page");
-        assert_eq!(response.status_code, 308);
-        assert_eq!(
-            lookup_header(&response, "Location").unwrap(),
-            "https://a-b-c.icp0.io/page"
-        );
-        let response = state.fake_http_request("a-b-c.raw.ic0.app", "/page");
-        assert_eq!(response.status_code, 308);
-        assert_eq!(
-            lookup_header(&response, "Location").unwrap(),
-            "https://a-b-c.ic0.app/page"
-        );
-
-        state.create_test_asset(
-            AssetBuilder::new("/page2.html", "text/html").with_allow_raw_access(Some(false)),
-        );
-        set_exact_rewrite_rules(
-            &mut state,
-            &[("/page", "/page.html"), ("/page2", "/page2.html")],
-        );
-        let response = state.fake_http_request("a-b-c.raw.icp0.io", "/page2");
-        assert_eq!(response.status_code, 308);
-        assert_eq!(
-            lookup_header(&response, "Location").unwrap(),
-            "https://a-b-c.icp0.io/page2"
-        );
-
-        state.create_test_asset(
-            AssetBuilder::new("/index.html", "text/html").with_allow_raw_access(Some(false)),
-        );
-        set_root_spa_rule(&mut state, "/index.html");
-        let response = state.fake_http_request("a-b-c.raw.icp0.io", "/");
-        assert_eq!(response.status_code, 308);
-        assert_eq!(
-            lookup_header(&response, "Location").unwrap(),
-            "https://a-b-c.icp0.io/"
-        );
-
-        let mut state = State::default();
-        state.create_test_asset(
-            AssetBuilder::new("/index.html", "text/html").with_allow_raw_access(Some(false)),
-        );
-        set_root_spa_rule(&mut state, "/index.html");
-        let response = state.fake_http_request("a-b-c.raw.icp0.io", "/");
-        assert_eq!(response.status_code, 308);
-        assert_eq!(
-            lookup_header(&response, "Location").unwrap(),
-            "https://a-b-c.icp0.io/"
-        );
-    }
-
-    #[test]
-    fn wont_redirect_from_raw_to_certified() {
-        let mut state = State::default();
-        state.create_test_asset(
-            AssetBuilder::new("/blog.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY])
-                .with_allow_raw_access(Some(true)),
-        );
-        let response = state.fake_http_request("a-b-c.raw.icp0.io", "/blog.html");
-        dbg!(&response);
-        assert_eq!(response.status_code, 200);
-
-        let mut state = State::default();
-        state.create_test_asset(
-            AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY])
-                .with_allow_raw_access(Some(true)),
-        );
-        let response = state.fake_http_request("a-b-c.raw.icp0.io", "/index.html");
-        dbg!(&response);
-        assert_eq!(response.status_code, 200);
-
-        let mut state = State::default();
-        state.create_test_asset(
-            AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY])
-                .with_allow_raw_access(Some(true)),
-        );
-        let response = state.fake_http_request("a-b-c.localhost:4444", "/index.html");
-        dbg!(&response);
-        assert_eq!(response.status_code, 200);
-    }
-}
-
-#[cfg(test)]
 mod certificate_expression {
     use super::*;
     use crate::certification::build_ic_certificate_expression_from_headers_and_encoding;
@@ -1649,7 +1506,6 @@ mod certificate_expression {
                 key: "/contents.html".into(),
                 max_age: Some(None),
                 headers: Some(Some(vec![("custom-header".into(), "value".into())])),
-                allow_raw_access: None,
                 is_aliased: None,
             })
             .unwrap();
@@ -2121,7 +1977,6 @@ mod last_state_update_timestamp {
                         max_age: None,
                         headers: None,
                         enable_aliasing: None,
-                        allow_raw_access: None,
                     })],
                 },
                 progress,
@@ -2210,7 +2065,6 @@ mod last_state_update_timestamp {
                             )])),
                             max_age: None,
                             is_aliased: None,
-                            allow_raw_access: None,
                         },
                     )],
                 },
@@ -2483,7 +2337,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                allow_raw_access: None,
                 enable_aliasing: None,
             })
             .unwrap();
@@ -2530,7 +2383,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                allow_raw_access: None,
                 enable_aliasing: None,
             })
             .unwrap();
@@ -2577,7 +2429,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                allow_raw_access: None,
                 enable_aliasing: None,
             })
             .unwrap();
@@ -2637,7 +2488,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                allow_raw_access: None,
                 enable_aliasing: None,
             })
             .unwrap();
@@ -2688,7 +2538,6 @@ mod set_asset_content_sha256_verification {
                 content_type: "text/plain".to_string(),
                 max_age: None,
                 headers: None,
-                allow_raw_access: None,
                 enable_aliasing: None,
             })
             .unwrap();
@@ -2751,7 +2600,6 @@ mod compute_state_hash {
                     max_age: None,
                     headers: None,
                     enable_aliasing: None,
-                    allow_raw_access: None,
                 }),
                 BatchOperation::SetAssetContent(SetAssetContentArguments {
                     key: "asset1".to_string(),
@@ -2783,7 +2631,6 @@ mod compute_state_hash {
                 max_age: None,
                 headers: None,
                 enable_aliasing: None,
-                allow_raw_access: None,
             })],
         };
         run_computation_until_completion(|progress| {
