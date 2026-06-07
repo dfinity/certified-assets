@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+      # The long-lived `migration` branch (PR #71) sits behind `main` and is
+      # frequently in a conflicting/dirty merge state. `pull_request` runs only
+      # against the test-merge commit, which GitHub cannot create while the PR
+      # conflicts — so CI never starts. A `push` trigger runs against the branch
+      # head directly and is unaffected by conflicts, keeping CI alive here.
+      - migration
   pull_request:
   schedule:
     - cron: "0 4 * * 0,3" # 4 a.m. UTC every Sun and Wed, keep actions-cache available
