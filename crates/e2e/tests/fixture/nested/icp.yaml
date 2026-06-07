@@ -1,0 +1,22 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: frontend
+    build:
+      steps:
+        - type: pre-built
+          path: wasms/canister.wasm.gz
+
+    sync:
+      steps:
+        - type: plugin
+          path: wasms/plugin.wasm
+          # A multi-component (nested) directory. The host preopens it under a
+          # multi-segment WASI guest name, which broke `canonicalize`/`realpath`
+          # in the plugin's scan step (regression: forum post #97).
+          dirs:
+            - src/frontend/dist

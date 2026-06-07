@@ -26,15 +26,37 @@ pub struct AssetSource {
     pub config: AssetConfig,
 }
 
+/// Builds an absolute root for `dir` (a manifest-relative directory the host
+/// preopened) by prepending `/` and dropping `.` / redundant components.
+///
+/// We deliberately avoid [`Path::canonicalize`] here. Under WASI it calls
+/// `realpath`, which returns `ENOENT` ("No such file or directory") for *any*
+/// path beneath a preopen whose guest name has more than one component (e.g.
+/// `src/frontend/dist`) — even though ordinary access (`read_dir`, `metadata`,
+/// `read`) through that preopen works fine. Single-component dirs like `dist`
+/// happen to canonicalize to `/dist`; this helper produces the same shape
+/// (`/src/frontend/dist`) for nested dirs without touching `realpath`, and gives
+/// [`AssetSourceDirectoryConfiguration::load`] the absolute root it requires.
+///
+/// The host guarantees `dir` is relative and free of `..` components, so keeping
+/// only `Normal` components cannot escape the preopen.
+fn absolute_root(dir: &str) -> PathBuf {
+    let mut root = PathBuf::from("/");
+    for component in Path::new(dir).components() {
+        if let std::path::Component::Normal(c) = component {
+            root.push(c);
+        }
+    }
+    root
+}
+
 /// Scans `dirs` for asset files, resolving each file's `.ic-assets.json5` config.
 pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
     let mut out: Vec<AssetSource> = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
 
     for dir in dirs {
-        let root = Path::new(dir)
-            .canonicalize()
-            .map_err(|e| format!("canonicalize {dir}: {e}"))?;
+        let root = absolute_root(dir);
         let mut configuration = AssetSourceDirectoryConfiguration::load(&root)?;
 
         let entries: Vec<DirEntry> = WalkDir::new(&root)
@@ -45,15 +67,12 @@ pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
                 if entry.depth() == 0 {
                     return true;
                 }
-                match entry.path().canonicalize() {
-                    Ok(canonical) => {
-                        let config = configuration
-                            .get_asset_config(&canonical)
-                            .unwrap_or_default();
-                        include_entry(entry, &config)
-                    }
-                    Err(_) => false,
-                }
+                // `entry.path()` is already rooted at `root`, so it matches the
+                // config-map keys directly — no canonicalization needed.
+                let config = configuration
+                    .get_asset_config(entry.path())
+                    .unwrap_or_default();
+                include_entry(entry, &config)
             })
             .filter_map(|r| r.ok())
             .filter(|entry| {
@@ -64,10 +83,7 @@ pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
             .collect();
 
         for entry in entries {
-            let source = entry
-                .path()
-                .canonicalize()
-                .map_err(|e| format!("canonicalize {}: {e}", entry.path().display()))?;
+            let source = entry.path().to_path_buf();
             let relative = source
                 .strip_prefix(&root)
                 .map_err(|e| format!("strip_prefix {}: {e}", source.display()))?;
