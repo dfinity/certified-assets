@@ -25,13 +25,33 @@ pub struct AssetSource {
     pub key: String,
 }
 
+/// Builds an absolute root for `dir` (a manifest-relative directory the host
+/// preopened) by prepending `/` and dropping `.` / redundant components.
+///
+/// We deliberately avoid [`Path::canonicalize`] here. Under WASI it calls
+/// `realpath`, which returns `ENOENT` ("No such file or directory") for *any*
+/// path beneath a preopen whose guest name has more than one component (e.g.
+/// `src/frontend/dist`) — even though ordinary access (`read_dir`, `metadata`,
+/// `read`) through that preopen works fine. Single-component dirs like `dist`
+/// happen to canonicalize to `/dist`; this helper produces the same shape
+/// (`/src/frontend/dist`) for nested dirs without touching `realpath`.
+///
+/// The host guarantees `dir` is relative and free of `..` components, so keeping
+/// only `Normal` components cannot escape the preopen.
+fn absolute_root(dir: &str) -> PathBuf {
+    let mut root = PathBuf::from("/");
+    for component in Path::new(dir).components() {
+        if let std::path::Component::Normal(c) = component {
+            root.push(c);
+        }
+    }
+    root
+}
+
 /// Scans `dir` for asset files.
 pub fn scan(dir: &str) -> Result<Vec<AssetSource>, String> {
     let mut out = Vec::new();
-    let root = Path::new(dir);
-    let root_abs = root
-        .canonicalize()
-        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+    let root_abs = absolute_root(dir);
     walk(&root_abs, &root_abs, &mut out)?;
     Ok(out)
 }
