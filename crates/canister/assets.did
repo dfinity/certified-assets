@@ -113,7 +113,7 @@ type StateInfo = record {
   state_hash: opt text;
 };
 
-service: () -> {
+service: {
   // ───────── Canister metadata ─────────
 
   api_version: () -> (nat16) query;
