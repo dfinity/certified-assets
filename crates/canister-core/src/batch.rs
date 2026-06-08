@@ -233,10 +233,6 @@ impl State {
                         self.delete_asset(arg.clone());
                         Ok(())
                     }
-                    BatchOperation::Clear(_) => {
-                        self.clear();
-                        Ok(())
-                    }
                     BatchOperation::SetAssetProperties(arg) => {
                         self.set_asset_properties(arg.clone())
                     }

@@ -49,9 +49,6 @@ pub struct DeleteAssetArguments {
 }
 
 #[derive(CandidType, Clone, Debug)]
-pub struct ClearArguments {}
-
-#[derive(CandidType, Clone, Debug)]
 pub struct SetAssetPropertiesArguments {
     pub key: String,
     pub headers: Option<Option<Vec<(String, String)>>>,
@@ -78,7 +75,6 @@ pub struct SetRedirectRulesArguments {
 
 #[derive(CandidType, Clone, Debug)]
 pub enum BatchOperationKind {
-    Clear(ClearArguments),
     DeleteAsset(DeleteAssetArguments),
     CreateAsset(CreateAssetArguments),
     UnsetAssetContent(UnsetAssetContentArguments),

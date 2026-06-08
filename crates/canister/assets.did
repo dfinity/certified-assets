@@ -29,9 +29,6 @@ type DeleteAssetArguments = record {
   key: Key;
 };
 
-// Reset everything
-type ClearArguments = record {};
-
 type BatchOperationKind = variant {
   CreateAsset: CreateAssetArguments;
   SetAssetContent: SetAssetContentArguments;
@@ -40,8 +37,6 @@ type BatchOperationKind = variant {
 
   UnsetAssetContent: UnsetAssetContentArguments;
   DeleteAsset: DeleteAssetArguments;
-
-  Clear: ClearArguments;
 
   SetRedirectRules: SetRedirectRulesArguments;
 };
@@ -179,8 +174,8 @@ service: () -> {
   //
   // Assets are only ever mutated through committed batches — there are no
   // single-asset mutation endpoints. A batch's `operations` carry the
-  // per-asset changes (create, set/unset content, set properties, delete,
-  // clear), applied atomically when the batch is committed.
+  // per-asset changes (create, set/unset content, set properties, delete),
+  // applied atomically when the batch is committed.
 
   create_batch : () -> (record { batch_id: BatchId });
   create_chunks: (record { batch_id: BatchId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });
