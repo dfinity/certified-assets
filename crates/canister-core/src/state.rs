@@ -207,14 +207,6 @@ impl State {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.assets.clear();
-        self.batches.clear();
-        self.chunks.clear();
-        self.next_batch_id = Nat::from(1_u8);
-        self.next_chunk_id = Nat::from(1_u8);
-    }
-
     pub fn retrieve(&self, key: &AssetKey) -> Result<RcBytes, String> {
         let asset = self.get_asset(key)?;
 
@@ -694,7 +686,7 @@ impl From<StableState> for State {
             next_batch_id: stable_state
                 .next_batch_id
                 .map(BatchId::from)
-                .unwrap_or_else(|| Nat::from(1_u8)),
+                .unwrap_or_default(),
             last_state_update_timestamp_ns: stable_state.last_state_update_timestamp.unwrap_or(0),
             redirect_rules: stable_state.redirect_rules.unwrap_or_default(),
             ..Self::default()

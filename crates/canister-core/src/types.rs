@@ -46,15 +46,11 @@ pub struct DeleteAssetArguments {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct ClearArguments {}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
 pub enum BatchOperation {
     CreateAsset(CreateAssetArguments),
     SetAssetContent(SetAssetContentArguments),
     UnsetAssetContent(UnsetAssetContentArguments),
     DeleteAsset(DeleteAssetArguments),
-    Clear(ClearArguments),
     SetAssetProperties(SetAssetPropertiesArguments),
     SetRedirectRules(SetRedirectRulesArguments),
 }

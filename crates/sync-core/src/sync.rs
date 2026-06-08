@@ -564,8 +564,7 @@ fn header_bytes_of(op: &BatchOperationKind) -> usize {
             .iter()
             .map(|r| r.headers.as_deref().map_or(0, sum))
             .sum(),
-        BatchOperationKind::Clear(_)
-        | BatchOperationKind::DeleteAsset(_)
+        BatchOperationKind::DeleteAsset(_)
         | BatchOperationKind::UnsetAssetContent(_)
         | BatchOperationKind::SetAssetContent(_) => 0,
     }

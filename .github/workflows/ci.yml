@@ -42,12 +42,29 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
       - name: Install icp CLI
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dfinity/icp-cli/releases/latest/download/icp-cli-installer.sh | sh
+      # Warm the shared network-launcher cache once, up front, so the parallel
+      # e2e tests reuse it instead of each racing to download the same tarball.
+      # ICP_CLI_GITHUB_TOKEN authenticates this download (5000/h limit vs the
+      # unauthenticated 60/h that the tests were tripping); a short retry
+      # absorbs the occasional transient 5xx from GitHub. Only this step needs
+      # the token — once the launcher is cached, the test step downloads nothing.
+      - name: Pre-download network launcher
+        run: |
+          for attempt in 1 2 3; do
+            if icp network update; then
+              exit 0
+            fi
+            echo "network launcher download attempt $attempt failed; retrying..." >&2
+            sleep $((attempt * 5))
+          done
+          echo "network launcher download failed after 3 attempts" >&2
+          exit 1
+        env:
+          ICP_CLI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Run tests
         run: | # https://github.com/rust-lang/cargo/issues/6669 we have to run ALL tests with two commands
           cargo test --all-targets --no-fail-fast
           cargo test --doc
-        env:
-          ICP_CLI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   fmt:
     name: cargo fmt
