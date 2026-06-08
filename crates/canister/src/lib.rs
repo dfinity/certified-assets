@@ -15,14 +15,9 @@ use canister_core::{
         ListRequest, StateInfo,
     },
 };
-use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
+use ic_cdk::{post_upgrade, pre_upgrade, query, update};
 
 use crate::state::{load_stable_state, save_stable_state};
-
-#[init]
-fn init() {
-    canister_core::init();
-}
 
 #[pre_upgrade]
 fn pre_upgrade() {

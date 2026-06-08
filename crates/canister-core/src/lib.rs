@@ -202,13 +202,6 @@ pub fn guard_is_controller() -> Result<(), String> {
     }
 }
 
-pub fn init() {
-    // The authorized set starts empty. Controllers can always sync; this set
-    // only grants sync access to *non*-controllers, managed afterwards through
-    // the `authorize`/`deauthorize` endpoints.
-    with_state_mut(|s| s.clear());
-}
-
 pub fn pre_upgrade() -> StableState {
     STATE.with(|s| s.take().into())
 }
