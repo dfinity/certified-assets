@@ -132,7 +132,6 @@ struct AssetBuilder {
     name: String,
     content_type: String,
     encodings: Vec<(String, Vec<ByteBuf>)>,
-    max_age: Option<u64>,
     headers: Option<Vec<(String, String)>>,
 }
 
@@ -142,14 +141,8 @@ impl AssetBuilder {
             name: name.as_ref().to_string(),
             content_type: content_type.as_ref().to_string(),
             encodings: vec![],
-            max_age: None,
             headers: None,
         }
-    }
-
-    fn with_max_age(mut self, max_age: u64) -> Self {
-        self.max_age = Some(max_age);
-        self
     }
 
     fn with_encoding(mut self, name: impl AsRef<str>, chunks: Vec<impl AsRef<[u8]>>) -> Self {
@@ -257,7 +250,6 @@ fn assemble_create_assets_and_set_contents_operations(
         operations.push(BatchOperation::CreateAsset(CreateAssetArguments {
             key: asset.name.clone(),
             content_type: asset.content_type,
-            max_age: asset.max_age,
             headers: asset.headers,
         }));
 
@@ -813,7 +805,7 @@ fn get_and_get_chunk_for_multichunk_assets() {
 }
 
 #[test]
-fn supports_max_age_headers() {
+fn supports_cache_control_via_headers() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -824,8 +816,8 @@ fn supports_max_age_headers() {
         &system_context,
         vec![
             AssetBuilder::new("/contents.html", "text/html").with_encoding("identity", vec![BODY]),
-            AssetBuilder::new("/max-age.html", "text/html")
-                .with_max_age(604800)
+            AssetBuilder::new("/cached.html", "text/html")
+                .with_header("Cache-Control", "max-age=604800")
                 .with_encoding("identity", vec![BODY]),
         ],
     );
@@ -846,7 +838,7 @@ fn supports_max_age_headers() {
 
     let response = certified_http_request(
         &state,
-        RequestBuilder::get("/max-age.html")
+        RequestBuilder::get("/cached.html")
             .with_header("Accept-Encoding", "gzip,identity")
             .build(),
     );
@@ -904,8 +896,7 @@ fn supports_custom_http_headers() {
             AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("identity", vec![BODY])
                 .with_header("Access-Control-Allow-Origin", "*"),
-            AssetBuilder::new("/max-age.html", "text/html")
-                .with_max_age(604800)
+            AssetBuilder::new("/other.html", "text/html")
                 .with_encoding("identity", vec![BODY])
                 .with_header("X-Content-Type-Options", "nosniff"),
         ],
@@ -931,18 +922,13 @@ fn supports_custom_http_headers() {
 
     let response = certified_http_request(
         &state,
-        RequestBuilder::get("/max-age.html")
+        RequestBuilder::get("/other.html")
             .with_header("Accept-Encoding", "gzip,identity")
             .build(),
     );
 
     assert_eq!(response.status_code, 200);
     assert_eq!(response.body.as_ref(), BODY);
-    assert_eq!(
-        lookup_header(&response, "Cache-Control"),
-        Some("max-age=604800"),
-        "No matching Cache-Control header in response: {response:#?}",
-    );
     assert!(
         lookup_header(&response, "X-Content-Type-Options").is_some(),
         "Missing X-Content-Type-Options header in response: {response:#?}",
@@ -967,8 +953,7 @@ fn supports_getting_and_setting_asset_properties() {
             AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("identity", vec![BODY])
                 .with_header("Access-Control-Allow-Origin", "*"),
-            AssetBuilder::new("/max-age.html", "text/html")
-                .with_max_age(604800)
+            AssetBuilder::new("/props.html", "text/html")
                 .with_encoding("identity", vec![BODY])
                 .with_header("X-Content-Type-Options", "nosniff"),
         ],
@@ -977,97 +962,54 @@ fn supports_getting_and_setting_asset_properties() {
     assert_eq!(
         state.get_asset_properties("/contents.html".into()),
         Ok(AssetProperties {
-            max_age: None,
             headers: Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
         })
     );
     assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
+        state.get_asset_properties("/props.html".into()),
         Ok(AssetProperties {
-            max_age: Some(604800),
             headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
         })
     );
 
+    // `Some(Some(..))` replaces the headers map.
     assert!(state
         .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/max-age.html".into(),
-            max_age: Some(Some(1)),
-            headers: Some(Some(vec![(
-                "X-Content-Type-Options".into(),
-                "nosniff".into()
-            )])),
-        })
-        .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
-        Ok(AssetProperties {
-            max_age: Some(1),
-            headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-        })
-    );
-
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/max-age.html".into(),
-            max_age: Some(None),
-            headers: Some(None),
-        })
-        .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
-        Ok(AssetProperties {
-            max_age: None,
-            headers: None,
-        })
-    );
-
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/max-age.html".into(),
-            max_age: Some(Some(1)),
-            headers: Some(Some(vec![(
-                "X-Content-Type-Options".into(),
-                "nosniff".into()
-            )])),
-        })
-        .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
-        Ok(AssetProperties {
-            max_age: Some(1),
-            headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-        })
-    );
-
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/max-age.html".into(),
-            max_age: None,
+            key: "/props.html".into(),
             headers: Some(Some(vec![("new-header".into(), "value".into())])),
         })
         .is_ok());
     assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
+        state.get_asset_properties("/props.html".into()),
         Ok(AssetProperties {
-            max_age: Some(1),
             headers: Some(vec![("new-header".into(), "value".into())]),
         })
     );
 
+    // `None` leaves the existing headers untouched.
     assert!(state
         .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/max-age.html".into(),
-            max_age: Some(Some(2)),
+            key: "/props.html".into(),
             headers: None,
         })
         .is_ok());
     assert_eq!(
-        state.get_asset_properties("/max-age.html".into()),
+        state.get_asset_properties("/props.html".into()),
         Ok(AssetProperties {
-            max_age: Some(2),
             headers: Some(vec![("new-header".into(), "value".into())]),
         })
+    );
+
+    // `Some(None)` clears the headers map.
+    assert!(state
+        .set_asset_properties(SetAssetPropertiesArguments {
+            key: "/props.html".into(),
+            headers: Some(None),
+        })
+        .is_ok());
+    assert_eq!(
+        state.get_asset_properties("/props.html".into()),
+        Ok(AssetProperties { headers: None })
     );
 }
 
@@ -1089,7 +1031,6 @@ fn create_asset_fails_if_asset_exists() {
             .create_asset(CreateAssetArguments {
                 key: "/contents.html".to_string(),
                 content_type: "text/html".to_string(),
-                max_age: None,
                 headers: None,
             })
             .unwrap_err()
@@ -1346,7 +1287,6 @@ mod certificate_expression {
             &system_context,
             vec![AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("identity", vec![BODY])
-                .with_max_age(604800)
                 .with_header("Access-Control-Allow-Origin", "*")],
         );
 
@@ -1363,7 +1303,7 @@ mod certificate_expression {
         );
         assert_eq!(
             lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "cache-control", "Access-Control-Allow-Origin"]}}}})"#,
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "Access-Control-Allow-Origin"]}}}})"#,
             "Missing ic-certifiedexpression header in response: {response:#?}",
         );
     }
@@ -1380,7 +1320,6 @@ mod certificate_expression {
             &system_context,
             vec![AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("gzip", vec![BODY])
-                .with_max_age(604800)
                 .with_header("Access-Control-Allow-Origin", "*")],
         );
 
@@ -1398,14 +1337,13 @@ mod certificate_expression {
         );
         assert_eq!(
             lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "cache-control", "Access-Control-Allow-Origin"]}}}})"#,
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "Access-Control-Allow-Origin"]}}}})"#,
             "Missing ic-certificateexpression header in response: {response:#?}",
         );
 
         state
             .set_asset_properties(SetAssetPropertiesArguments {
                 key: "/contents.html".into(),
-                max_age: Some(None),
                 headers: Some(Some(vec![("custom-header".into(), "value".into())])),
             })
             .unwrap();
@@ -1445,7 +1383,6 @@ mod certification {
             &system_context,
             vec![AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("identity", vec![BODY])
-                .with_max_age(604800)
                 .with_header("Access-Control-Allow-Origin", "*")],
         );
 
@@ -1475,7 +1412,6 @@ mod certification {
             &system_context,
             vec![AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("identity", vec![UPDATED_BODY])
-                .with_max_age(604800)
                 .with_header("Access-Control-Allow-Origin", "*")],
         );
 
@@ -1543,7 +1479,6 @@ mod last_state_update_timestamp {
                     operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
                         key: "/test.txt".to_string(),
                         content_type: "text/plain".to_string(),
-                        max_age: None,
                         headers: None,
                     })],
                 },
@@ -1578,7 +1513,6 @@ mod last_state_update_timestamp {
                     operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
                         key: "/test.txt".to_string(),
                         content_type: "text/plain".to_string(),
-                        max_age: None,
                         headers: None,
                     })],
                 },
@@ -1605,7 +1539,6 @@ mod last_state_update_timestamp {
                                 "x-custom".to_string(),
                                 "value".to_string(),
                             )])),
-                            max_age: None,
                         },
                     )],
                 },
@@ -1634,7 +1567,6 @@ mod last_state_update_timestamp {
                     operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
                         key: "/test.txt".to_string(),
                         content_type: "text/plain".to_string(),
-                        max_age: None,
                         headers: None,
                     })],
                 },
@@ -1880,7 +1812,6 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                max_age: None,
                 headers: None,
             })
             .unwrap();
@@ -1925,7 +1856,6 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                max_age: None,
                 headers: None,
             })
             .unwrap();
@@ -1970,7 +1900,6 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                max_age: None,
                 headers: None,
             })
             .unwrap();
@@ -2028,7 +1957,6 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                max_age: None,
                 headers: None,
             })
             .unwrap();
@@ -2077,7 +2005,6 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                max_age: None,
                 headers: None,
             })
             .unwrap();
@@ -2137,7 +2064,6 @@ mod compute_state_hash {
                 BatchOperation::CreateAsset(CreateAssetArguments {
                     key: "asset1".to_string(),
                     content_type: "text/plain".to_string(),
-                    max_age: None,
                     headers: None,
                 }),
                 BatchOperation::SetAssetContent(SetAssetContentArguments {
@@ -2167,7 +2093,6 @@ mod compute_state_hash {
             operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
                 key: "asset2".to_string(),
                 content_type: "text/plain".to_string(),
-                max_age: None,
                 headers: None,
             })],
         };

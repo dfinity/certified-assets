@@ -96,10 +96,7 @@ impl CanisterCall for BenchMock {
             "api_version" => Encode!(&2u16),
             "list" => Encode!(&Vec::<AssetDetails>::new()),
             "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
-            "get_asset_properties" => Encode!(&AssetProperties {
-                max_age: None,
-                headers: None,
-            }),
+            "get_asset_properties" => Encode!(&AssetProperties { headers: None }),
             "create_batch" => Encode!(&CreateBatchOk {
                 batch_id: Nat::from(1u32),
             }),

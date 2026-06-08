@@ -44,7 +44,6 @@ impl From<crate::state::State> for StableState {
 pub struct StableAsset {
     pub content_type: String,
     pub encodings: HashMap<String, StableAssetEncoding>,
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 
@@ -57,7 +56,6 @@ impl From<crate::asset::Asset> for StableAsset {
                 .into_iter()
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
-            max_age: asset.max_age,
             headers: asset.headers,
         }
     }
@@ -72,7 +70,6 @@ impl From<StableAsset> for crate::asset::Asset {
                 .into_iter()
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
-            max_age: stable_asset.max_age,
             headers: stable_asset.headers,
         }
     }

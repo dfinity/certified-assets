@@ -106,7 +106,6 @@ impl State {
             Asset {
                 content_type: arg.content_type,
                 encodings: HashMap::new(),
-                max_age: arg.max_age,
                 headers: arg.headers,
             },
         );
@@ -308,7 +307,6 @@ impl State {
                         key: key.clone(),
                         content_type: asset.content_type.clone(),
                         encodings,
-                        max_age: asset.max_age,
                         headers: asset.headers.clone(),
                     }
                 })
@@ -554,7 +552,6 @@ impl State {
             .ok_or_else(|| "asset not found".to_string())?;
 
         Ok(AssetProperties {
-            max_age: asset.max_age,
             headers: asset.headers.clone(),
         })
     }
@@ -568,9 +565,6 @@ impl State {
 
         if let Some(headers) = arg.headers {
             asset.headers = headers
-        }
-        if let Some(max_age) = arg.max_age {
-            asset.max_age = max_age
         }
 
         on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);

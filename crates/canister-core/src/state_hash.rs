@@ -80,7 +80,6 @@ fn next_step(
             let args = CreateAssetArguments {
                 key: key.clone(),
                 content_type: asset.content_type.clone(),
-                max_age: asset.max_age,
                 headers: asset.headers.clone(),
             };
             hash_create_asset(&mut hasher, &args);
@@ -173,12 +172,6 @@ fn hash_create_asset(hasher: &mut Sha256, args: &CreateAssetArguments) {
     hasher.update(TAG_CREATE_ASSET);
     hasher.update(&args.key);
     hasher.update(&args.content_type);
-    if let Some(max_age) = args.max_age {
-        hasher.update(TAG_SOME);
-        hasher.update(max_age.to_be_bytes());
-    } else {
-        hasher.update(TAG_NONE);
-    }
     hash_headers(hasher, args.headers.as_ref());
 }
 
