@@ -107,7 +107,6 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
 pub struct AssetProperties {
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 

@@ -25,7 +25,6 @@ pub struct AssetDetails {
 pub struct CreateAssetArguments {
     pub key: String,
     pub content_type: String,
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 
@@ -55,7 +54,6 @@ pub struct ClearArguments {}
 #[derive(CandidType, Clone, Debug)]
 pub struct SetAssetPropertiesArguments {
     pub key: String,
-    pub max_age: Option<Option<u64>>,
     pub headers: Option<Option<Vec<(String, String)>>>,
 }
 
@@ -97,7 +95,6 @@ pub struct CommitBatchArguments {
 
 #[derive(CandidType, Clone, Debug, Deserialize, Default)]
 pub struct AssetProperties {
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 

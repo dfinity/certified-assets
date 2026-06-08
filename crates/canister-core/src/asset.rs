@@ -76,14 +76,12 @@ impl AssetEncoding {
     fn compute_response_hashes(
         &self,
         headers: &Option<Vec<(String, String)>>,
-        max_age: &Option<u64>,
         content_type: &str,
         encoding_name: &str,
     ) -> HashMap<u16, [u8; 32]> {
         // Collect all user-defined headers
         let base_headers: Vec<(String, Value)> = build_headers(
             headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
-            max_age,
             content_type,
             encoding_name,
             self.certificate_expression.as_ref(),
@@ -115,7 +113,6 @@ impl AssetEncoding {
 pub struct Asset {
     pub content_type: String,
     pub encodings: HashMap<String, AssetEncoding>,
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 
@@ -133,7 +130,6 @@ pub struct AssetDetails {
     pub key: String,
     pub content_type: String,
     pub encodings: Vec<AssetEncodingDetails>,
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 
@@ -150,9 +146,6 @@ impl Asset {
         // gather all headers
         let mut headers: Vec<(String, Value)> = vec![];
 
-        if self.max_age.is_some() {
-            headers.push(("cache-control".to_string(), Value::String("".to_string())));
-        }
         if let Some(custom_headers) = &self.headers {
             for (k, v) in custom_headers.iter() {
                 headers.push((k.clone(), Value::String(v.clone())));
@@ -174,7 +167,6 @@ impl Asset {
             .and_then(|e| e.certificate_expression.as_ref());
         build_headers(
             self.headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
-            &self.max_age,
             &self.content_type,
             encoding_name.to_owned(),
             ce,
@@ -294,16 +286,12 @@ impl Asset {
 
 fn build_headers(
     custom_headers: Option<impl Iterator<Item = (impl Into<String>, impl Into<String>)>>,
-    max_age: &Option<u64>,
     content_type: impl Into<String>,
     encoding_name: impl Into<String>,
     cert_expr: Option<&CertificateExpression>,
 ) -> Vec<(String, String)> {
     let mut headers: Vec<(String, String)> =
         vec![("content-type".to_string(), content_type.into())];
-    if let Some(max_age) = max_age {
-        headers.push(("cache-control".to_string(), format!("max-age={max_age}")));
-    }
     let encoding_name = encoding_name.into();
     if encoding_name != "identity" {
         headers.push(("content-encoding".to_string(), encoding_name));
@@ -344,15 +332,13 @@ pub(crate) fn on_asset_change(
     let Asset {
         content_type,
         encodings,
-        max_age,
         headers,
         ..
     } = asset;
 
     // Insert certified response values into hash_tree
     for (enc_name, enc) in encodings.iter_mut() {
-        enc.response_hashes =
-            Some(enc.compute_response_hashes(headers, max_age, content_type, enc_name));
+        enc.response_hashes = Some(enc.compute_response_hashes(headers, content_type, enc_name));
 
         insert_new_response_hashes_for_encoding(asset_hashes, enc, &affected_keys);
         enc.certified = true;

@@ -603,14 +603,13 @@ fn build_operations(
 
     // 2. Create new assets (those not present after deletions). Per-asset
     //    headers come from resolving the project's `_headers` rules against
-    //    each new key; max_age falls back to defaults.
+    //    each new key.
     for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
             let resolved = headers::resolve(key, project_header_rules);
             ops.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: key.clone(),
                 content_type: pa.media_type.to_string(),
-                max_age: None,
                 headers: (!resolved.is_empty()).then_some(resolved),
             }));
         }
@@ -724,13 +723,12 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
     redirects::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-// For each asset that already exists on the canister, reset any per-asset
-// properties (`max_age`, `headers`) that drifted from the project config.
-// Newly-created assets get the same values via `CreateAssetArguments`, so we
-// don't emit `SetAssetProperties` for them.
+// For each asset that already exists on the canister, reset its `headers` when
+// they drifted from the project config. Newly-created assets get the same
+// values via `CreateAssetArguments`, so we don't emit `SetAssetProperties` for
+// them.
 //
-// Headers are resolved from `_headers` per-key; everything else falls back to
-// plugin defaults (None).
+// Headers are resolved from `_headers` per-key.
 //
 // `canister_assets` is the post-deletion view: keys removed in step 1 (missing
 // from the project, or content_type drift forcing delete-then-create) are
@@ -752,22 +750,14 @@ fn update_properties(
             continue;
         };
 
-        let max_age = canister_props.max_age.is_some().then_some(None);
-
         let resolved = headers::resolve(key, project_header_rules);
         let expected_headers = (!resolved.is_empty()).then_some(resolved);
-        let headers = if canister_props.headers != expected_headers {
-            Some(expected_headers)
-        } else {
-            None
-        };
 
-        if max_age.is_some() || headers.is_some() {
+        if canister_props.headers != expected_headers {
             ops.push(BatchOperationKind::SetAssetProperties(
                 SetAssetPropertiesArguments {
                     key: key.clone(),
-                    max_age,
-                    headers,
+                    headers: Some(expected_headers),
                 },
             ));
         }
@@ -999,7 +989,6 @@ mod tests {
         BatchOperationKind::CreateAsset(CreateAssetArguments {
             key: key.to_string(),
             content_type: "text/plain".to_string(),
-            max_age: None,
             headers: Some(vec![(name, value)]),
         })
     }
@@ -1705,7 +1694,6 @@ mod tests {
             })
             .expect("CreateAsset op");
 
-        assert_eq!(create_op.max_age, None);
         assert!(create_op.headers.is_none());
     }
 
@@ -1732,45 +1720,13 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: None,
-                headers: None,
-            },
-        )]);
+        let canister_props =
+            HashMap::from([("/index.html".to_string(), AssetProperties { headers: None })]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
         assert!(
             set_props_ops(&ops).is_empty(),
             "no SetAssetProperties op when canister already matches defaults"
         );
-    }
-
-    #[test]
-    fn update_properties_clears_max_age_when_canister_has_it() {
-        let project = HashMap::from([mk_project_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", vec![1, 2, 3], true)],
-        )]);
-        let canister = HashMap::from([mk_canister_asset(
-            "/index.html",
-            "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
-        )]);
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: Some(60),
-                headers: None,
-            },
-        )]);
-        let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
-        let by_key = set_props_ops(&ops);
-        assert_eq!(by_key.len(), 1);
-        // canister has Some(60), defaults are None — the op must explicitly
-        // request clearing (the inner None means "set to null on the canister").
-        assert_eq!(by_key["/index.html"].max_age, Some(None));
     }
 
     #[test]
@@ -1789,7 +1745,6 @@ mod tests {
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
-                max_age: None,
                 headers: Some(canister_headers),
             },
         )]);
@@ -1819,8 +1774,7 @@ mod tests {
         let canister_props = HashMap::from([(
             "/file".to_string(),
             AssetProperties {
-                max_age: Some(60),
-                headers: None,
+                headers: Some(vec![("X-Frame-Options".to_string(), "DENY".to_string())]),
             },
         )]);
         let ops = build_operations(&project, &canister, &canister_props, &[], &[], &[]);
@@ -1925,13 +1879,8 @@ mod tests {
             "text/html",
             &[("identity", Some(vec![1, 2, 3]))],
         )]);
-        let canister_props = HashMap::from([(
-            "/index.html".to_string(),
-            AssetProperties {
-                max_age: None,
-                headers: None,
-            },
-        )]);
+        let canister_props =
+            HashMap::from([("/index.html".to_string(), AssetProperties { headers: None })]);
         let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(
             &project,
@@ -1964,7 +1913,6 @@ mod tests {
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
-                max_age: None,
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
             },
         )]);
@@ -2095,7 +2043,6 @@ mod tests {
         let canister_props = HashMap::from([(
             "/index.html".to_string(),
             AssetProperties {
-                max_age: None,
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
             },
         )]);
@@ -2303,7 +2250,6 @@ mod tests {
         mock.push_ok(
             "get_asset_properties",
             AssetProperties {
-                max_age: None,
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
             },
         );
@@ -2447,13 +2393,7 @@ mod tests {
         );
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", canister_rules);
-        mock.push_ok(
-            "get_asset_properties",
-            AssetProperties {
-                max_age: None,
-                headers: None,
-            },
-        );
+        mock.push_ok("get_asset_properties", AssetProperties { headers: None });
 
         let result = sync(
             &mock,

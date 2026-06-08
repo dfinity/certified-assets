@@ -6,7 +6,6 @@ type Time = int;
 type CreateAssetArguments = record {
   key: Key;
   content_type: text;
-  max_age: opt nat64;
   headers: opt vec HeaderField;
 };
 
@@ -111,7 +110,6 @@ type StreamingStrategy = variant {
 
 type SetAssetPropertiesArguments = record {
   key: Key;
-  max_age: opt opt nat64;
   headers: opt opt vec HeaderField;
 };
 
@@ -166,12 +164,10 @@ service: () -> {
       length: nat; // Size of this encoding's blob. Calculated when uploading assets.
       modified: Time;
     };
-    max_age: opt nat64;
     headers: opt vec HeaderField;
   }) query;
 
   get_asset_properties : (key: Key) -> (record {
-    max_age: opt nat64;
     headers: opt vec HeaderField; } ) query;
 
   certified_tree : () -> (record {

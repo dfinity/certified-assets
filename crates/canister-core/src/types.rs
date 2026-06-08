@@ -21,7 +21,6 @@ pub struct StateInfo {
 pub struct CreateAssetArguments {
     pub key: AssetKey,
     pub content_type: String,
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 
@@ -113,14 +112,12 @@ pub struct CreateChunksResponse {
 
 #[derive(Clone, Debug, CandidType, Deserialize, PartialEq, Eq)]
 pub struct AssetProperties {
-    pub max_age: Option<u64>,
     pub headers: Option<Vec<(String, String)>>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct SetAssetPropertiesArguments {
     pub key: AssetKey,
-    pub max_age: Option<Option<u64>>,
     pub headers: Option<Option<Vec<(String, String)>>>,
 }
 
