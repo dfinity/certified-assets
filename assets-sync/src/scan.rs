@@ -31,10 +31,7 @@ pub fn scan(dirs: &[String]) -> Result<Vec<AssetSource>, String> {
     let mut seen_keys = std::collections::HashSet::new();
     for dir in dirs {
         let root = Path::new(dir);
-        let root_abs = root
-            .canonicalize()
-            .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-        walk(&root_abs, &root_abs, &mut out, &mut seen_keys)?;
+        walk(root, root, &mut out, &mut seen_keys)?;
     }
     Ok(out)
 }
