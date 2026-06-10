@@ -1,0 +1,23 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: frontend
+    build:
+      steps:
+        - type: pre-built
+          path: wasms/canister.wasm
+
+    sync:
+      steps:
+        - type: plugin
+          path: wasms/plugin.wasm
+          dirs:
+            # A multi-segment scan directory. The plugin must traverse this
+            # without `canonicalize`, which cannot resolve a WASI preopen whose
+            # name has more than one component (it ENOENTs on the intermediate
+            # `frontend`). See `nested_scan_dir_deploys` in tests/sync.rs.
+            - frontend/dist

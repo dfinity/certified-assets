@@ -20,6 +20,27 @@ fn basic_deploy() {
     );
 }
 
+/// Regression test for a scan directory with more than one path component
+/// (e.g. `frontend/dist`).
+#[test]
+fn nested_scan_dir_deploys() {
+    let tmp = setup_project("tests/fixture/nested-dir");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let keys: Vec<String> = list_assets(project).into_iter().map(|a| a.key).collect();
+    assert!(
+        keys.iter().any(|k| k == "/index.html"),
+        "expected /index.html (key relative to frontend/dist); got: {keys:#?}",
+    );
+    assert!(
+        keys.iter().any(|k| k == "/assets/app.js"),
+        "expected /assets/app.js (nested key relative to frontend/dist); got: {keys:#?}",
+    );
+}
+
 #[test]
 fn basic_deploy_with_proxy() {
     let tmp = setup_project("tests/fixture/basic");
