@@ -15,7 +15,7 @@
 //!
 //! Tests are `#[ignore]`'d so they don't slow down the regular suite.
 
-use candid::{CandidType, Decode, Encode, Nat, Principal};
+use candid::{CandidType, Decode, Encode, Principal};
 use serde::Deserialize;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -24,14 +24,21 @@ use sync_core::canister::{AssetDetails, AssetProperties, CallType, CanisterCall,
 use sync_core::sync::sync;
 
 // Wire-compatible mirrors of the response types defined privately in
-// sync_core::canister. Same field name → same Candid encoding.
+// sync_core::canister. Same variant/field names → same Candid encoding.
 #[derive(CandidType)]
-struct CreateBatchOk {
-    batch_id: Nat,
+enum StartSyncOk {
+    Started {
+        session_id: u64,
+    },
+    #[allow(dead_code)]
+    Busy {
+        owner: Principal,
+        idle_for_secs: u64,
+    },
 }
 #[derive(CandidType)]
 struct CreateChunksOk {
-    chunk_ids: Vec<Nat>,
+    chunk_ids: Vec<u64>,
 }
 
 // Wire-compatible mirror of CreateChunksRequest so the mock can count chunks
@@ -40,7 +47,7 @@ struct CreateChunksOk {
 #[derive(CandidType, Deserialize)]
 struct CreateChunksReqMirror {
     #[allow(dead_code)]
-    batch_id: Nat,
+    session_id: u64,
     content: Vec<serde_bytes::ByteBuf>,
 }
 
@@ -97,19 +104,17 @@ impl CanisterCall for BenchMock {
             "list" => Encode!(&Vec::<AssetDetails>::new()),
             "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
             "get_asset_properties" => Encode!(&AssetProperties { headers: None }),
-            "create_batch" => Encode!(&CreateBatchOk {
-                batch_id: Nat::from(1u32),
-            }),
+            "start_sync" => Encode!(&StartSyncOk::Started { session_id: 1 }),
             "create_chunks" => {
                 let req = Decode!(&arg_bytes, CreateChunksReqMirror)
                     .map_err(|e| format!("decode create_chunks req: {e}"))?;
                 let n = req.content.len() as u64;
                 let start = self.next_chunk_id.get();
                 self.next_chunk_id.set(start + n);
-                let ids: Vec<Nat> = (0..n).map(|i| Nat::from(start + i)).collect();
+                let ids: Vec<u64> = (0..n).map(|i| start + i).collect();
                 Encode!(&CreateChunksOk { chunk_ids: ids })
             }
-            "commit_batch" => Encode!(&()),
+            "execute_operations" => Encode!(&()),
             // The bench drives sync() in direct mode, which checks can_sync up
             // front; report the identity as allowed so it proceeds.
             "can_sync" => Encode!(&true),

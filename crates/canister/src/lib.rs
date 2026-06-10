@@ -10,9 +10,9 @@ use canister_core::{
     redirect::RedirectRule,
     state::CertifiedTree,
     types::{
-        AssetProperties, CommitBatchArguments, CreateBatchResponse, CreateChunksArg,
-        CreateChunksResponse, DeleteBatchArguments, GetArg, GetChunkArg, GetChunkResponse,
-        ListRequest, StateInfo,
+        AssetProperties, CancelSyncArguments, CreateChunksArg, CreateChunksResponse,
+        ExecuteOperationsArguments, GetArg, GetChunkArg, GetChunkResponse, ListRequest,
+        StartSyncResult, StateInfo,
     },
 };
 use ic_cdk::{post_upgrade, pre_upgrade, query, update};
@@ -120,8 +120,8 @@ fn can_sync() -> bool {
 }
 
 #[update(guard = "guard_can_sync")]
-fn create_batch() -> CreateBatchResponse {
-    canister_core::create_batch()
+fn start_sync() -> StartSyncResult {
+    canister_core::start_sync()
 }
 
 #[update(guard = "guard_can_sync")]
@@ -130,8 +130,8 @@ fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
 }
 
 #[update(guard = "guard_can_sync")]
-async fn commit_batch(arg: CommitBatchArguments) {
-    canister_core::commit_batch(arg).await
+async fn execute_operations(arg: ExecuteOperationsArguments) {
+    canister_core::execute_operations(arg).await
 }
 
 #[update]
@@ -140,8 +140,8 @@ async fn compute_state_hash() -> Option<String> {
 }
 
 #[update(guard = "guard_can_sync")]
-fn delete_batch(arg: DeleteBatchArguments) {
-    canister_core::delete_batch(arg)
+fn cancel_sync(arg: CancelSyncArguments) {
+    canister_core::cancel_sync(arg)
 }
 
 ic_cdk::export_candid!();

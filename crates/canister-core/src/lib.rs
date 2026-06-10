@@ -65,12 +65,11 @@ pub fn retrieve(key: AssetKey) -> RcBytes {
     })
 }
 
-pub fn create_batch() -> CreateBatchResponse {
+pub fn start_sync() -> StartSyncResult {
     let system_context = SystemContext::new();
+    let caller = msg_caller();
 
-    with_state_mut(|s| CreateBatchResponse {
-        batch_id: s.create_batch(&system_context),
-    })
+    with_state_mut(|s| s.start_sync(caller, &system_context))
 }
 
 pub fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
@@ -82,12 +81,12 @@ pub fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
     })
 }
 
-pub async fn commit_batch(arg: CommitBatchArguments) {
+pub async fn execute_operations(arg: ExecuteOperationsArguments) {
     let system_context = SystemContext::new();
     let arg_ref = &arg;
 
     loop_with_message_extension_until_completion(|progress| {
-        with_state_mut(|s| s.commit_batch(arg_ref, progress, &system_context))
+        with_state_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
     })
     .await
     .map_err(|msg| trap(&msg))
@@ -108,8 +107,9 @@ pub fn get_state_info() -> StateInfo {
     with_state(|s| s.get_state_info())
 }
 
-pub fn delete_batch(arg: DeleteBatchArguments) {
-    if let Err(msg) = with_state_mut(|s| s.delete_batch(arg)) {
+pub fn cancel_sync(arg: CancelSyncArguments) {
+    let caller = msg_caller();
+    if let Err(msg) = with_state_mut(|s| s.cancel_sync(arg, caller)) {
         trap(&msg);
     }
 }

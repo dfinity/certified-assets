@@ -1,20 +1,16 @@
 use std::collections::{BTreeSet, HashMap};
 
 use candid::Principal;
-use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    asset::Timestamp, certification::CertificateExpression, rc_bytes::RcBytes,
-    redirect::RedirectRule, types::BatchId,
-};
+use crate::{certification::CertificateExpression, rc_bytes::RcBytes, redirect::RedirectRule};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StableState {
     pub(crate) authorized: BTreeSet<Principal>,
     pub(crate) stable_assets: HashMap<String, StableAsset>,
 
-    pub(crate) next_batch_id: Option<u64>,
+    pub(crate) next_session_id: u64,
     pub(crate) last_state_update_timestamp: Option<u64>,
 
     /// Optional so a `StableState` serialized before this field existed still
@@ -32,7 +28,7 @@ impl From<crate::state::State> for StableState {
                 .into_iter()
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
-            next_batch_id: Some(batch_id_to_u64(state.next_batch_id)),
+            next_session_id: state.next_session_id,
             last_state_update_timestamp: Some(state.last_state_update_timestamp_ns),
             redirect_rules: Some(state.redirect_rules),
         }
@@ -90,7 +86,7 @@ pub struct StableAssetEncoding {
 impl From<crate::asset::AssetEncoding> for StableAssetEncoding {
     fn from(asset_encoding: crate::asset::AssetEncoding) -> Self {
         Self {
-            modified: timestamp_to_u64(asset_encoding.modified),
+            modified: asset_encoding.modified,
             content_chunks: asset_encoding.content_chunks,
             total_length: asset_encoding.total_length,
             certified: asset_encoding.certified,
@@ -104,7 +100,7 @@ impl From<crate::asset::AssetEncoding> for StableAssetEncoding {
 impl From<StableAssetEncoding> for crate::asset::AssetEncoding {
     fn from(stable_asset_encoding: StableAssetEncoding) -> Self {
         Self {
-            modified: Timestamp::from(stable_asset_encoding.modified),
+            modified: stable_asset_encoding.modified,
             content_chunks: stable_asset_encoding.content_chunks,
             total_length: stable_asset_encoding.total_length,
             certified: stable_asset_encoding.certified,
@@ -113,12 +109,4 @@ impl From<StableAssetEncoding> for crate::asset::AssetEncoding {
             response_hashes: stable_asset_encoding.response_hashes,
         }
     }
-}
-
-fn timestamp_to_u64(timestamp: Timestamp) -> u64 {
-    timestamp.0.to_u64().expect("timestamp overflow")
-}
-
-fn batch_id_to_u64(batch_id: BatchId) -> u64 {
-    batch_id.0.to_u64().expect("batch id overflow")
 }

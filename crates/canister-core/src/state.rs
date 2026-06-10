@@ -8,7 +8,7 @@ use crate::{
     asset::{
         on_asset_change, Asset, AssetDetails, AssetEncoding, AssetEncodingDetails, EncodedAsset,
     },
-    batch::{Batch, Chunk, ComputationStatus},
+    batch::{Chunk, ComputationStatus, SyncSession},
     certification::{AssetKey, CertifiedResponses},
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -21,7 +21,7 @@ use crate::{
     types::*,
     url::url_decode,
 };
-use candid::{CandidType, Deserialize, Int, Nat, Principal};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use ic_certification::{AsHashTree, Hash};
 use num_traits::ToPrimitive;
 use serde::Serialize;
@@ -43,8 +43,9 @@ pub struct State {
     pub(crate) chunks: HashMap<ChunkId, Chunk>,
     pub(crate) next_chunk_id: ChunkId,
 
-    pub(crate) batches: HashMap<BatchId, Batch>,
-    pub(crate) next_batch_id: BatchId,
+    /// The single in-progress sync, if any. At most one runs at a time.
+    pub(crate) sync_session: Option<SyncSession>,
+    pub(crate) next_session_id: SessionId,
 
     // Principals authorized to sync assets. Canister controllers are always
     // allowed regardless of membership; this set grants the same access to
@@ -126,7 +127,7 @@ impl State {
             return Err("asset not found".to_string());
         }
 
-        let now = Int::from(system_context.current_timestamp_ns);
+        let now = system_context.current_timestamp_ns;
 
         let mut content_chunks = vec![];
         for chunk_id in arg.chunk_ids.iter() {
@@ -151,7 +152,7 @@ impl State {
         arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
         sha256: [u8; 32],
-        now: Int,
+        now: u64,
         dependent_keys: Vec<AssetKey>,
     ) -> Result<(), String> {
         if let Some(provided_hash) = arg.sha256 {
@@ -290,7 +291,7 @@ impl State {
                             content_encoding: enc_name.clone(),
                             sha256: Some(ByteBuf::from(enc.sha256)),
                             length: Nat::from(enc.total_length),
-                            modified: enc.modified.clone(),
+                            modified: enc.modified,
                         })
                         .collect();
                     encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
@@ -579,10 +580,10 @@ impl State {
     }
 
     /// Rebuild the certified-tree entries for `redirect_rules`. Called whenever
-    /// the rule list changes (in `commit_batch`) or assets are restored from
-    /// stable memory (in `From<StableState>`). Caller must refresh
-    /// `certified_data` after this — `commit_batch` already does so via the
-    /// `certified_data_set(s.root_hash())` it runs after each batch.
+    /// the rule list changes (in `execute_operations`) or assets are restored
+    /// from stable memory (in `From<StableState>`). Caller must refresh
+    /// `certified_data` after this — `execute_operations` already does so via
+    /// the `certified_data_set(s.root_hash())` it runs after each sync call.
     ///
     /// Status-200 rules borrow each encoding's certificate expression and
     /// response hash from the target asset, so this also has to run after any
@@ -683,10 +684,7 @@ impl From<StableState> for State {
                 .into_iter()
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
-            next_batch_id: stable_state
-                .next_batch_id
-                .map(BatchId::from)
-                .unwrap_or_default(),
+            next_session_id: stable_state.next_session_id,
             last_state_update_timestamp_ns: stable_state.last_state_update_timestamp.unwrap_or(0),
             redirect_rules: stable_state.redirect_rules.unwrap_or_default(),
             ..Self::default()

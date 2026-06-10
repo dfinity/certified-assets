@@ -20,7 +20,7 @@ use crate::http::{
     CallbackFunc, HeaderField, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
 use crate::rc_bytes::RcBytes;
-use candid::{CandidType, Deserialize, Int, Nat};
+use candid::{CandidType, Deserialize, Nat};
 use ic_certification::Hash;
 use ic_representation_independent_hash::Value;
 use serde_bytes::ByteBuf;
@@ -49,7 +49,8 @@ pub fn encoding_certification_order<'a>(
 
 const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 
-pub(crate) type Timestamp = Int;
+/// Nanoseconds since the Unix epoch (`ic0.time()`); always non-negative.
+pub(crate) type Timestamp = u64;
 
 #[derive(Default, Clone, Debug)]
 pub struct AssetEncoding {

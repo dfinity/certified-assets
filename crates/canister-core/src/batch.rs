@@ -1,16 +1,15 @@
-//! Batch / chunk machinery for the assets canister.
+//! Sync / chunk machinery for the assets canister.
 //!
-//! Holds the data types for chunked uploads ([`Chunk`], [`Batch`]) and the
-//! incremental-computation harness used by `commit_batch` to spread expensive
-//! work across multiple canister calls ([`ComputationStatus`],
-//! [`CommitBatchProgress`]).
+//! Holds the data types for a sync and its chunked uploads ([`Chunk`],
+//! [`SyncSession`]) and the incremental-computation harness used by
+//! `execute_operations` to spread expensive work across multiple canister
+//! calls ([`ComputationStatus`], [`ExecuteOperationsProgress`]).
 //!
-//! The State methods that drive batches — `create_batch`, `create_chunks`,
-//! `commit_batch`, `delete_batch` — live here too, alongside the small
-//! helpers they rely on. State methods unrelated to batches stay in the
+//! The State methods that drive a sync — `start_sync`, `create_chunks`,
+//! `execute_operations`, `cancel_sync` — live here too, alongside the small
+//! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
 
-use crate::asset::Timestamp;
 use crate::certification::{AssetKey, HashTreePath};
 use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
@@ -18,25 +17,29 @@ use crate::redirect;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    BatchId, BatchOperation, ChunkId, CommitBatchArguments, CreateChunksArg, DeleteBatchArguments,
-    SetAssetContentArguments,
+    BatchOperation, CancelSyncArguments, ChunkId, CreateChunksArg, ExecuteOperationsArguments,
+    SessionId, SetAssetContentArguments, StartSyncResult,
 };
-use candid::{Int, Nat};
+use candid::Principal;
 use ic_representation_independent_hash::Value;
-use serde_bytes::ByteBuf;
 use sha2::Digest;
 
-/// The amount of time a batch is kept alive. Modifying the batch
-/// delays the expiry further.
-pub const BATCH_EXPIRY_NANOS: u64 = 300_000_000_000;
+/// How long a sync may sit idle (no calls carrying its session id) before a
+/// *different* caller is allowed to reclaim it. Comfortably shorter than any
+/// real deploy's inter-call gap; the owner can always reclaim their own sync
+/// immediately regardless of this.
+pub const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 
 pub struct Chunk {
-    pub batch_id: BatchId,
     pub content: RcBytes,
 }
 
-pub struct Batch {
-    pub expires_at: Timestamp,
+/// The single in-progress sync. The canister holds at most one at a time;
+/// `start_sync` rejects a second caller while this is present and non-stale.
+pub struct SyncSession {
+    pub id: SessionId,
+    pub owner: Principal,
+    pub last_activity_ns: u64,
 }
 
 /// Status of an incremental computation
@@ -52,22 +55,19 @@ pub enum ComputationStatus<D, P, E> {
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Default)]
-pub enum CommitBatchProgress {
-    /// Initial state when `commit_batch` is first called.
+pub enum ExecuteOperationsProgress {
+    /// Initial state when `execute_operations` is first called.
     ///
-    /// This phase:
-    /// - Computes and validates batch limits
-    /// - Transitions to `ProcessingOperations` with the first operation
+    /// This phase validates that the call belongs to the active sync (and
+    /// records activity), then transitions to `ProcessingOperations` with the
+    /// first operation.
     #[default]
     Starting,
-    /// Processing batch operations one at a time.
+    /// Processing operations one at a time.
     ///
     /// When a `SetAssetContent` operation is encountered, this transitions to
     /// `HashingChunks` to hash the asset content incrementally.
-    ProcessingOperations {
-        batch_id: BatchId,
-        operation_index: usize,
-    },
+    ProcessingOperations { operation_index: usize },
     /// Incrementally hashing asset content chunks, one chunk per call.
     ///
     /// This phase is entered when processing a `SetAssetContent` operation to avoid
@@ -77,7 +77,6 @@ pub enum CommitBatchProgress {
     /// After all chunks are hashed, the hash is finalized, the asset encoding is created,
     /// and processing continues with the next operation in `ProcessingOperations`.
     HashingChunks {
-        batch_id: BatchId,
         operation_index: usize,
         set_asset_content_arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
@@ -88,60 +87,82 @@ pub enum CommitBatchProgress {
 }
 
 impl State {
-    pub fn create_batch(&mut self, system_context: &SystemContext) -> BatchId {
+    /// Begins a sync, returning a fresh session id.
+    ///
+    /// At most one sync runs at a time. If a sync is already in progress:
+    /// - the **same owner** can always reclaim it immediately (retrying their
+    ///   own deploy shouldn't have to wait), and
+    /// - a **different** caller may reclaim it only once it has gone stale
+    ///   (`SYNC_IDLE_TIMEOUT_NANOS` since its last call); otherwise the call
+    ///   returns `Busy` so a teammate can't barge into an active deploy.
+    ///
+    /// Reclaiming clears the previous session's staged chunks. The session id
+    /// counter is monotonic and never reused.
+    pub fn start_sync(
+        &mut self,
+        owner: Principal,
+        system_context: &SystemContext,
+    ) -> StartSyncResult {
         let now = system_context.current_timestamp_ns;
-        self.batches.retain(|_, b| b.expires_at > now);
-        self.chunks
-            .retain(|_, c| self.batches.contains_key(&c.batch_id));
 
-        let batch_id = self.next_batch_id.clone();
-        self.next_batch_id += 1_u8;
+        if let Some(active) = &self.sync_session {
+            let idle = now.saturating_sub(active.last_activity_ns);
+            let reclaimable = active.owner == owner || idle >= SYNC_IDLE_TIMEOUT_NANOS;
+            if !reclaimable {
+                return StartSyncResult::Busy {
+                    owner: active.owner,
+                    idle_for_secs: idle / 1_000_000_000,
+                };
+            }
+        }
 
-        self.batches.insert(
-            batch_id.clone(),
-            Batch {
-                expires_at: Int::from(now + BATCH_EXPIRY_NANOS),
-            },
-        );
+        // No active sync, or we're taking over: drop any staged chunks left by
+        // the previous session before starting fresh.
+        self.chunks.clear();
 
-        batch_id
+        let session_id = self.next_session_id;
+        self.next_session_id += 1;
+        self.sync_session = Some(SyncSession {
+            id: session_id,
+            owner,
+            last_activity_ns: now,
+        });
+
+        StartSyncResult::Started { session_id }
+    }
+
+    /// Marks the active session as touched (resets its idle clock). Returns an
+    /// error if `session_id` does not match the active session — the sync was
+    /// superseded or never started.
+    fn touch_session(&mut self, session_id: SessionId, now: u64) -> Result<(), String> {
+        match &mut self.sync_session {
+            Some(s) if s.id == session_id => {
+                s.last_activity_ns = now;
+                Ok(())
+            }
+            _ => Err("no active sync for this session id".to_string()),
+        }
     }
 
     pub fn create_chunks(
         &mut self,
         CreateChunksArg {
-            batch_id,
+            session_id,
             content: chunks,
         }: CreateChunksArg,
         system_context: &SystemContext,
     ) -> Result<Vec<ChunkId>, String> {
-        self.create_chunks_helper(batch_id, chunks, system_context)
-    }
-
-    /// Post-condition: `chunks.len() == output_chunk_ids.len()`
-    fn create_chunks_helper(
-        &mut self,
-        batch_id: Nat,
-        chunks: Vec<ByteBuf>,
-        system_context: &SystemContext,
-    ) -> Result<Vec<ChunkId>, String> {
-        let batch = self
-            .batches
-            .get_mut(&batch_id)
-            .ok_or_else(|| "batch not found".to_string())?;
-
-        batch.expires_at = Int::from(system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS);
+        self.touch_session(session_id, system_context.current_timestamp_ns)?;
 
         let chunks_len = chunks.len();
 
         let mut chunk_ids = Vec::with_capacity(chunks.len());
         for chunk in chunks {
-            let chunk_id = self.next_chunk_id.clone();
-            self.next_chunk_id += 1_u8;
+            let chunk_id = self.next_chunk_id;
+            self.next_chunk_id += 1;
             self.chunks.insert(
-                chunk_id.clone(),
+                chunk_id,
                 Chunk {
-                    batch_id: batch_id.clone(),
                     content: RcBytes::from(chunk),
                 },
             );
@@ -152,28 +173,36 @@ impl State {
         Ok(chunk_ids)
     }
 
-    pub fn commit_batch(
+    pub fn execute_operations(
         &mut self,
-        arg: &CommitBatchArguments,
-        progress: CommitBatchProgress,
+        arg: &ExecuteOperationsArguments,
+        progress: ExecuteOperationsProgress,
         system_context: &SystemContext,
-    ) -> ComputationStatus<(), CommitBatchProgress, String> {
+    ) -> ComputationStatus<(), ExecuteOperationsProgress, String> {
         match progress {
-            CommitBatchProgress::Starting => {
-                let initial_progress = CommitBatchProgress::ProcessingOperations {
-                    batch_id: arg.batch_id.clone(),
-                    operation_index: 0,
-                };
+            ExecuteOperationsProgress::Starting => {
+                // Reject calls that don't belong to the active sync, and reset
+                // its idle clock so a concurrent reclaim can't steal it
+                // mid-flight.
+                if let Err(e) =
+                    self.touch_session(arg.session_id, system_context.current_timestamp_ns)
+                {
+                    return ComputationStatus::Error(e);
+                }
+                let initial_progress =
+                    ExecuteOperationsProgress::ProcessingOperations { operation_index: 0 };
                 ComputationStatus::InProgress(initial_progress)
             }
-            CommitBatchProgress::ProcessingOperations {
-                batch_id,
-                operation_index,
-            } => {
+            ExecuteOperationsProgress::ProcessingOperations { operation_index } => {
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
-                    // All operations processed
-                    self.batches.remove(&batch_id);
+                    // All operations in this call processed. Finalize the sync
+                    // only when the caller signals this is the last call;
+                    // otherwise keep the session open for further operations.
+                    if arg.is_final {
+                        self.sync_session = None;
+                        self.chunks.clear();
+                    }
                     self.certify_404_if_required();
                     // Asset ops in this batch may have clobbered tree entries
                     // that redirect rules own (any rule whose source path
@@ -217,8 +246,7 @@ impl State {
                         }
 
                         // Start hashing phase with an empty hasher
-                        let progress = CommitBatchProgress::HashingChunks {
-                            batch_id,
+                        let progress = ExecuteOperationsProgress::HashingChunks {
                             operation_index,
                             set_asset_content_arg: arg.clone(),
                             content_chunks,
@@ -256,14 +284,12 @@ impl State {
                     return ComputationStatus::Error(e);
                 }
 
-                let progress = CommitBatchProgress::ProcessingOperations {
-                    batch_id,
+                let progress = ExecuteOperationsProgress::ProcessingOperations {
                     operation_index: operation_index + 1,
                 };
                 ComputationStatus::InProgress(progress)
             }
-            CommitBatchProgress::HashingChunks {
-                batch_id,
+            ExecuteOperationsProgress::HashingChunks {
                 operation_index,
                 set_asset_content_arg,
                 content_chunks,
@@ -274,7 +300,7 @@ impl State {
                 if chunk_index >= content_chunks.len() {
                     // All chunks hashed, finalize and complete set_asset_content
                     let sha256: [u8; 32] = hasher.finalize().into();
-                    let now = Int::from(system_context.current_timestamp_ns);
+                    let now = system_context.current_timestamp_ns;
 
                     if let Err(e) = self.complete_set_asset_content(
                         set_asset_content_arg.clone(),
@@ -287,16 +313,14 @@ impl State {
                     }
 
                     // Continue with next operation
-                    let progress = CommitBatchProgress::ProcessingOperations {
-                        batch_id,
+                    let progress = ExecuteOperationsProgress::ProcessingOperations {
                         operation_index: operation_index + 1,
                     };
                     ComputationStatus::InProgress(progress)
                 } else {
                     // Hash one chunk per iteration
                     hasher.update(&content_chunks[chunk_index]);
-                    let progress = CommitBatchProgress::HashingChunks {
-                        batch_id,
+                    let progress = ExecuteOperationsProgress::HashingChunks {
                         operation_index,
                         set_asset_content_arg,
                         content_chunks,
@@ -310,12 +334,23 @@ impl State {
         }
     }
 
-    pub fn delete_batch(&mut self, arg: DeleteBatchArguments) -> Result<(), String> {
-        if self.batches.remove(&arg.batch_id).is_none() {
-            return Err("batch not found".to_string());
+    /// Cancels the active sync, if it matches `session_id` and is owned by
+    /// `caller`. Lets a client cleanly release the sync lock on abort instead
+    /// of waiting for it to go stale. A caller cannot cancel someone else's
+    /// sync (a stale one is reclaimed via `start_sync` instead).
+    pub fn cancel_sync(
+        &mut self,
+        arg: CancelSyncArguments,
+        caller: Principal,
+    ) -> Result<(), String> {
+        match &self.sync_session {
+            Some(s) if s.id == arg.session_id && s.owner == caller => {
+                self.sync_session = None;
+                self.chunks.clear();
+                Ok(())
+            }
+            _ => Err("no active sync for this session id".to_string()),
         }
-        self.chunks.retain(|_, c| c.batch_id != arg.batch_id);
-        Ok(())
     }
 
     fn certify_404_if_required(&mut self) {

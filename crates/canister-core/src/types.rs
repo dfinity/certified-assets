@@ -3,11 +3,14 @@
 use crate::certification::AssetKey;
 use crate::rc_bytes::RcBytes;
 use crate::redirect::RedirectRule;
-use candid::{CandidType, Deserialize, Nat};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use serde_bytes::ByteBuf;
 
-pub type BatchId = Nat;
-pub type ChunkId = Nat;
+/// Identifies an in-progress sync. Sequential and monotonic across the
+/// canister's whole lifetime (persisted across upgrades), so a session id is
+/// never reused — calls carrying a superseded id are cleanly rejected.
+pub type SessionId = u64;
+pub type ChunkId = u64;
 
 // IDL Types
 
@@ -61,14 +64,18 @@ pub struct SetRedirectRulesArguments {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CommitBatchArguments {
-    pub batch_id: BatchId,
+pub struct ExecuteOperationsArguments {
+    pub session_id: SessionId,
     pub operations: Vec<BatchOperation>,
+    /// Set on the last call of a sync. When all operations have been applied,
+    /// the canister finalizes the sync and returns to the "no ongoing sync"
+    /// state. Non-final calls keep the session open for further operations.
+    pub is_final: bool,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct DeleteBatchArguments {
-    pub batch_id: BatchId,
+pub struct CancelSyncArguments {
+    pub session_id: SessionId,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -90,14 +97,22 @@ pub struct GetChunkResponse {
     pub content: RcBytes,
 }
 
+/// Result of `start_sync`. `Busy` is a normal, expected outcome — not an error
+/// — so the caller can surface who holds the lock and decide whether to wait.
 #[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CreateBatchResponse {
-    pub batch_id: BatchId,
+pub enum StartSyncResult {
+    Started {
+        session_id: SessionId,
+    },
+    Busy {
+        owner: Principal,
+        idle_for_secs: u64,
+    },
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct CreateChunksArg {
-    pub batch_id: BatchId,
+    pub session_id: SessionId,
     pub content: Vec<ByteBuf>,
 }
 

@@ -4,16 +4,16 @@
 //! - synchronous (drives the host's sync `canister-call` import)
 //! - no proposal mode
 
-use candid::{Nat, Principal};
+use candid::Principal;
 use mime::Mime;
 use std::collections::HashMap;
 
 use crate::canister::{
-    api_version, authorize_via_proxy, can_sync, commit_batch, create_batch, create_chunks,
-    get_asset_properties, get_redirect_rules, list_assets, AssetDetails, AssetProperties,
-    BatchOperationKind, CanisterCall, CommitBatchArguments, CreateAssetArguments,
-    DeleteAssetArguments, RedirectRule, SetAssetContentArguments, SetAssetPropertiesArguments,
-    SetRedirectRulesArguments, UnsetAssetContentArguments,
+    api_version, authorize_via_proxy, can_sync, create_chunks, execute_operations,
+    get_asset_properties, get_redirect_rules, list_assets, start_sync, AssetDetails,
+    AssetProperties, BatchOperationKind, CanisterCall, CreateAssetArguments, DeleteAssetArguments,
+    ExecuteOperationsArguments, RedirectRule, SetAssetContentArguments,
+    SetAssetPropertiesArguments, SetRedirectRulesArguments, UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
 use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
@@ -26,7 +26,7 @@ use std::path::Path;
 const MAX_CHUNK_SIZE: usize = 1_900_000;
 
 struct ProjectAssetEncoding {
-    chunk_ids: Vec<Nat>,
+    chunk_ids: Vec<u64>,
     sha256: Vec<u8>,
     already_in_place: bool,
     // Encoded bytes held until upload; empty when already_in_place or after upload.
@@ -205,11 +205,11 @@ pub fn sync<C: CanisterCall>(
         ));
     }
 
-    // Phase 2: create batch and upload chunks for encodings not already in place.
-    let batch_id = create_batch(canister)?;
-    println!("created batch {batch_id}");
+    // Phase 2: start a sync and upload chunks for encodings not already in place.
+    let session_id = start_sync(canister)?;
+    println!("started sync session {session_id}");
 
-    pack_and_upload_chunks(canister, &batch_id, &mut project_assets)?;
+    pack_and_upload_chunks(canister, session_id, &mut project_assets)?;
 
     let operations = build_operations(
         &project_assets,
@@ -219,9 +219,9 @@ pub fn sync<C: CanisterCall>(
         &canister_rules,
         &project_header_rules,
     );
-    println!("committing {} operation(s)", operations.len());
+    println!("executing {} operation(s)", operations.len());
 
-    commit_in_stages(canister, batch_id, operations)?;
+    execute_in_stages(canister, session_id, operations)?;
 
     Ok(format!(
         "synced {} asset(s) to canister",
@@ -338,7 +338,7 @@ fn encoding_suffix(encoding: &str) -> String {
 /// `enc.chunk_ids[chunk_index]`.
 fn pack_and_upload_chunks<C: CanisterCall>(
     canister: &C,
-    batch_id: &Nat,
+    session_id: u64,
     project_assets: &mut HashMap<String, ProjectAsset>,
 ) -> Result<(), String> {
     struct PendingChunk {
@@ -363,7 +363,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
             } else {
                 data.chunks(MAX_CHUNK_SIZE).map(|c| c.to_vec()).collect()
             };
-            enc.chunk_ids = vec![Nat::from(0u32); chunks.len()];
+            enc.chunk_ids = vec![0u64; chunks.len()];
             for (i, chunk) in chunks.into_iter().enumerate() {
                 pending.push(PendingChunk {
                     asset_key: key.clone(),
@@ -403,7 +403,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
         pending = leftovers;
 
         let chunk_refs: Vec<&[u8]> = batch.iter().map(|p| p.data.as_slice()).collect();
-        let ids = create_chunks(canister, batch_id, &chunk_refs)?;
+        let ids = create_chunks(canister, session_id, &chunk_refs)?;
         if ids.len() != batch.len() {
             return Err(format!(
                 "create_chunks returned {} ids for {} chunks",
@@ -430,81 +430,74 @@ fn pack_and_upload_chunks<C: CanisterCall>(
     Ok(())
 }
 
-/// Commits `operations` to the canister, splitting them across multiple
-/// `commit_batch` ingress calls when a single payload would exceed the IC's
-/// 2 MiB per-message ingress limit on application subnets
+/// Applies `operations` to the canister, splitting them across multiple
+/// `execute_operations` ingress calls when a single payload would exceed the
+/// IC's 2 MiB per-message ingress limit on application subnets
 /// (`MAX_INGRESS_BYTES_PER_MESSAGE_APP_SUBNET` in `dfinity/ic`). The local
 /// replica's HTTP boundary accepts up to 4 MiB, but mainnet app subnets cap
 /// the inner ingress message at 2 MiB — so we target the tighter limit.
 ///
-/// Intermediate calls use `batch_id = 0` as a placeholder; the canister's
-/// `commit_batch` does not validate that `batch_id` refers to a live batch
-/// — it just consumes `chunk_ids` referenced by `SetAssetContent` ops and
-/// removes `batch_id` from its batch table at the very end. The chunks
-/// uploaded under the real `batch_id` survive between calls because the
-/// canister only GCs orphaned chunks at `create_batch` time, never inside
-/// `commit_batch`. The trailing call uses the real `batch_id` with empty
-/// operations purely to release that batch entry.
+/// Every call carries the real `session_id`; the canister rejects any that
+/// don't match the active sync. The last group is flagged `is_final`, which
+/// tells the canister to finalize the sync (release the lock and drop staged
+/// chunks) once its operations are applied. Earlier groups leave the sync
+/// open. Staged chunks survive between calls because the canister only drops
+/// them on sync start/finish, not between `execute_operations` calls.
 ///
-/// Trade-off: splitting forfeits cross-batch atomicity. A failure
-/// mid-deploy leaves the canister with the operations from previously
-/// successful calls applied; the next sync run diffs against the canister
-/// and resumes from there.
-fn commit_in_stages<C: CanisterCall>(
+/// Trade-off: splitting forfeits cross-call atomicity. A failure mid-deploy
+/// leaves the canister with the operations from previously successful calls
+/// applied; the next sync run diffs against the canister and resumes from
+/// there.
+fn execute_in_stages<C: CanisterCall>(
     canister: &C,
-    batch_id: Nat,
+    session_id: u64,
     operations: Vec<BatchOperationKind>,
 ) -> Result<(), String> {
-    let groups = create_commit_batches(operations);
-    if groups.len() <= 1 {
-        // Everything fits in one ingress message: skip the placeholder
-        // dance and commit directly under the real `batch_id`, which also
-        // releases the batch entry in the same call.
-        let ops = groups.into_iter().next().unwrap_or_default();
-        return commit_batch(
+    let groups = split_operation_groups(operations);
+    // The caller only reaches this with a non-empty diff, so there is always at
+    // least one group. Guard anyway: we hold a session and must release it.
+    if groups.is_empty() {
+        return execute_operations(
             canister,
-            CommitBatchArguments {
-                batch_id,
-                operations: ops,
+            ExecuteOperationsArguments {
+                session_id,
+                operations: vec![],
+                is_final: true,
             },
         );
     }
     let total = groups.len();
     for (i, ops) in groups.into_iter().enumerate() {
-        println!(
-            "committing group {}/{} ({} operation(s))",
-            i + 1,
-            total,
-            ops.len()
-        );
-        commit_batch(
+        let is_final = i + 1 == total;
+        if total > 1 {
+            println!(
+                "executing group {}/{} ({} operation(s))",
+                i + 1,
+                total,
+                ops.len()
+            );
+        }
+        execute_operations(
             canister,
-            CommitBatchArguments {
-                batch_id: Nat::from(0u32),
+            ExecuteOperationsArguments {
+                session_id,
                 operations: ops,
+                is_final,
             },
         )?;
     }
-    // Empty-ops commit on the real batch_id: the canister's
-    // "all operations processed" branch removes the batch entry.
-    commit_batch(
-        canister,
-        CommitBatchArguments {
-            batch_id,
-            operations: vec![],
-        },
-    )
+    Ok(())
 }
 
 /// Splits `operations` into groups, each small enough that a single
-/// `commit_batch` ingress call stays under the IC's 2 MiB per-message
+/// `execute_operations` ingress call stays under the IC's 2 MiB per-message
 /// limit on application subnets. Greedy in declaration order: walks
 /// operations once, starting a new group whenever the running totals
 /// would exceed either budget.
 ///
 /// Budgets per group:
 /// - **500 operations** — bounds the certified-tree work each
-///   `commit_batch` does and limits the blast radius of a mid-deploy
+///   `execute_operations` does and limits the blast radius of a mid-deploy
 ///   failure.
 /// - **1.5 MiB of inlined header bytes** — leaves ~500 KiB of headroom
 ///   under the 2 MiB ingress cap for fixed per-op overhead (keys,
@@ -516,7 +509,7 @@ fn commit_in_stages<C: CanisterCall>(
 ///
 /// An operation whose own header size exceeds the budget gets a group
 /// to itself — better to ship it alone than to drop it on the floor.
-fn create_commit_batches(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchOperationKind>> {
+fn split_operation_groups(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchOperationKind>> {
     const MAX_OPERATIONS_PER_GROUP: usize = 500;
     const MAX_HEADER_BYTES_PER_GROUP: usize = 1_500_000;
 
@@ -782,7 +775,7 @@ mod tests {
     use crate::canister::{
         AssetDetails, AssetEncodingDetails, BatchOperationKind, CallType, CanisterCall,
     };
-    use candid::{CandidType, Nat, Principal};
+    use candid::{CandidType, Principal};
     use serde::de::DeserializeOwned;
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, VecDeque};
@@ -791,7 +784,7 @@ mod tests {
     // Mirrors the private CreateChunksResponse — same field name produces the same Candid encoding.
     #[derive(CandidType)]
     struct MockChunksResponse {
-        chunk_ids: Vec<Nat>,
+        chunk_ids: Vec<u64>,
     }
 
     // Counts each `create_chunks` call, returns one fresh id per chunk in the
@@ -816,7 +809,7 @@ mod tests {
     #[derive(CandidType, serde::Deserialize)]
     struct ChunksReqMirror {
         #[allow(dead_code)]
-        batch_id: Nat,
+        session_id: u64,
         content: Vec<serde_bytes::ByteBuf>,
     }
 
@@ -833,7 +826,7 @@ mod tests {
             self.batches.borrow_mut().push(n);
             let start = self.next_id.get();
             self.next_id.set(start + n as u64);
-            let ids: Vec<Nat> = (0..n as u64).map(|i| Nat::from(start + i)).collect();
+            let ids: Vec<u64> = (0..n as u64).map(|i| start + i).collect();
             let reply = candid::encode_one(MockChunksResponse { chunk_ids: ids })
                 .map_err(|e| e.to_string())?;
             candid::decode_one(&reply).map_err(|e| e.to_string())
@@ -873,7 +866,7 @@ mod tests {
             vec![0u8; MAX_CHUNK_SIZE],
         )]);
         let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         assert_eq!(*mock.batches.borrow(), vec![1]);
         assert_eq!(assets["/f"].encodings["identity"].chunk_ids.len(), 1);
     }
@@ -889,7 +882,7 @@ mod tests {
             vec![0u8; MAX_CHUNK_SIZE * 3 + 1],
         )]);
         let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         assert_eq!(*mock.batches.borrow(), vec![1, 1, 1, 1]);
         assert_eq!(assets["/big"].encodings["identity"].chunk_ids.len(), 4);
     }
@@ -902,7 +895,7 @@ mod tests {
             .map(|i| mk_pending_asset(&format!("/f{i}"), "identity", vec![0u8; 1024]))
             .collect();
         let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         assert_eq!(*mock.batches.borrow(), vec![100]);
     }
 
@@ -925,7 +918,7 @@ mod tests {
             )]);
         }
         let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         // Two calls total: one for the big chunk, one for the ten tinies.
         let batches = mock.batches.borrow().clone();
         assert_eq!(batches.len(), 2);
@@ -943,16 +936,13 @@ mod tests {
             mk_pending_asset("/b", "identity", vec![0u8; 500]),                  // 1 chunk
         ]);
         let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         let a_ids = &assets["/a"].encodings["identity"].chunk_ids;
         let b_ids = &assets["/b"].encodings["identity"].chunk_ids;
         assert_eq!(a_ids.len(), 2);
         assert_eq!(b_ids.len(), 1);
-        let mut all: Vec<&Nat> = a_ids.iter().chain(b_ids.iter()).collect();
-        all.sort_by(|x, y| {
-            // Nat doesn't impl Ord; compare textually.
-            x.to_string().cmp(&y.to_string())
-        });
+        let mut all: Vec<u64> = a_ids.iter().chain(b_ids.iter()).copied().collect();
+        all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), 3, "ids must be distinct");
     }
@@ -963,7 +953,7 @@ mod tests {
         // has something to reference.
         let mut assets = HashMap::from([mk_pending_asset("/empty", "identity", vec![])]);
         let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         assert_eq!(assets["/empty"].encodings["identity"].chunk_ids.len(), 1);
     }
 
@@ -975,11 +965,11 @@ mod tests {
         pa.encodings.get_mut("identity").unwrap().data = Vec::new();
         let mut assets = HashMap::from([(k, pa)]);
         let mock = ChunkBatchRecorder::new();
-        pack_and_upload_chunks(&mock, &Nat::from(1u32), &mut assets).unwrap();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         assert!(mock.batches.borrow().is_empty());
     }
 
-    // ── commit_batch splitting ──────────────────────────────────────────────
+    // ── execute_operations splitting ──────────────────────────────────────────────
 
     fn create_asset_with_headers(key: &str, hdr_bytes: usize) -> BatchOperationKind {
         // One header whose name+value bytes sum to `hdr_bytes`.
@@ -996,7 +986,7 @@ mod tests {
         BatchOperationKind::SetAssetContent(SetAssetContentArguments {
             key: key.to_string(),
             content_encoding: "identity".to_string(),
-            chunk_ids: vec![Nat::from(0u32)],
+            chunk_ids: vec![0u64],
             last_chunk: None,
             sha256: Some(vec![0u8; 32]),
         })
@@ -1056,29 +1046,29 @@ mod tests {
     }
 
     #[test]
-    fn create_commit_batches_empty_input_returns_empty() {
-        assert!(create_commit_batches(vec![]).is_empty());
+    fn split_operation_groups_empty_input_returns_empty() {
+        assert!(split_operation_groups(vec![]).is_empty());
     }
 
     #[test]
-    fn create_commit_batches_small_input_stays_single_group() {
+    fn split_operation_groups_small_input_stays_single_group() {
         // 100 small ops with tiny headers → fits both budgets in one group.
         let ops: Vec<BatchOperationKind> = (0..100)
             .map(|i| create_asset_with_headers(&format!("/f{i}"), 10))
             .collect();
-        let groups = create_commit_batches(ops);
+        let groups = split_operation_groups(ops);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].len(), 100);
     }
 
     #[test]
-    fn create_commit_batches_splits_at_500_ops() {
+    fn split_operation_groups_splits_at_500_ops() {
         // 1200 headerless ops should split into 500/500/200 — three groups
         // driven purely by the operation-count cap.
         let ops: Vec<BatchOperationKind> = (0..1200)
             .map(|i| set_content_op(&format!("/f{i}")))
             .collect();
-        let groups = create_commit_batches(ops);
+        let groups = split_operation_groups(ops);
         assert_eq!(
             groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
             vec![500, 500, 200]
@@ -1086,13 +1076,13 @@ mod tests {
     }
 
     #[test]
-    fn create_commit_batches_splits_at_header_budget() {
+    fn split_operation_groups_splits_at_header_budget() {
         // 4 ops × 500 KB headers = 2 MB > 1.5 MB cap. Split happens before
         // the 500-op cap could kick in.
         let ops: Vec<BatchOperationKind> = (0..4)
             .map(|i| create_asset_with_headers(&format!("/f{i}"), 500_000))
             .collect();
-        let groups = create_commit_batches(ops);
+        let groups = split_operation_groups(ops);
         // 3 ops × 500 KB = 1.5 MB fits exactly; the 4th would push over → split.
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].len(), 3);
@@ -1100,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn create_commit_batches_oversized_op_gets_own_group() {
+    fn split_operation_groups_oversized_op_gets_own_group() {
         // One op alone exceeds the header budget. The greedy loop must still
         // emit it (in its own group) rather than skip it.
         let ops = vec![
@@ -1108,7 +1098,7 @@ mod tests {
             create_asset_with_headers("/huge", 2_000_000),
             create_asset_with_headers("/small2", 10),
         ];
-        let groups = create_commit_batches(ops);
+        let groups = split_operation_groups(ops);
         // First group flushes when /huge would overflow it → [/small], then
         // /huge alone (oversized but emitted), then /small2 alone (since /huge
         // already pushed header_bytes way over budget).
@@ -1118,12 +1108,12 @@ mod tests {
         assert_eq!(groups[2].len(), 1);
     }
 
-    // Mock that records every `commit_batch` call's `(batch_id, op_count)`.
-    // Used to verify that `commit_in_stages` issues the right shape of
-    // call sequence (placeholder batch_id for splits, real batch_id for
-    // cleanup).
+    // Mock that records every `execute_operations` call's
+    // `(session_id, op_count, is_final)`. Used to verify that
+    // `execute_in_stages` issues the right call sequence: every call carries
+    // the real session id, and only the last is flagged final.
     struct CommitRecorder {
-        calls: RefCell<Vec<(Nat, usize)>>,
+        calls: RefCell<Vec<(u64, usize, bool)>>,
     }
 
     impl CommitRecorder {
@@ -1136,8 +1126,9 @@ mod tests {
 
     #[derive(CandidType, serde::Deserialize)]
     struct CommitArgsMirror {
-        batch_id: Nat,
+        session_id: u64,
         operations: Vec<candid::Reserved>,
+        is_final: bool,
     }
 
     impl CanisterCall for CommitRecorder {
@@ -1146,49 +1137,43 @@ mod tests {
             A: CandidType,
             R: CandidType + DeserializeOwned,
         {
-            assert_eq!(method, "commit_batch");
+            assert_eq!(method, "execute_operations");
             let bytes = candid::encode_one(&arg).map_err(|e| e.to_string())?;
             let req: CommitArgsMirror = candid::decode_one(&bytes).map_err(|e| e.to_string())?;
             self.calls
                 .borrow_mut()
-                .push((req.batch_id, req.operations.len()));
+                .push((req.session_id, req.operations.len(), req.is_final));
             let reply = candid::encode_one(()).map_err(|e| e.to_string())?;
             candid::decode_one(&reply).map_err(|e| e.to_string())
         }
     }
 
     #[test]
-    fn commit_in_stages_single_group_uses_real_batch_id() {
-        // Small enough to fit in one group → one commit_batch call carrying
-        // the real batch_id, no placeholder dance.
+    fn execute_in_stages_single_group_is_final() {
+        // Small enough to fit in one group → one execute_operations call
+        // carrying the real session id and flagged final.
         let ops: Vec<BatchOperationKind> =
             (0..10).map(|i| set_content_op(&format!("/f{i}"))).collect();
         let mock = CommitRecorder::new();
-        commit_in_stages(&mock, Nat::from(42u32), ops).unwrap();
+        execute_in_stages(&mock, 42, ops).unwrap();
         let calls = mock.calls.borrow();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0], (Nat::from(42u32), 10));
+        assert_eq!(calls[0], (42, 10, true));
     }
 
     #[test]
-    fn commit_in_stages_multi_group_uses_placeholder_then_real_cleanup() {
-        // 1200 ops → three 500/500/200 splits using placeholder batch_id 0,
-        // then a final empty-ops call on the real batch_id to release the
-        // canister-side batch entry.
+    fn execute_in_stages_multi_group_flags_only_last_final() {
+        // 1200 ops → three 500/500/200 groups, all carrying the real session
+        // id; only the last is flagged final (which finalizes the sync).
         let ops: Vec<BatchOperationKind> = (0..1200)
             .map(|i| set_content_op(&format!("/f{i}")))
             .collect();
         let mock = CommitRecorder::new();
-        commit_in_stages(&mock, Nat::from(42u32), ops).unwrap();
+        execute_in_stages(&mock, 42, ops).unwrap();
         let calls = mock.calls.borrow().clone();
         assert_eq!(
             calls,
-            vec![
-                (Nat::from(0u32), 500),
-                (Nat::from(0u32), 500),
-                (Nat::from(0u32), 200),
-                (Nat::from(42u32), 0),
-            ]
+            vec![(42, 500, false), (42, 500, false), (42, 200, true)]
         );
     }
 
@@ -1203,7 +1188,7 @@ mod tests {
             let chunk_ids = if *already_in_place {
                 vec![]
             } else {
-                vec![Nat::from(1u32)]
+                vec![1u64]
             };
             enc_map.insert(
                 name.to_string(),
@@ -1528,7 +1513,7 @@ mod tests {
     fn sync_short_circuits_when_redirects_file_only_matches_canister() {
         // Drive sync() end-to-end with a _redirects file that matches what
         // the canister already has. The "nothing to commit" short-circuit
-        // must trigger, with no create_batch / commit_batch calls.
+        // must trigger, with no start_sync / execute_operations calls.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
 
@@ -1551,16 +1536,23 @@ mod tests {
             &Principal::anonymous().to_text(),
             None,
         );
-        // No create_batch / commit_batch programmed — if sync reached them
+        // No start_sync / execute_operations programmed — if sync reached them
         // SyncMock would panic with "no programmed response".
         assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
-    // Mirrors the private `CreateBatchResponse` in canister.rs — same field
-    // name gives the same Candid encoding, so the test mock can decode it.
+    // Mirrors the private `StartSyncResult` in canister.rs — same variant and
+    // field names give the same Candid encoding, so the test mock can decode it.
     #[derive(CandidType)]
-    struct CreateBatchOk {
-        batch_id: Nat,
+    enum StartSyncOk {
+        Started {
+            session_id: u64,
+        },
+        #[allow(dead_code)]
+        Busy {
+            owner: Principal,
+            idle_for_secs: u64,
+        },
     }
 
     #[test]
@@ -1576,13 +1568,8 @@ mod tests {
         mock.push_ok("can_sync", true);
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
-        mock.push_ok(
-            "create_batch",
-            CreateBatchOk {
-                batch_id: Nat::from(1u32),
-            },
-        );
-        mock.push_ok("commit_batch", ());
+        mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        mock.push_ok("execute_operations", ());
 
         let result = sync(
             &mock,
@@ -2259,7 +2246,7 @@ mod tests {
             &Principal::anonymous().to_text(),
             None,
         );
-        // No create_batch / commit_batch programmed — would panic if reached.
+        // No start_sync / execute_operations programmed — would panic if reached.
         assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
@@ -2280,19 +2267,14 @@ mod tests {
         mock.push_ok("can_sync", true);
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
-        mock.push_ok(
-            "create_batch",
-            CreateBatchOk {
-                batch_id: Nat::from(1u32),
-            },
-        );
+        mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
         mock.push_ok(
             "create_chunks",
             MockChunksResponse {
-                chunk_ids: vec![Nat::from(0u32)],
+                chunk_ids: vec![0u64],
             },
         );
-        mock.push_ok("commit_batch", ());
+        mock.push_ok("execute_operations", ());
 
         let result = sync(
             &mock,
@@ -2367,7 +2349,7 @@ mod tests {
         // The canister already stores the rules synthesis would produce.
         // No SetRedirectRules op should be emitted, and with the asset
         // already up to date the sync should short-circuit before
-        // create_batch.
+        // start_sync.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
@@ -2400,26 +2382,26 @@ mod tests {
             &Principal::anonymous().to_text(),
             None,
         );
-        // No create_batch / commit_batch programmed — would panic if reached.
+        // No start_sync / execute_operations programmed — would panic if reached.
         assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
     // Direct mode: identity passes the early authorization check, but a later
-    // create_batch failure (e.g. the authorized set changed under us) must
+    // start_sync failure (e.g. the authorized set changed under us) must
     // still propagate.
     #[test]
-    fn sync_propagates_error_from_create_batch() {
+    fn sync_propagates_error_from_start_sync() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
         mock.push_ok("can_sync", true);
-        // Empty canister → build_operations will produce work → create_batch is called.
+        // Empty canister → build_operations will produce work → start_sync is called.
         mock.push_ok("list", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_err(
-            "create_batch",
+            "start_sync",
             "Caller is not authorized to sync assets and is not a controller.",
         );
 
@@ -2433,7 +2415,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(
             err.contains("not authorized"),
-            "expected create_batch error to propagate, got: {err}"
+            "expected start_sync error to propagate, got: {err}"
         );
     }
 
