@@ -7,7 +7,7 @@ use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
     BatchOperationKind, CancelSyncArguments, CreateAssetArguments, DeleteAssetArguments,
-    ExecuteOperationsArguments, ListRequest, SessionId, SetAssetContentArguments,
+    ExecuteOperationsArguments, ListAssetsRequest, SessionId, SetAssetContentArguments,
     SetAssetPropertiesArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
@@ -976,7 +976,7 @@ fn supports_getting_and_setting_asset_properties() {
     // through a dedicated per-asset query.
     let headers_of = |state: &State, key: &str| {
         state
-            .list_assets(ListRequest::default())
+            .list_assets(ListAssetsRequest::default())
             .into_iter()
             .find(|d| d.key == key)
             .expect("asset should exist")
@@ -1492,11 +1492,11 @@ mod list_assets {
         create_assets(&mut state, &system_context, assets);
 
         // List with None should start from beginning
-        let list = state.list_assets(ListRequest::default());
+        let list = state.list_assets(ListAssetsRequest::default());
         assert_eq!(list.len(), 10);
 
         // List with Some(0) should be the same
-        let list_from_zero = state.list_assets(ListRequest {
+        let list_from_zero = state.list_assets(ListAssetsRequest {
             start: Some(Nat::from(0u8)),
             length: None,
         });
@@ -1526,11 +1526,11 @@ mod list_assets {
         create_assets(&mut state, &system_context, assets);
 
         // Get first page
-        let first_page = state.list_assets(ListRequest::default());
+        let first_page = state.list_assets(ListAssetsRequest::default());
         assert_eq!(first_page.len(), 20);
 
         // Get second page starting at index 10
-        let second_page = state.list_assets(ListRequest {
+        let second_page = state.list_assets(ListAssetsRequest {
             start: Some(Nat::from(10u8)),
             length: None,
         });
@@ -1577,18 +1577,18 @@ mod list_assets {
         create_assets(&mut state, &system_context, assets);
 
         // First page should have exactly 100 assets
-        let first_page = state.list_assets(ListRequest::default());
+        let first_page = state.list_assets(ListAssetsRequest::default());
         assert_eq!(first_page.len(), 100);
 
         // Second page starting at 100 should have 50 assets
-        let second_page = state.list_assets(ListRequest {
+        let second_page = state.list_assets(ListAssetsRequest {
             start: Some(Nat::from(100u8)),
             length: None,
         });
         assert_eq!(second_page.len(), 50);
 
         // Third page starting at 150 should be empty
-        let third_page = state.list_assets(ListRequest {
+        let third_page = state.list_assets(ListAssetsRequest {
             start: Some(Nat::from(150u8)),
             length: None,
         });
@@ -1598,7 +1598,7 @@ mod list_assets {
     #[test]
     fn list_returns_empty_for_no_assets() {
         let state = State::default();
-        let list = state.list_assets(ListRequest::default());
+        let list = state.list_assets(ListAssetsRequest::default());
         assert_eq!(list.len(), 0);
     }
 
@@ -1620,21 +1620,21 @@ mod list_assets {
         create_assets(&mut state, &system_context, assets);
 
         // Request only 5 assets
-        let list = state.list_assets(ListRequest {
+        let list = state.list_assets(ListAssetsRequest {
             start: None,
             length: Some(Nat::from(5u8)),
         });
         assert_eq!(list.len(), 5);
 
         // Request 20 assets starting at index 10
-        let list = state.list_assets(ListRequest {
+        let list = state.list_assets(ListAssetsRequest {
             start: Some(Nat::from(10u8)),
             length: Some(Nat::from(20u8)),
         });
         assert_eq!(list.len(), 20);
 
         // Request more than available (should return all remaining)
-        let list = state.list_assets(ListRequest {
+        let list = state.list_assets(ListAssetsRequest {
             start: Some(Nat::from(45u8)),
             length: Some(Nat::from(20u8)),
         });
@@ -1659,14 +1659,14 @@ mod list_assets {
         create_assets(&mut state, &system_context, assets);
 
         // Request 150 assets, but should be capped at PAGE_SIZE (100)
-        let list = state.list_assets(ListRequest {
+        let list = state.list_assets(ListAssetsRequest {
             start: None,
             length: Some(Nat::from(150u8)),
         });
         assert_eq!(list.len(), 100);
 
         // Request with length smaller than PAGE_SIZE should be respected
-        let list = state.list_assets(ListRequest {
+        let list = state.list_assets(ListAssetsRequest {
             start: None,
             length: Some(Nat::from(50u8)),
         });
@@ -1716,7 +1716,6 @@ mod set_asset_content_sha256_verification {
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
-            &system_context,
         );
 
         assert!(result.is_ok());
@@ -1760,7 +1759,6 @@ mod set_asset_content_sha256_verification {
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
             },
-            &system_context,
         );
 
         assert_eq!(result.unwrap_err(), "sha256 mismatch");
@@ -1804,13 +1802,12 @@ mod set_asset_content_sha256_verification {
                 last_chunk: None,
                 sha256: None,
             },
-            &system_context,
         );
 
         assert!(result.is_ok());
 
         // Verify the hash was computed correctly by inspecting the listed encoding.
-        let details = state.list_assets(ListRequest::default());
+        let details = state.list_assets(ListAssetsRequest::default());
         let encoding = details
             .iter()
             .find(|a| a.key == "/test.txt")
@@ -1868,7 +1865,6 @@ mod set_asset_content_sha256_verification {
                 last_chunk: None,
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
-            &system_context,
         );
 
         assert!(result.is_ok());
@@ -1916,7 +1912,6 @@ mod set_asset_content_sha256_verification {
                 last_chunk: Some(ByteBuf::from(LAST_CHUNK)),
                 sha256: Some(ByteBuf::from(correct_hash.as_slice())),
             },
-            &system_context,
         );
 
         assert!(result.is_ok());

@@ -12,11 +12,10 @@
 //!   encode/decode), serde `Serialize`/`Deserialize` (the canister persists
 //!   [`RedirectRule`] in stable state via CBOR), plus `Clone`/`Debug`/`Eq`.
 //!
-//! Types that only ever live on one side stay in that crate: the canister's
-//! internal `ListRequest` and its fuller, authoritative `AssetDetails` producer
-//! type (which carries `length`/`modified`/`headers`) remain in `canister-core`.
+//! Internal canister types that never cross the wire — `Asset`, `AssetEncoding`,
+//! and the stable-state shapes — stay in `canister-core`.
 
-use candid::{CandidType, Principal};
+use candid::{CandidType, Nat, Principal};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
@@ -150,20 +149,25 @@ pub struct CreateChunksResponse {
     pub chunk_ids: Vec<ChunkId>,
 }
 
-/// One encoding of an asset, as the `list` query reports it. This is the
-/// client-decoded projection: the canister's authoritative producer type also
-/// carries `length` and `modified`, which clients don't need and therefore
-/// don't decode.
+/// Pagination request for the `get_asset_details` query. Both bounds are
+/// optional: `start` defaults to the beginning, `length` to (and is capped at)
+/// the canister's page size.
+#[derive(Clone, Debug, Default, PartialEq, Eq, CandidType, Serialize, Deserialize)]
+pub struct ListAssetsRequest {
+    pub start: Option<Nat>,
+    pub length: Option<Nat>,
+}
+
+/// One encoding of an asset, as the `get_asset_details` query reports it.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct AssetEncodingDetails {
     pub content_encoding: String,
     pub sha256: Option<ByteBuf>,
 }
 
-/// An asset as the `list` query reports it (client-decoded projection — see
-/// [`AssetEncodingDetails`]). `headers` carries the asset's per-asset response
-/// headers; the sync diff reads them straight from here, so there is no
-/// separate per-asset properties query.
+/// An asset as the `get_asset_details` query reports it. `headers` carries the
+/// asset's per-asset response headers; the sync diff reads them straight from
+/// here, so there is no separate per-asset properties query.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct AssetDetails {
     pub key: String,

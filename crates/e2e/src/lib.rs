@@ -184,14 +184,14 @@ pub fn http_fetch_subdomain(project: &Path, path: &str) -> reqwest::blocking::Re
         .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
 }
 
-/// Call `list` on the `frontend` canister and return all asset details.
+/// Call `get_asset_details` on the `frontend` canister and return all asset details.
 pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
     let stdout = icp_cmd(project)
         .args([
             "canister",
             "call",
             "frontend",
-            "list",
+            "get_asset_details",
             "(record {})",
             "-o",
             "hex",

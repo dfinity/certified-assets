@@ -101,7 +101,7 @@ impl CanisterCall for BenchMock {
 
         let resp = match method {
             "api_version" => Encode!(&2u16),
-            "list" => Encode!(&Vec::<AssetDetails>::new()),
+            "get_asset_details" => Encode!(&Vec::<AssetDetails>::new()),
             "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
             "start_sync" => Encode!(&StartSyncOk::Started { session_id: 1 }),
             "create_chunks" => {

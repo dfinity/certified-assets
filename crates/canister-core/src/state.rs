@@ -5,7 +5,7 @@
 //! as formal arguments. This approach makes it very easy to test the state machine.
 
 use crate::{
-    asset::{on_asset_change, Asset, AssetDetails, AssetEncoding, AssetEncodingDetails},
+    asset::{on_asset_change, Asset, AssetEncoding},
     batch::{Chunk, SyncSession},
     certification::{AssetKey, CertifiedResponses},
     http::{
@@ -14,11 +14,10 @@ use crate::{
     },
     rc_bytes::RcBytes,
     stable::StableState,
-    system_context::SystemContext,
     types::*,
     url::url_decode,
 };
-use candid::{Nat, Principal};
+use candid::Principal;
 use ic_certification::{AsHashTree, Hash};
 use num_traits::ToPrimitive;
 use serde_bytes::ByteBuf;
@@ -98,7 +97,6 @@ impl State {
     pub fn set_asset_content(
         &mut self,
         arg: SetAssetContentArguments,
-        system_context: &SystemContext,
     ) -> Result<(), String> {
         if arg.chunk_ids.is_empty() && arg.last_chunk.is_none() {
             return Err("encoding must have at least one chunk or contain last_chunk".to_string());
@@ -108,8 +106,6 @@ impl State {
         if !self.assets.contains_key(&arg.key) {
             return Err("asset not found".to_string());
         }
-
-        let now = system_context.current_timestamp_ns;
 
         let mut content_chunks = vec![];
         for chunk_id in arg.chunk_ids.iter() {
@@ -126,7 +122,7 @@ impl State {
         }
         let sha256: [u8; 32] = hasher.finalize().into();
 
-        self.complete_set_asset_content(arg, content_chunks, sha256, now, dependent_keys)
+        self.complete_set_asset_content(arg, content_chunks, sha256, dependent_keys)
     }
 
     pub(crate) fn complete_set_asset_content(
@@ -134,7 +130,6 @@ impl State {
         arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
         sha256: [u8; 32],
-        now: u64,
         dependent_keys: Vec<AssetKey>,
     ) -> Result<(), String> {
         if let Some(provided_hash) = arg.sha256 {
@@ -152,12 +147,9 @@ impl State {
             .get_mut(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
-        let total_length: usize = content_chunks.iter().map(|c| c.len()).sum();
         let enc = AssetEncoding {
-            modified: now,
             content_chunks,
             certified: false,
-            total_length,
             sha256,
             certificate_expression: None, // set by on_asset_change
             response_hashes: None,        // set by on_asset_change
@@ -190,7 +182,7 @@ impl State {
         }
     }
 
-    pub fn list_assets(&self, request: ListRequest) -> Vec<AssetDetails> {
+    pub fn list_assets(&self, request: ListAssetsRequest) -> Vec<AssetDetails> {
         const PAGE_SIZE: usize = 100;
 
         let start_idx = request
@@ -225,8 +217,6 @@ impl State {
                         .map(|(enc_name, enc)| AssetEncodingDetails {
                             content_encoding: enc_name.clone(),
                             sha256: Some(ByteBuf::from(enc.sha256)),
-                            length: Nat::from(enc.total_length),
-                            modified: enc.modified,
                         })
                         .collect();
                     encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));

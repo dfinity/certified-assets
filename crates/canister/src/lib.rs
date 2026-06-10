@@ -2,13 +2,12 @@ mod state;
 
 use candid::Principal;
 use canister_core::{
-    asset::AssetDetails,
     guard_can_sync, guard_is_controller,
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
     redirect::RedirectRule,
     types::{
-        CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
-        ExecuteOperationsArguments, ListRequest, StartSyncResult,
+        AssetDetails, CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
+        ExecuteOperationsArguments, ListAssetsRequest, StartSyncResult,
     },
 };
 use ic_cdk::{post_upgrade, pre_upgrade, query, update};
@@ -40,8 +39,8 @@ fn api_version() -> u16 {
 }
 
 #[query]
-fn list(request: ListRequest) -> Vec<AssetDetails> {
-    canister_core::list(request)
+fn get_asset_details(request: ListAssetsRequest) -> Vec<AssetDetails> {
+    canister_core::get_asset_details(request)
 }
 
 #[query]

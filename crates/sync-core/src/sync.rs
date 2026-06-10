@@ -1505,7 +1505,7 @@ mod tests {
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
         mock.push_ok("can_sync", true);
-        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok(
             "get_redirect_rules",
             vec![mk_rule(
@@ -1551,7 +1551,7 @@ mod tests {
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
         mock.push_ok("can_sync", true);
-        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
         mock.push_ok("execute_operations", ());
@@ -2149,7 +2149,7 @@ mod tests {
         mock.push_ok("api_version", 2u16);
         mock.push_ok("can_sync", true);
         mock.push_ok(
-            "list",
+            "get_asset_details",
             vec![AssetDetails {
                 key: "/notes.txt".to_string(),
                 content_type: "text/plain".to_string(),
@@ -2161,7 +2161,7 @@ mod tests {
                 headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
             }],
         );
-        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
 
         let result = sync(
@@ -2189,7 +2189,7 @@ mod tests {
         let mock = SyncMock::new();
         mock.push_ok("api_version", 2u16);
         mock.push_ok("can_sync", true);
-        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
         mock.push_ok(
@@ -2286,7 +2286,7 @@ mod tests {
         mock.push_ok("api_version", 2u16);
         mock.push_ok("can_sync", true);
         mock.push_ok(
-            "list",
+            "get_asset_details",
             vec![AssetDetails {
                 key: "/index.html".to_string(),
                 content_type: "text/html".to_string(),
@@ -2297,7 +2297,7 @@ mod tests {
                 headers: None,
             }],
         );
-        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", canister_rules);
 
         let result = sync(
@@ -2322,7 +2322,7 @@ mod tests {
         mock.push_ok("api_version", 2u16);
         mock.push_ok("can_sync", true);
         // Empty canister → build_operations will produce work → start_sync is called.
-        mock.push_ok("list", Vec::<AssetDetails>::new());
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_err(
             "start_sync",

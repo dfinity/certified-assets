@@ -72,9 +72,7 @@ impl From<StableAsset> for crate::asset::Asset {
 /// Same as [crate::asset::AssetEncoding] but serde-serializable
 #[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct StableAssetEncoding {
-    pub modified: u64,
     pub content_chunks: Vec<RcBytes>,
-    pub total_length: usize,
     pub certified: bool,
     pub sha256: [u8; 32],
     pub certificate_expression: Option<CertificateExpression>,
@@ -84,9 +82,7 @@ pub struct StableAssetEncoding {
 impl From<crate::asset::AssetEncoding> for StableAssetEncoding {
     fn from(asset_encoding: crate::asset::AssetEncoding) -> Self {
         Self {
-            modified: asset_encoding.modified,
             content_chunks: asset_encoding.content_chunks,
-            total_length: asset_encoding.total_length,
             certified: asset_encoding.certified,
             sha256: asset_encoding.sha256,
             certificate_expression: asset_encoding.certificate_expression,
@@ -98,9 +94,7 @@ impl From<crate::asset::AssetEncoding> for StableAssetEncoding {
 impl From<StableAssetEncoding> for crate::asset::AssetEncoding {
     fn from(stable_asset_encoding: StableAssetEncoding) -> Self {
         Self {
-            modified: stable_asset_encoding.modified,
             content_chunks: stable_asset_encoding.content_chunks,
-            total_length: stable_asset_encoding.total_length,
             certified: stable_asset_encoding.certified,
             sha256: stable_asset_encoding.sha256,
             certificate_expression: stable_asset_encoding.certificate_expression,

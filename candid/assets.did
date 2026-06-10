@@ -7,7 +7,6 @@ import "http-gateway.did";
 type SessionId = nat64;
 type ChunkId = nat64;
 type Key = text;
-type Time = nat64;
 
 type CreateAssetArguments = record {
   key: Key;
@@ -87,6 +86,25 @@ type SetAssetPropertiesArguments = record {
   headers: opt opt vec HeaderField;
 };
 
+// ───────── Asset query types ─────────
+
+type ListAssetsRequest = record {
+  start: opt nat;
+  length: opt nat;
+};
+
+type AssetEncodingDetails = record {
+  content_encoding: text;
+  sha256: opt blob; // sha256 of the entire encoded asset
+};
+
+type AssetDetails = record {
+  key: Key;
+  content_type: text;
+  encodings: vec AssetEncodingDetails;
+  headers: opt vec HeaderField;
+};
+
 service: {
   // ───────── Canister metadata ─────────
 
@@ -101,17 +119,9 @@ service: {
 
   // ───────── Asset queries ─────────
 
-  list : (record { start: opt nat; length: opt nat }) -> (vec record {
-    key: Key;
-    content_type: text;
-    encodings: vec record {
-      content_encoding: text;
-      sha256: opt blob; // sha256 of entire asset encoding, calculated by dfx and passed in SetAssetContentArguments
-      length: nat; // Size of this encoding's blob. Calculated when uploading assets.
-      modified: Time;
-    };
-    headers: opt vec HeaderField;
-  }) query;
+  // Asset details for a page of assets, ordered by key. `start`/`length`
+  // paginate; `length` is capped at the canister's page size.
+  get_asset_details : (ListAssetsRequest) -> (vec AssetDetails) query;
 
   get_redirect_rules: () -> (vec RedirectRule) query;
 

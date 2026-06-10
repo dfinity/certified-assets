@@ -14,19 +14,10 @@ use serde_bytes::ByteBuf;
 pub use wire_types::{
     AssetDetails, AssetEncodingDetails, BatchOperationKind, CancelSyncArguments,
     CreateAssetArguments, CreateChunksArguments, CreateChunksResponse, DeleteAssetArguments,
-    ExecuteOperationsArguments, RedirectRule, RulePattern, SetAssetContentArguments,
-    SetAssetPropertiesArguments, SetRedirectRulesArguments, StartSyncResult,
-    UnsetAssetContentArguments,
+    ExecuteOperationsArguments, ListAssetsRequest, RedirectRule, RulePattern,
+    SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
+    StartSyncResult, UnsetAssetContentArguments,
 };
-
-/// Pagination request for the `list` query. The canister's counterpart
-/// (`ListRequest`) has the same shape; kept private here since the plugin only
-/// ever sends it.
-#[derive(CandidType, Debug)]
-struct ListAssetsRequest {
-    start: Option<Nat>,
-    length: Option<Nat>,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub enum CallType {
@@ -63,7 +54,7 @@ pub fn list_assets(c: &impl CanisterCall) -> Result<Vec<AssetDetails>, String> {
             start: Some(Nat::from(start)),
             length: None,
         };
-        let entries: Vec<AssetDetails> = c.call("list", req, CallType::Query, true)?;
+        let entries: Vec<AssetDetails> = c.call("get_asset_details", req, CallType::Query, true)?;
         let n = entries.len();
         if n == 0 {
             break;
@@ -174,7 +165,7 @@ mod tests {
             A: CandidType,
             R: CandidType + DeserializeOwned,
         {
-            assert_eq!(method, "list");
+            assert_eq!(method, "get_asset_details");
             let page = self.pages.borrow_mut().pop_front().unwrap_or_default();
             let bytes = candid::encode_one(page).map_err(|e| e.to_string())?;
             candid::decode_one(&bytes).map_err(|e| e.to_string())

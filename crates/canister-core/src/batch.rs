@@ -301,13 +301,11 @@ impl State {
                 if chunk_index >= content_chunks.len() {
                     // All chunks hashed, finalize and complete set_asset_content
                     let sha256: [u8; 32] = hasher.finalize().into();
-                    let now = system_context.current_timestamp_ns;
 
                     if let Err(e) = self.complete_set_asset_content(
                         set_asset_content_arg.clone(),
                         content_chunks,
                         sha256,
-                        now,
                         dependent_keys,
                     ) {
                         return ComputationStatus::Error(e);

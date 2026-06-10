@@ -4,8 +4,6 @@
 //! - [`Asset`] / [`AssetEncoding`] hold an asset and its per-encoding response
 //!   metadata, including the per-encoding response hashes used for v2
 //!   certification.
-//! - [`AssetDetails`], [`AssetEncodingDetails`] are the Candid surface types
-//!   returned by `list`.
 //! - [`on_asset_change`] is the central re-certification routine: every State
 //!   method that mutates an asset funnels through it.
 //! - [`encoding_certification_order`] is a small encoding utility shared
@@ -20,10 +18,8 @@ use crate::http::{
     CallbackFunc, HeaderField, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
 use crate::rc_bytes::RcBytes;
-use candid::{CandidType, Deserialize, Nat};
 use ic_certification::Hash;
 use ic_representation_independent_hash::Value;
-use serde_bytes::ByteBuf;
 use sha2::Digest;
 use std::collections::HashMap;
 
@@ -49,14 +45,9 @@ pub fn encoding_certification_order<'a>(
 
 const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 
-/// Nanoseconds since the Unix epoch (`ic0.time()`); always non-negative.
-pub(crate) type Timestamp = u64;
-
 #[derive(Default, Clone, Debug)]
 pub struct AssetEncoding {
-    pub modified: Timestamp,
     pub content_chunks: Vec<RcBytes>,
-    pub total_length: usize,
     pub certified: bool,
     pub sha256: [u8; 32],
     pub certificate_expression: Option<CertificateExpression>,
@@ -115,22 +106,6 @@ pub struct Asset {
     pub content_type: String,
     pub encodings: HashMap<String, AssetEncoding>,
     pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct AssetDetails {
-    pub key: String,
-    pub content_type: String,
-    pub encodings: Vec<AssetEncodingDetails>,
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct AssetEncodingDetails {
-    pub content_encoding: String,
-    pub sha256: Option<ByteBuf>,
-    pub length: Nat,
-    pub modified: Timestamp,
 }
 
 impl Asset {

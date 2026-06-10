@@ -17,7 +17,6 @@ mod tests;
 
 pub use crate::stable::StableState;
 use crate::{
-    asset::AssetDetails,
     batch::ComputationStatus,
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -92,7 +91,7 @@ pub fn cancel_sync(arg: CancelSyncArguments) {
     }
 }
 
-pub fn list(request: ListRequest) -> Vec<AssetDetails> {
+pub fn get_asset_details(request: ListAssetsRequest) -> Vec<AssetDetails> {
     with_state(|s| s.list_assets(request))
 }
 
