@@ -36,8 +36,12 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
-pub fn api_version() -> u16 {
-    2
+/// The bundle tag this canister was built with: minutes since the Unix epoch
+/// (UTC), or `None` for an unstamped dev build. The sync plugin checks this
+/// against its own tag and refuses to proceed on a mismatch. See
+/// [`wire_types::BUNDLE_TAG`].
+pub fn bundle_tag() -> Option<u64> {
+    wire_types::BUNDLE_TAG
 }
 
 /// Adds `principal` to the authorized set. Controller-guarded at the endpoint.

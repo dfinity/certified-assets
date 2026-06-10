@@ -103,7 +103,10 @@ type AssetDetails = record {
 service: {
   // ───────── Canister metadata ─────────
 
-  api_version: () -> (nat16) query;
+  // Release identity shared by the canister and its paired sync plugin; the
+  // plugin refuses to sync unless this matches its own tag. Minutes since the
+  // Unix epoch (UTC) at build time, or null for an unstamped dev build.
+  bundle_tag: () -> (opt nat64) query;
 
   // ───────── HTTP gateway ─────────
   // Standard canister HTTP interface; see

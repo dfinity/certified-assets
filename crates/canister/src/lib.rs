@@ -34,8 +34,8 @@ static CERTIFICATE_VERSIONS: [u8; 3] = canister_core::SUPPORTED_CERTIFICATE_VERS
 // Query methods
 
 #[query]
-fn api_version() -> u16 {
-    canister_core::api_version()
+fn bundle_tag() -> Option<u64> {
+    canister_core::bundle_tag()
 }
 
 #[query]

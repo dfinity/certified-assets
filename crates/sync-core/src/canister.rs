@@ -39,8 +39,8 @@ pub trait CanisterCall {
         R: CandidType + DeserializeOwned;
 }
 
-pub fn api_version(c: &impl CanisterCall) -> Result<u16, String> {
-    c.call("api_version", (), CallType::Query, true)
+pub fn bundle_tag(c: &impl CanisterCall) -> Result<Option<u64>, String> {
+    c.call("bundle_tag", (), CallType::Query, true)
 }
 
 // Fetch the complete asset list by paging through `get_asset_details`, returned
