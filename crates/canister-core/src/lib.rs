@@ -19,7 +19,6 @@ pub use crate::stable::StableState;
 use crate::{
     asset::AssetDetails,
     batch::ComputationStatus,
-    certification::AssetKey,
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
@@ -128,10 +127,6 @@ pub fn http_request_streaming_callback(
                 .unwrap_or_else(|msg| trap(&msg)),
         )
     })
-}
-
-pub fn get_asset_properties(key: AssetKey) -> AssetProperties {
-    with_state(|s| s.get_asset_properties(key).unwrap_or_else(|msg| trap(&msg)))
 }
 
 /// Whether the current caller may sync assets: either in the authorized set, or

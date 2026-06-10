@@ -5,7 +5,7 @@
 //! handing it back, so a successful fetch is also proof of certification —
 //! and proof that the headers we set are the same ones the canister certified.
 
-use e2e::{get_asset_properties, http_fetch, icp_cmd, setup_project, LocalNetwork};
+use e2e::{http_fetch, icp_cmd, list_assets, setup_project, LocalNetwork};
 use reqwest::StatusCode;
 use std::fs;
 
@@ -54,8 +54,12 @@ fn header_edit_propagates_via_set_asset_properties() {
 
     icp_cmd(project).arg("deploy").assert().success();
 
-    // Sanity-check the initial headers landed on the canister.
-    let before = get_asset_properties(project, "/index.html");
+    // Sanity-check the initial headers landed on the canister. `list` reports
+    // per-asset headers, so read them from there.
+    let before = list_assets(project)
+        .into_iter()
+        .find(|a| a.key == "/index.html")
+        .expect("/index.html should be listed");
     let headers_before = before.headers.expect("/index.html should carry headers");
     assert!(headers_before
         .iter()

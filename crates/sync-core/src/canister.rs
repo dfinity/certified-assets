@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_bytes::ByteBuf;
 
 pub use wire_types::{
-    AssetDetails, AssetEncodingDetails, AssetProperties, BatchOperationKind, CancelSyncArguments,
+    AssetDetails, AssetEncodingDetails, BatchOperationKind, CancelSyncArguments,
     CreateAssetArguments, CreateChunksArguments, CreateChunksResponse, DeleteAssetArguments,
     ExecuteOperationsArguments, RedirectRule, RulePattern, SetAssetContentArguments,
     SetAssetPropertiesArguments, SetRedirectRulesArguments, StartSyncResult,
@@ -132,15 +132,6 @@ pub fn cancel_sync(c: &impl CanisterCall, session_id: u64) -> Result<(), String>
     )
 }
 
-pub fn get_asset_properties(c: &impl CanisterCall, key: &str) -> Result<AssetProperties, String> {
-    c.call(
-        "get_asset_properties",
-        key.to_string(),
-        CallType::Query,
-        true,
-    )
-}
-
 pub fn get_redirect_rules(c: &impl CanisterCall) -> Result<Vec<RedirectRule>, String> {
     c.call("get_redirect_rules", (), CallType::Query, true)
 }
@@ -196,6 +187,7 @@ mod tests {
                 key: format!("/asset-{i}"),
                 encodings: vec![],
                 content_type: "text/plain".to_string(),
+                headers: None,
             })
             .collect()
     }

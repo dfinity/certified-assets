@@ -421,17 +421,6 @@ impl State {
         })
     }
 
-    pub fn get_asset_properties(&self, key: AssetKey) -> Result<AssetProperties, String> {
-        let asset = self
-            .assets
-            .get(&key)
-            .ok_or_else(|| "asset not found".to_string())?;
-
-        Ok(AssetProperties {
-            headers: asset.headers.clone(),
-        })
-    }
-
     pub fn set_asset_properties(&mut self, arg: SetAssetPropertiesArguments) -> Result<(), String> {
         let dependent_keys = self.dependent_keys(&arg.key);
         let asset = self

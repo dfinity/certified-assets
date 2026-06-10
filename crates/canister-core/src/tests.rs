@@ -6,9 +6,9 @@ use crate::stable::StableState;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    AssetProperties, BatchOperationKind, CancelSyncArguments, CreateAssetArguments,
-    DeleteAssetArguments, ExecuteOperationsArguments, ListRequest, SessionId,
-    SetAssetContentArguments, SetAssetPropertiesArguments, StartSyncResult,
+    BatchOperationKind, CancelSyncArguments, CreateAssetArguments, DeleteAssetArguments,
+    ExecuteOperationsArguments, ListRequest, SessionId, SetAssetContentArguments,
+    SetAssetPropertiesArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
 use crate::CreateChunksArguments;
@@ -263,7 +263,7 @@ fn assemble_create_assets_and_set_contents_operations(
     let mut operations = vec![];
 
     for asset in assets {
-        if state.get_asset_properties(asset.name.clone()).is_ok() {
+        if state.assets.contains_key(&asset.name) {
             operations.push(BatchOperationKind::DeleteAsset(DeleteAssetArguments {
                 key: asset.name.clone(),
             }));
@@ -972,17 +972,24 @@ fn supports_getting_and_setting_asset_properties() {
         ],
     );
 
+    // Headers are reported by `list`, so read them back from there rather than
+    // through a dedicated per-asset query.
+    let headers_of = |state: &State, key: &str| {
+        state
+            .list_assets(ListRequest::default())
+            .into_iter()
+            .find(|d| d.key == key)
+            .expect("asset should exist")
+            .headers
+    };
+
     assert_eq!(
-        state.get_asset_properties("/contents.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
-        })
+        headers_of(&state, "/contents.html"),
+        Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
     );
     assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-        })
+        headers_of(&state, "/props.html"),
+        Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
     );
 
     // `Some(Some(..))` replaces the headers map.
@@ -993,10 +1000,8 @@ fn supports_getting_and_setting_asset_properties() {
         })
         .is_ok());
     assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("new-header".into(), "value".into())]),
-        })
+        headers_of(&state, "/props.html"),
+        Some(vec![("new-header".into(), "value".into())]),
     );
 
     // `None` leaves the existing headers untouched.
@@ -1007,10 +1012,8 @@ fn supports_getting_and_setting_asset_properties() {
         })
         .is_ok());
     assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("new-header".into(), "value".into())]),
-        })
+        headers_of(&state, "/props.html"),
+        Some(vec![("new-header".into(), "value".into())]),
     );
 
     // `Some(None)` clears the headers map.
@@ -1020,10 +1023,7 @@ fn supports_getting_and_setting_asset_properties() {
             headers: Some(None),
         })
         .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties { headers: None })
-    );
+    assert_eq!(headers_of(&state, "/props.html"), None);
 }
 
 #[test]

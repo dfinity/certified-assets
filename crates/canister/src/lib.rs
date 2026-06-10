@@ -3,12 +3,11 @@ mod state;
 use candid::Principal;
 use canister_core::{
     asset::AssetDetails,
-    certification::AssetKey,
     guard_can_sync, guard_is_controller,
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
     redirect::RedirectRule,
     types::{
-        AssetProperties, CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
+        CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
         ExecuteOperationsArguments, ListRequest, StartSyncResult,
     },
 };
@@ -55,11 +54,6 @@ fn http_request_streaming_callback(
     token: StreamingCallbackToken,
 ) -> Option<StreamingCallbackHttpResponse> {
     canister_core::http_request_streaming_callback(token)
-}
-
-#[query]
-fn get_asset_properties(key: AssetKey) -> AssetProperties {
-    canister_core::get_asset_properties(key)
 }
 
 #[query]

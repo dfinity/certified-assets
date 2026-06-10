@@ -6,7 +6,7 @@ use std::{
 };
 
 // Wire types shared with the canister and sync plugin.
-pub use wire_types::{AssetDetails, AssetEncodingDetails, AssetProperties};
+pub use wire_types::{AssetDetails, AssetEncodingDetails};
 
 /// Build an `icp` subprocess command rooted at `project_dir`.
 ///
@@ -91,31 +91,6 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
         .expect("failed to copy plugin.wasm");
 
     tmp
-}
-
-/// Call `get_asset_properties` on the `frontend` canister for `key`.
-pub fn get_asset_properties(project: &Path, key: &str) -> AssetProperties {
-    let stdout = icp_cmd(project)
-        .args([
-            "canister",
-            "call",
-            "frontend",
-            "get_asset_properties",
-            &format!("(\"{key}\")"),
-            "-o",
-            "hex",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let hex_str = String::from_utf8_lossy(&stdout);
-    let bytes = hex::decode(hex_str.trim()).expect("failed to decode hex response");
-    let (properties,) = candid::decode_args::<(AssetProperties,)>(&bytes)
-        .expect("failed to decode candid response");
-    properties
 }
 
 /// Return the canister ID of `frontend` as printed by `icp canister status --id-only`.

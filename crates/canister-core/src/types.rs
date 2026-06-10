@@ -9,9 +9,9 @@ use candid::{CandidType, Deserialize, Nat};
 
 // Shared wire types (defined once in `wire-types`, used by both sides).
 pub use wire_types::{
-    AssetProperties, BatchOperationKind, CancelSyncArguments, ChunkId, CreateAssetArguments,
-    CreateChunksArguments, CreateChunksResponse, DeleteAssetArguments, ExecuteOperationsArguments,
-    SessionId, SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
+    BatchOperationKind, CancelSyncArguments, ChunkId, CreateAssetArguments, CreateChunksArguments,
+    CreateChunksResponse, DeleteAssetArguments, ExecuteOperationsArguments, SessionId,
+    SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
     StartSyncResult, UnsetAssetContentArguments,
 };
 

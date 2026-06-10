@@ -150,11 +150,6 @@ pub struct CreateChunksResponse {
     pub chunk_ids: Vec<ChunkId>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, CandidType, Serialize, Deserialize)]
-pub struct AssetProperties {
-    pub headers: Option<Vec<(String, String)>>,
-}
-
 /// One encoding of an asset, as the `list` query reports it. This is the
 /// client-decoded projection: the canister's authoritative producer type also
 /// carries `length` and `modified`, which clients don't need and therefore
@@ -166,10 +161,13 @@ pub struct AssetEncodingDetails {
 }
 
 /// An asset as the `list` query reports it (client-decoded projection — see
-/// [`AssetEncodingDetails`]).
+/// [`AssetEncodingDetails`]). `headers` carries the asset's per-asset response
+/// headers; the sync diff reads them straight from here, so there is no
+/// separate per-asset properties query.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct AssetDetails {
     pub key: String,
     pub encodings: Vec<AssetEncodingDetails>,
     pub content_type: String,
+    pub headers: Option<Vec<(String, String)>>,
 }

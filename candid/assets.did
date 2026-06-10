@@ -113,9 +113,6 @@ service: {
     headers: opt vec HeaderField;
   }) query;
 
-  get_asset_properties : (key: Key) -> (record {
-    headers: opt vec HeaderField; } ) query;
-
   get_redirect_rules: () -> (vec RedirectRule) query;
 
   // ───────── Sync ─────────
