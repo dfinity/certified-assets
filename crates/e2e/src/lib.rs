@@ -1,24 +1,12 @@
 use assert_cmd::Command as AssertCmd;
-use candid::CandidType;
-use serde::Deserialize;
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
-pub struct AssetEncodingDetails {
-    pub content_encoding: String,
-    pub sha256: Option<Vec<u8>>,
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
-pub struct AssetDetails {
-    pub key: String,
-    pub encodings: Vec<AssetEncodingDetails>,
-    pub content_type: String,
-}
+// Wire types shared with the canister and sync plugin.
+pub use wire_types::{AssetDetails, AssetEncodingDetails, AssetProperties};
 
 /// Build an `icp` subprocess command rooted at `project_dir`.
 ///
@@ -103,11 +91,6 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
         .expect("failed to copy plugin.wasm");
 
     tmp
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
-pub struct AssetProperties {
-    pub headers: Option<Vec<(String, String)>>,
 }
 
 /// Call `get_asset_properties` on the `frontend` canister for `key`.

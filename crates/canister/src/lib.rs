@@ -10,7 +10,7 @@ use canister_core::{
     redirect::RedirectRule,
     state::CertifiedTree,
     types::{
-        AssetProperties, CancelSyncArguments, CreateChunksArg, CreateChunksResponse,
+        AssetProperties, CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
         ExecuteOperationsArguments, GetArg, GetChunkArg, GetChunkResponse, ListRequest,
         StartSyncResult, StateInfo,
     },
@@ -125,7 +125,7 @@ fn start_sync() -> StartSyncResult {
 }
 
 #[update(guard = "guard_can_sync")]
-fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
+fn create_chunks(arg: CreateChunksArguments) -> CreateChunksResponse {
     canister_core::create_chunks(arg)
 }
 

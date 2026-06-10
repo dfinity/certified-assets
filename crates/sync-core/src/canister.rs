@@ -1,133 +1,31 @@
-//! Assets canister API: Candid wire types and call wrappers.
+//! Assets canister API: client-side call wrappers.
 //!
-//! Types are ported from `ic-asset` (`src/canisters/frontend/ic-asset/src/canister_api/`).
-//! Only the subset needed for the V2 batch-upload flow is included.
+//! The Candid wire types live in the [`wire_types`] crate, shared with the
+//! canister, and are re-exported here so the rest of `sync-core` can keep
+//! referring to them via `crate::canister::*`. This module adds the call
+//! wrappers and the [`CanisterCall`] transport trait.
 
 #![allow(dead_code)]
 
 use candid::{CandidType, Nat, Principal};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::de::DeserializeOwned;
+use serde_bytes::ByteBuf;
 
-#[derive(CandidType, Clone, Debug, Deserialize)]
-pub struct AssetEncodingDetails {
-    pub content_encoding: String,
-    pub sha256: Option<Vec<u8>>,
-}
+pub use wire_types::{
+    AssetDetails, AssetEncodingDetails, AssetProperties, BatchOperationKind, CancelSyncArguments,
+    CreateAssetArguments, CreateChunksArguments, CreateChunksResponse, DeleteAssetArguments,
+    ExecuteOperationsArguments, RedirectRule, RulePattern, SetAssetContentArguments,
+    SetAssetPropertiesArguments, SetRedirectRulesArguments, StartSyncResult,
+    UnsetAssetContentArguments,
+};
 
-#[derive(CandidType, Clone, Debug, Deserialize)]
-pub struct AssetDetails {
-    pub key: String,
-    pub encodings: Vec<AssetEncodingDetails>,
-    pub content_type: String,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub struct CreateAssetArguments {
-    pub key: String,
-    pub content_type: String,
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub struct SetAssetContentArguments {
-    pub key: String,
-    pub content_encoding: String,
-    pub chunk_ids: Vec<u64>,
-    pub last_chunk: Option<Vec<u8>>,
-    pub sha256: Option<Vec<u8>>,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub struct UnsetAssetContentArguments {
-    pub key: String,
-    pub content_encoding: String,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub struct DeleteAssetArguments {
-    pub key: String,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub struct SetAssetPropertiesArguments {
-    pub key: String,
-    pub headers: Option<Option<Vec<(String, String)>>>,
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
-pub enum RulePattern {
-    Exact(String),
-    Subtree(String),
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct RedirectRule {
-    pub from: RulePattern,
-    pub to: String,
-    pub status: u16,
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub struct SetRedirectRulesArguments {
-    pub rules: Vec<RedirectRule>,
-}
-
-#[derive(CandidType, Clone, Debug)]
-pub enum BatchOperationKind {
-    DeleteAsset(DeleteAssetArguments),
-    CreateAsset(CreateAssetArguments),
-    UnsetAssetContent(UnsetAssetContentArguments),
-    SetAssetContent(SetAssetContentArguments),
-    SetAssetProperties(SetAssetPropertiesArguments),
-    SetRedirectRules(SetRedirectRulesArguments),
-}
-
-#[derive(CandidType, Debug)]
-pub struct ExecuteOperationsArguments {
-    pub session_id: u64,
-    pub operations: Vec<BatchOperationKind>,
-    pub is_final: bool,
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, Default)]
-pub struct AssetProperties {
-    pub headers: Option<Vec<(String, String)>>,
-}
-
+/// Pagination request for the `list` query. The canister's counterpart
+/// (`ListRequest`) has the same shape; kept private here since the plugin only
+/// ever sends it.
 #[derive(CandidType, Debug)]
 struct ListAssetsRequest {
     start: Option<Nat>,
     length: Option<Nat>,
-}
-
-/// Result of `start_sync`. `Busy` is a normal outcome — another non-stale sync
-/// holds the lock — not a transport error.
-#[derive(CandidType, Debug, Deserialize)]
-enum StartSyncResult {
-    Started {
-        session_id: u64,
-    },
-    Busy {
-        owner: Principal,
-        idle_for_secs: u64,
-    },
-}
-
-#[derive(CandidType, Debug)]
-struct CreateChunksRequest<'a> {
-    session_id: u64,
-    content: Vec<&'a [u8]>,
-}
-
-#[derive(CandidType, Debug, Deserialize)]
-struct CreateChunksResponse {
-    chunk_ids: Vec<u64>,
-}
-
-#[derive(CandidType, Debug)]
-pub struct CancelSyncArguments {
-    pub session_id: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -199,14 +97,18 @@ pub fn start_sync(c: &impl CanisterCall) -> Result<u64, String> {
     }
 }
 
+/// Stage content chunks under the sync. Takes ownership of the chunk bytes:
+/// Candid copies them into the request buffer on encode regardless, so moving
+/// them in (rather than borrowing) costs nothing and lets the caller hand off
+/// its buffers directly.
 pub fn create_chunks(
     c: &impl CanisterCall,
     session_id: u64,
-    content: &[&[u8]],
+    content: Vec<ByteBuf>,
 ) -> Result<Vec<u64>, String> {
-    let req = CreateChunksRequest {
+    let req = CreateChunksArguments {
         session_id,
-        content: content.to_vec(),
+        content,
     };
     let resp: CreateChunksResponse = c.call("create_chunks", req, CallType::Update, true)?;
     Ok(resp.chunk_ids)

@@ -17,8 +17,8 @@ use crate::redirect;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    BatchOperation, CancelSyncArguments, ChunkId, CreateChunksArg, ExecuteOperationsArguments,
-    SessionId, SetAssetContentArguments, StartSyncResult,
+    BatchOperationKind, CancelSyncArguments, ChunkId, CreateChunksArguments,
+    ExecuteOperationsArguments, SessionId, SetAssetContentArguments, StartSyncResult,
 };
 use candid::Principal;
 use ic_representation_independent_hash::Value;
@@ -146,10 +146,10 @@ impl State {
 
     pub fn create_chunks(
         &mut self,
-        CreateChunksArg {
+        CreateChunksArguments {
             session_id,
             content: chunks,
-        }: CreateChunksArg,
+        }: CreateChunksArguments,
         system_context: &SystemContext,
     ) -> Result<Vec<ChunkId>, String> {
         self.touch_session(session_id, system_context.current_timestamp_ns)?;
@@ -216,8 +216,8 @@ impl State {
 
                 let op = &arg.operations[operation_index];
                 let result = match op {
-                    BatchOperation::CreateAsset(arg) => self.create_asset(arg.clone()),
-                    BatchOperation::SetAssetContent(arg) => {
+                    BatchOperationKind::CreateAsset(arg) => self.create_asset(arg.clone()),
+                    BatchOperationKind::SetAssetContent(arg) => {
                         if !self.assets.contains_key(&arg.key) {
                             return ComputationStatus::Error("asset not found".to_string());
                         }
@@ -256,15 +256,15 @@ impl State {
                         };
                         return ComputationStatus::InProgress(progress);
                     }
-                    BatchOperation::UnsetAssetContent(arg) => self.unset_asset_content(arg.clone()),
-                    BatchOperation::DeleteAsset(arg) => {
+                    BatchOperationKind::UnsetAssetContent(arg) => self.unset_asset_content(arg.clone()),
+                    BatchOperationKind::DeleteAsset(arg) => {
                         self.delete_asset(arg.clone());
                         Ok(())
                     }
-                    BatchOperation::SetAssetProperties(arg) => {
+                    BatchOperationKind::SetAssetProperties(arg) => {
                         self.set_asset_properties(arg.clone())
                     }
-                    BatchOperation::SetRedirectRules(arg) => {
+                    BatchOperationKind::SetRedirectRules(arg) => {
                         // Validate every rule before mutating state so a single
                         // bad rule fails the whole op with no partial update.
                         let mut validation: Result<(), String> = Ok(());

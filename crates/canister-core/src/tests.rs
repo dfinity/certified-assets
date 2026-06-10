@@ -6,12 +6,12 @@ use crate::stable::StableState;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    AssetProperties, BatchOperation, CancelSyncArguments, CreateAssetArguments,
+    AssetProperties, BatchOperationKind, CancelSyncArguments, CreateAssetArguments,
     DeleteAssetArguments, ExecuteOperationsArguments, GetArg, GetChunkArg, ListRequest, SessionId,
     SetAssetContentArguments, SetAssetPropertiesArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
-use crate::CreateChunksArg;
+use crate::CreateChunksArguments;
 use candid::{Nat, Principal};
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
@@ -218,7 +218,7 @@ fn start_session(state: &mut State, ctx: &SystemContext) -> SessionId {
 fn execute_all(
     state: &mut State,
     session_id: SessionId,
-    operations: Vec<BatchOperation>,
+    operations: Vec<BatchOperationKind>,
     ctx: &SystemContext,
 ) {
     run_computation_until_completion(|progress| {
@@ -259,16 +259,16 @@ fn assemble_create_assets_and_set_contents_operations(
     system_context: &SystemContext,
     assets: Vec<AssetBuilder>,
     session_id: SessionId,
-) -> Vec<BatchOperation> {
+) -> Vec<BatchOperationKind> {
     let mut operations = vec![];
 
     for asset in assets {
         if state.get_asset_properties(asset.name.clone()).is_ok() {
-            operations.push(BatchOperation::DeleteAsset(DeleteAssetArguments {
+            operations.push(BatchOperationKind::DeleteAsset(DeleteAssetArguments {
                 key: asset.name.clone(),
             }));
         }
-        operations.push(BatchOperation::CreateAsset(CreateAssetArguments {
+        operations.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
             key: asset.name.clone(),
             content_type: asset.content_type,
             headers: asset.headers,
@@ -277,7 +277,7 @@ fn assemble_create_assets_and_set_contents_operations(
         for (enc, chunks) in asset.encodings {
             let chunk_ids = state
                 .create_chunks(
-                    CreateChunksArg {
+                    CreateChunksArguments {
                         session_id,
                         content: chunks,
                     },
@@ -285,7 +285,7 @@ fn assemble_create_assets_and_set_contents_operations(
                 )
                 .unwrap();
 
-            operations.push(BatchOperation::SetAssetContent({
+            operations.push(BatchOperationKind::SetAssetContent({
                 SetAssetContentArguments {
                     key: asset.name.clone(),
                     content_encoding: enc,
@@ -333,7 +333,7 @@ fn can_create_assets_using_batch_api() {
     // longer valid for further chunk uploads.
     let error_msg = state
         .create_chunks(
-            CreateChunksArg {
+            CreateChunksArguments {
                 session_id,
                 content: vec![ByteBuf::new()],
             },
@@ -483,7 +483,7 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
     let session_id = start_session(state, &system_context);
-    let ops = vec![BatchOperation::SetRedirectRules(
+    let ops = vec![BatchOperationKind::SetRedirectRules(
         SetRedirectRulesArguments {
             rules: vec![RedirectRule {
                 from: RulePattern::Subtree("/".into()),
@@ -514,7 +514,7 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
             headers: None,
         })
         .collect();
-    let ops = vec![BatchOperation::SetRedirectRules(
+    let ops = vec![BatchOperationKind::SetRedirectRules(
         SetRedirectRulesArguments { rules },
     )];
     execute_all(state, session_id, ops, &system_context);
@@ -570,7 +570,7 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     state
         .create_chunks(
-            CreateChunksArg {
+            CreateChunksArguments {
                 session_id: id1,
                 content: vec![ByteBuf::from(BODY.to_vec())],
             },
@@ -593,7 +593,7 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
     // The old session id is no longer valid.
     let err = state
         .create_chunks(
-            CreateChunksArg {
+            CreateChunksArguments {
                 session_id: id1,
                 content: vec![ByteBuf::from(BODY.to_vec())],
             },
@@ -615,7 +615,7 @@ fn cancel_sync_releases_the_lock_for_the_owner_only() {
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     state
         .create_chunks(
-            CreateChunksArg {
+            CreateChunksArguments {
                 session_id,
                 content: vec![ByteBuf::from(BODY.to_vec())],
             },
@@ -1534,7 +1534,7 @@ mod last_state_update_timestamp {
         execute_all(
             &mut state,
             session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
+            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
                 headers: None,
@@ -1563,7 +1563,7 @@ mod last_state_update_timestamp {
         execute_all(
             &mut state,
             session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
+            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
                 headers: None,
@@ -1580,7 +1580,7 @@ mod last_state_update_timestamp {
         execute_all(
             &mut state,
             session_id,
-            vec![BatchOperation::SetAssetProperties(
+            vec![BatchOperationKind::SetAssetProperties(
                 SetAssetPropertiesArguments {
                     key: "/test.txt".to_string(),
                     headers: Some(Some(vec![("x-custom".to_string(), "value".to_string())])),
@@ -1604,7 +1604,7 @@ mod last_state_update_timestamp {
         execute_all(
             &mut state,
             session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
+            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
                 headers: None,
@@ -1856,7 +1856,7 @@ mod set_asset_content_sha256_verification {
         let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
-                CreateChunksArg {
+                CreateChunksArguments {
                     session_id,
                     content: vec![ByteBuf::from(CONTENT)],
                 },
@@ -1900,7 +1900,7 @@ mod set_asset_content_sha256_verification {
         let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
-                CreateChunksArg {
+                CreateChunksArguments {
                     session_id,
                     content: vec![ByteBuf::from(CONTENT)],
                 },
@@ -1944,7 +1944,7 @@ mod set_asset_content_sha256_verification {
         let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
-                CreateChunksArg {
+                CreateChunksArguments {
                     session_id,
                     content: vec![ByteBuf::from(CONTENT)],
                 },
@@ -2001,7 +2001,7 @@ mod set_asset_content_sha256_verification {
         let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
-                CreateChunksArg {
+                CreateChunksArguments {
                     session_id,
                     content: vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
                 },
@@ -2049,7 +2049,7 @@ mod set_asset_content_sha256_verification {
         let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
-                CreateChunksArg {
+                CreateChunksArguments {
                     session_id,
                     content: vec![ByteBuf::from(CHUNK_1)],
                 },
@@ -2086,7 +2086,7 @@ mod compute_state_hash {
         let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
-                CreateChunksArg {
+                CreateChunksArguments {
                     session_id,
                     content: vec![ByteBuf::from(b"content1")],
                 },
@@ -2098,12 +2098,12 @@ mod compute_state_hash {
             &mut state,
             session_id,
             vec![
-                BatchOperation::CreateAsset(CreateAssetArguments {
+                BatchOperationKind::CreateAsset(CreateAssetArguments {
                     key: "asset1".to_string(),
                     content_type: "text/plain".to_string(),
                     headers: None,
                 }),
-                BatchOperation::SetAssetContent(SetAssetContentArguments {
+                BatchOperationKind::SetAssetContent(SetAssetContentArguments {
                     key: "asset1".to_string(),
                     content_encoding: "identity".to_string(),
                     chunk_ids,
@@ -2125,7 +2125,7 @@ mod compute_state_hash {
         execute_all(
             &mut state,
             session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
+            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: "asset2".to_string(),
                 content_type: "text/plain".to_string(),
                 headers: None,
@@ -2149,7 +2149,7 @@ mod redirect_rules {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
 
-    fn commit(state: &mut State, ops: Vec<BatchOperation>) -> Result<(), String> {
+    fn commit(state: &mut State, ops: Vec<BatchOperationKind>) -> Result<(), String> {
         let system_context = mock_system_context();
         let session_id = start_session(state, &system_context);
         run_computation_until_completion(|progress| {
@@ -2189,7 +2189,7 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: rules.clone(),
                 },
@@ -2212,7 +2212,7 @@ mod redirect_rules {
         }];
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: initial.clone(),
                 },
@@ -2237,7 +2237,7 @@ mod redirect_rules {
         ];
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments { rules: mixed },
             )],
         )
@@ -2258,7 +2258,7 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: rules.clone(),
                 },
@@ -2278,7 +2278,7 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: sample_rules(),
                 },
@@ -2289,7 +2289,7 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments { rules: vec![] },
             )],
         )
@@ -2302,7 +2302,7 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Exact("/old".into()),
@@ -2325,7 +2325,7 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Subtree("/legacy/".into()),
@@ -2349,7 +2349,7 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![
                         RedirectRule {
@@ -2380,7 +2380,7 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: sample_rules(),
                 },
@@ -2405,7 +2405,7 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Exact("/foo".into()),
@@ -2453,7 +2453,7 @@ mod redirect_rules {
     fn delete_asset_via_batch(state: &mut State, key: &str) {
         commit(
             state,
-            vec![BatchOperation::DeleteAsset(DeleteAssetArguments {
+            vec![BatchOperationKind::DeleteAsset(DeleteAssetArguments {
                 key: key.to_string(),
             })],
         )
@@ -2474,7 +2474,7 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Exact("/foo".into()),
@@ -2521,7 +2521,7 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Subtree("/legacy/".into()),
@@ -2556,7 +2556,7 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Exact("/retired".into()),
@@ -2581,7 +2581,7 @@ mod redirect_rules {
         let mut state = State::default();
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Exact("/missing".into()),
@@ -2623,7 +2623,7 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Exact("/missing".into()),
@@ -2670,7 +2670,7 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Subtree("/old/".into()),
@@ -2702,7 +2702,7 @@ mod redirect_rules {
         let mut state = State::default();
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Exact("/missing".into()),
@@ -2735,7 +2735,7 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
+            vec![BatchOperationKind::SetRedirectRules(
                 SetRedirectRulesArguments {
                     rules: vec![RedirectRule {
                         from: RulePattern::Subtree("/".into()),

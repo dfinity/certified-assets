@@ -4,39 +4,15 @@ use crate::certification::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
     response_hash, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
 };
-use candid::{CandidType, Deserialize};
 use http::{HeaderName, HeaderValue, StatusCode};
 use ic_representation_independent_hash::Value;
-use serde::Serialize;
 use sha2::Digest;
 
-/// A single rule, mirroring one line of a Netlify-style `_redirects` file.
-#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize, Serialize)]
-pub struct RedirectRule {
-    /// Request-side pattern.
-    pub from: RulePattern,
-    /// Target. Interpretation depends on `status`:
-    /// - 200: absolute asset path (rewrite — serve target's body)
-    /// - 3xx: absolute URL or absolute path (sent as `Location`)
-    /// - 4xx: absolute asset path to serve as the custom error page
-    ///   (e.g. `/404.html`); if the asset doesn't exist the rule stays
-    ///   inert and unmatched paths fall through to the canister's
-    ///   built-in 404
-    pub to: String,
-    /// One of 200, 301, 302, 307, 308, 404, 410.
-    pub status: u16,
-    /// Extra response headers on top of status-intrinsic ones.
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize, Serialize)]
-pub enum RulePattern {
-    /// Matches a single absolute path, e.g. `/old-page`.
-    Exact(String),
-    /// Matches any URL whose path starts with this prefix. The prefix must end
-    /// with `/` so the subtree boundary is unambiguous.
-    Subtree(String),
-}
+// The rule data types are shared with the plugin, so they live in `wire-types`.
+// The behaviour below (matching, certification, tree placement) is
+// canister-only and stays here as free functions — Rust's orphan rule forbids
+// inherent `impl`s on a type defined in another crate.
+pub use wire_types::{RedirectRule, RulePattern};
 
 const SUPPORTED_STATUS_CODES: &[StatusCode] = &[
     StatusCode::OK,
@@ -144,63 +120,53 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
     Ok(())
 }
 
-impl RedirectRule {
-    /// Does this rule's `from` pattern match the given request path?
-    pub fn matches(&self, request_path: &str) -> bool {
-        match &self.from {
-            RulePattern::Exact(p) => p == request_path,
-            RulePattern::Subtree(prefix) => request_path.starts_with(prefix.as_str()),
-        }
+/// Does this rule's `from` pattern match the given request path?
+pub fn matches(rule: &RedirectRule, request_path: &str) -> bool {
+    match &rule.from {
+        RulePattern::Exact(p) => p == request_path,
+        RulePattern::Subtree(prefix) => request_path.starts_with(prefix.as_str()),
     }
+}
 
-    /// Source path the rule is anchored at (the `from` pattern, without the
-    /// trailing `/` for subtrees).
-    pub fn source(&self) -> &str {
-        match &self.from {
-            RulePattern::Exact(p) | RulePattern::Subtree(p) => p.as_str(),
-        }
-    }
-
-    /// Tree location for this rule's certified entry — segments through the
-    /// terminator (`<$>` for exact matches, `<*>` for subtrees), without the
-    /// per-response (expr_hash, req_hash, resp_hash) tail.
-    pub fn tree_location(&self) -> HashTreePath {
-        match &self.from {
-            // Mirror `AssetPath::from(path).asset_hash_path_root()` so a rule
-            // at `/old` lives in the same `<$>` slot the asset at `/old`
-            // would occupy.
-            RulePattern::Exact(p) => AssetPath::from(p.as_str()).asset_hash_path_root(),
-            RulePattern::Subtree(p) => {
-                let trimmed = p.trim_matches('/');
-                let mut segs: Vec<NestedTreeKey> = vec!["http_expr".into()];
-                if !trimmed.is_empty() {
-                    for s in trimmed.split('/') {
-                        segs.push(NestedTreeKey::String(s.to_string()));
-                    }
+/// Tree location for this rule's certified entry — segments through the
+/// terminator (`<$>` for exact matches, `<*>` for subtrees), without the
+/// per-response (expr_hash, req_hash, resp_hash) tail.
+pub fn tree_location(rule: &RedirectRule) -> HashTreePath {
+    match &rule.from {
+        // Mirror `AssetPath::from(path).asset_hash_path_root()` so a rule
+        // at `/old` lives in the same `<$>` slot the asset at `/old`
+        // would occupy.
+        RulePattern::Exact(p) => AssetPath::from(p.as_str()).asset_hash_path_root(),
+        RulePattern::Subtree(p) => {
+            let trimmed = p.trim_matches('/');
+            let mut segs: Vec<NestedTreeKey> = vec!["http_expr".into()];
+            if !trimmed.is_empty() {
+                for s in trimmed.split('/') {
+                    segs.push(NestedTreeKey::String(s.to_string()));
                 }
-                segs.push("<*>".into());
-                HashTreePath::from(segs)
             }
+            segs.push("<*>".into());
+            HashTreePath::from(segs)
         }
     }
+}
 
-    /// Headers that the rule itself synthesizes (used only by 3xx rules; 200
-    /// and 4xx rules borrow their headers from the target asset). The
-    /// `ic-certificateexpression` header is appended at certification time
-    /// and is not included here.
-    pub fn certified_headers(&self) -> Vec<(String, String)> {
-        let mut headers: Vec<(String, String)> =
-            vec![("content-type".to_string(), "text/plain".to_string())];
-        if StatusCode::from_u16(self.status).is_ok_and(|s| s.is_redirection()) {
-            headers.push(("location".to_string(), self.to.clone()));
-        }
-        if let Some(extras) = &self.headers {
-            for (k, v) in extras {
-                headers.push((k.to_lowercase(), v.clone()));
-            }
-        }
-        headers
+/// Headers that the rule itself synthesizes (used only by 3xx rules; 200
+/// and 4xx rules borrow their headers from the target asset). The
+/// `ic-certificateexpression` header is appended at certification time
+/// and is not included here.
+pub fn certified_headers(rule: &RedirectRule) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> =
+        vec![("content-type".to_string(), "text/plain".to_string())];
+    if StatusCode::from_u16(rule.status).is_ok_and(|s| s.is_redirection()) {
+        headers.push(("location".to_string(), rule.to.clone()));
     }
+    if let Some(extras) = &rule.headers {
+        for (k, v) in extras {
+            headers.push((k.to_lowercase(), v.clone()));
+        }
+    }
+    headers
 }
 
 /// Precomputed certified-tree entries for a single rule.
@@ -237,7 +203,7 @@ pub enum CertifiedRuleEntryKind {
 /// has an empty body; only the headers (content-type, Location, and any
 /// rule-supplied extras) are certified.
 pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
-    let headers = rule.certified_headers();
+    let headers = certified_headers(rule);
     let header_values: Vec<(String, Value)> = headers
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
@@ -255,7 +221,7 @@ pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
     certified.push((cert_expr_header.0, Value::String(cert_expr_header.1)));
     let resp_hash = response_hash(&certified, rule.status, &body_hash);
 
-    let location = rule.tree_location();
+    let location = tree_location(rule);
     let mut full_segs = location.0.clone();
     full_segs.push(NestedTreeKey::Hash(expression.expression_hash));
     full_segs.push(NestedTreeKey::String(String::new())); // empty request hash sentinel
@@ -387,7 +353,7 @@ mod tests {
     #[test]
     fn tree_location_exact() {
         let r = rule(RulePattern::Exact("/old".into()), "/new", 301);
-        let segs = r.tree_location().0;
+        let segs = tree_location(&r).0;
         let names: Vec<&str> = segs
             .iter()
             .map(|k| match k {
@@ -401,7 +367,7 @@ mod tests {
     #[test]
     fn tree_location_subtree() {
         let r = rule(RulePattern::Subtree("/blog/".into()), "/home", 308);
-        let segs = r.tree_location().0;
+        let segs = tree_location(&r).0;
         let names: Vec<&str> = segs
             .iter()
             .map(|k| match k {
@@ -415,7 +381,7 @@ mod tests {
     #[test]
     fn tree_location_root_subtree() {
         let r = rule(RulePattern::Subtree("/".into()), "/home", 308);
-        let segs = r.tree_location().0;
+        let segs = tree_location(&r).0;
         let names: Vec<&str> = segs
             .iter()
             .map(|k| match k {
@@ -432,7 +398,7 @@ mod tests {
         // `/` would occupy, including the empty segment that
         // `AssetPath::from("/")` produces.
         let r = rule(RulePattern::Exact("/".into()), "/index.html", 200);
-        let segs = r.tree_location().0;
+        let segs = tree_location(&r).0;
         let names: Vec<&str> = segs
             .iter()
             .map(|k| match k {
@@ -446,7 +412,7 @@ mod tests {
     #[test]
     fn certified_headers_3xx_includes_location() {
         let r = rule(RulePattern::Exact("/old".into()), "/new", 301);
-        let headers = r.certified_headers();
+        let headers = certified_headers(&r);
         assert!(headers.iter().any(|(k, v)| k == "location" && v == "/new"));
         assert!(headers.iter().any(|(k, _)| k == "content-type"));
     }

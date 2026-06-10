@@ -72,7 +72,7 @@ pub fn start_sync() -> StartSyncResult {
     with_state_mut(|s| s.start_sync(caller, &system_context))
 }
 
-pub fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
+pub fn create_chunks(arg: CreateChunksArguments) -> CreateChunksResponse {
     let system_context = SystemContext::new();
 
     with_state_mut(|s| match s.create_chunks(arg, &system_context) {

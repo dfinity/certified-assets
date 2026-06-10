@@ -1,0 +1,13 @@
+[package]
+name = "wire-types"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+candid.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true

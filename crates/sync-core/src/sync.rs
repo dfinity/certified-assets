@@ -6,6 +6,7 @@
 
 use candid::Principal;
 use mime::Mime;
+use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use crate::canister::{
@@ -402,8 +403,15 @@ fn pack_and_upload_chunks<C: CanisterCall>(
         }
         pending = leftovers;
 
-        let chunk_refs: Vec<&[u8]> = batch.iter().map(|p| p.data.as_slice()).collect();
-        let ids = create_chunks(canister, session_id, &chunk_refs)?;
+        // Move each chunk's bytes into the request; the post-call loop below
+        // only needs the routing fields (asset_key/encoding/chunk_index), not
+        // the data. Candid copies the bytes on encode either way, so this is a
+        // move, not an extra copy.
+        let content: Vec<ByteBuf> = batch
+            .iter_mut()
+            .map(|p| ByteBuf::from(std::mem::take(&mut p.data)))
+            .collect();
+        let ids = create_chunks(canister, session_id, content)?;
         if ids.len() != batch.len() {
             return Err(format!(
                 "create_chunks returned {} ids for {} chunks",
@@ -635,7 +643,7 @@ fn build_operations(
                     content_encoding: encoding.clone(),
                     chunk_ids: enc.chunk_ids.clone(),
                     last_chunk: None,
-                    sha256: Some(enc.sha256.clone()),
+                    sha256: Some(ByteBuf::from(enc.sha256.clone())),
                 },
             ));
         }
@@ -805,7 +813,7 @@ mod tests {
         }
     }
 
-    // Mirror of CreateChunksRequest so the mock can introspect arg.content.len().
+    // Mirror of CreateChunksArguments so the mock can introspect arg.content.len().
     #[derive(CandidType, serde::Deserialize)]
     struct ChunksReqMirror {
         #[allow(dead_code)]
@@ -988,7 +996,7 @@ mod tests {
             content_encoding: "identity".to_string(),
             chunk_ids: vec![0u64],
             last_chunk: None,
-            sha256: Some(vec![0u8; 32]),
+            sha256: Some(serde_bytes::ByteBuf::from(vec![0u8; 32])),
         })
     }
 
@@ -1222,7 +1230,7 @@ mod tests {
             .iter()
             .map(|(enc, sha)| AssetEncodingDetails {
                 content_encoding: enc.to_string(),
-                sha256: sha.clone(),
+                sha256: sha.clone().map(serde_bytes::ByteBuf::from),
             })
             .collect();
         (
@@ -2227,7 +2235,7 @@ mod tests {
                 content_type: "text/plain".to_string(),
                 encodings: vec![AssetEncodingDetails {
                     content_encoding: "identity".to_string(),
-                    sha256: Some(identity_sha),
+                    sha256: Some(serde_bytes::ByteBuf::from(identity_sha)),
                 }],
             }],
         );
@@ -2368,7 +2376,7 @@ mod tests {
                 content_type: "text/html".to_string(),
                 encodings: vec![AssetEncodingDetails {
                     content_encoding: "identity".to_string(),
-                    sha256: Some(identity_sha),
+                    sha256: Some(serde_bytes::ByteBuf::from(identity_sha)),
                 }],
             }],
         );

@@ -387,7 +387,7 @@ impl State {
 
         // Scan redirect rules in declaration order; first match wins.
         for (idx, rule) in self.redirect_rules.iter().enumerate() {
-            if !rule.matches(path) {
+            if !crate::redirect::matches(rule, path) {
                 continue;
             }
             let Some(entry) = self
@@ -433,7 +433,7 @@ impl State {
                 // Synthetic entries only cover 3xx redirects — empty body.
                 let cert_expr_header =
                     crate::certification::build_ic_certificate_expression_header(expression);
-                let mut headers = rule.certified_headers();
+                let mut headers = crate::redirect::certified_headers(rule);
                 headers.push((cert_expr_header.0, cert_expr_header.1));
                 headers.push(cert_header);
 
@@ -638,7 +638,7 @@ impl State {
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         let target_key = rule.to.clone();
         let target = self.assets.get(&target_key)?;
-        let location = rule.tree_location();
+        let location = crate::redirect::tree_location(rule);
         let mut tree_paths = Vec::new();
         for (enc_name, enc) in &target.encodings {
             let Some(expr) = enc.certificate_expression.as_ref() else {
