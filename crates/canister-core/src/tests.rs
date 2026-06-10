@@ -1,4 +1,4 @@
-use crate::batch::{ComputationStatus, BATCH_EXPIRY_NANOS};
+use crate::batch::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
@@ -6,9 +6,9 @@ use crate::stable::StableState;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    AssetProperties, BatchId, BatchOperation, CommitBatchArguments, CreateAssetArguments,
-    DeleteAssetArguments, DeleteBatchArguments, GetArg, GetChunkArg, ListRequest,
-    SetAssetContentArguments, SetAssetPropertiesArguments,
+    AssetProperties, BatchOperation, CancelSyncArguments, CreateAssetArguments,
+    DeleteAssetArguments, ExecuteOperationsArguments, GetArg, GetChunkArg, ListRequest, SessionId,
+    SetAssetContentArguments, SetAssetPropertiesArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
 use crate::CreateChunksArg;
@@ -204,40 +204,61 @@ impl RequestBuilder {
     }
 }
 
+/// Starts a sync and returns its session id, panicking if the canister reports
+/// `Busy` (no concurrent sync is expected in these single-threaded tests).
+fn start_session(state: &mut State, ctx: &SystemContext) -> SessionId {
+    match state.start_sync(some_principal(), ctx) {
+        StartSyncResult::Started { session_id } => session_id,
+        other => panic!("expected Started, got {other:?}"),
+    }
+}
+
+/// Runs `operations` to completion in a single finalizing `execute_operations`
+/// (`is_final: true`), the way a small sync would.
+fn execute_all(
+    state: &mut State,
+    session_id: SessionId,
+    operations: Vec<BatchOperation>,
+    ctx: &SystemContext,
+) {
+    run_computation_until_completion(|progress| {
+        state.execute_operations(
+            &ExecuteOperationsArguments {
+                session_id,
+                operations: operations.clone(),
+                is_final: true,
+            },
+            progress,
+            ctx,
+        )
+    })
+    .unwrap();
+}
+
 fn create_assets(
     state: &mut State,
     system_context: &SystemContext,
     assets: Vec<AssetBuilder>,
-) -> BatchId {
-    let batch_id = state.create_batch(system_context);
+) -> SessionId {
+    let session_id = start_session(state, system_context);
 
     let operations = assemble_create_assets_and_set_contents_operations(
         state,
         system_context,
         assets,
-        &batch_id,
+        session_id,
     );
 
-    run_computation_until_completion(|progress| {
-        state.commit_batch(
-            &CommitBatchArguments {
-                batch_id: batch_id.clone(),
-                operations: operations.clone(),
-            },
-            progress,
-            system_context,
-        )
-    })
-    .unwrap();
+    execute_all(state, session_id, operations, system_context);
 
-    batch_id
+    session_id
 }
 
 fn assemble_create_assets_and_set_contents_operations(
     state: &mut State,
     system_context: &SystemContext,
     assets: Vec<AssetBuilder>,
-    batch_id: &BatchId,
+    session_id: SessionId,
 ) -> Vec<BatchOperation> {
     let mut operations = vec![];
 
@@ -257,7 +278,7 @@ fn assemble_create_assets_and_set_contents_operations(
             let chunk_ids = state
                 .create_chunks(
                     CreateChunksArg {
-                        batch_id: batch_id.clone(),
+                        session_id,
                         content: chunks,
                     },
                     system_context,
@@ -292,7 +313,7 @@ fn can_create_assets_using_batch_api() {
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
 
-    let batch_id = create_assets(
+    let session_id = create_assets(
         &mut state,
         &system_context,
         vec![AssetBuilder::new("/contents.html", "text/html").with_encoding("identity", vec![BODY])],
@@ -308,18 +329,19 @@ fn can_create_assets_using_batch_api() {
     assert_eq!(response.status_code, 200);
     assert_eq!(response.body.as_ref(), BODY);
 
-    // Try to update a completed batch.
+    // The finalizing execute_operations ended the sync, so the session id is no
+    // longer valid for further chunk uploads.
     let error_msg = state
         .create_chunks(
             CreateChunksArg {
-                batch_id,
+                session_id,
                 content: vec![ByteBuf::new()],
             },
             &system_context,
         )
         .unwrap_err();
 
-    let expected = "batch not found";
+    let expected = "no active sync";
     assert!(
         error_msg.contains(expected),
         "expected '{expected}' error, got: {error_msg}"
@@ -460,7 +482,7 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
-    let batch_id = state.create_batch(&system_context);
+    let session_id = start_session(state, &system_context);
     let ops = vec![BatchOperation::SetRedirectRules(
         SetRedirectRulesArguments {
             rules: vec![RedirectRule {
@@ -471,17 +493,7 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
             }],
         },
     )];
-    run_computation_until_completion(|progress| {
-        state.commit_batch(
-            &CommitBatchArguments {
-                batch_id: batch_id.clone(),
-                operations: ops.clone(),
-            },
-            progress,
-            &system_context,
-        )
-    })
-    .unwrap();
+    execute_all(state, session_id, ops, &system_context);
 }
 
 fn set_exact_rewrite_rule(state: &mut State, from: &str, to: &str) {
@@ -492,7 +504,7 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
-    let batch_id = state.create_batch(&system_context);
+    let session_id = start_session(state, &system_context);
     let rules = pairs
         .iter()
         .map(|(from, to)| RedirectRule {
@@ -505,78 +517,126 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
     let ops = vec![BatchOperation::SetRedirectRules(
         SetRedirectRulesArguments { rules },
     )];
-    run_computation_until_completion(|progress| {
-        state.commit_batch(
-            &CommitBatchArguments {
-                batch_id: batch_id.clone(),
-                operations: ops.clone(),
-            },
-            progress,
-            &system_context,
-        )
-    })
-    .unwrap();
+    execute_all(state, session_id, ops, &system_context);
 }
 
 #[test]
-fn batches_are_dropped_after_timeout() {
+fn second_sync_rejected_while_first_is_active() {
+    // A different principal cannot start a sync while another's is in progress
+    // and not yet stale.
     let mut state = State::default();
-    let mut system_context = mock_system_context();
+    let system_context = mock_system_context();
 
-    let batch_1 = state.create_batch(&system_context);
+    let owner_a = some_principal();
+    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+    assert_ne!(owner_a, owner_b);
 
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+    let StartSyncResult::Started { .. } = state.start_sync(owner_a, &system_context) else {
+        panic!("first start_sync should succeed");
+    };
 
-    let _chunk_1 = state
-        .create_chunks(
-            CreateChunksArg {
-                batch_id: batch_1.clone(),
-                content: vec![ByteBuf::from(BODY.to_vec())],
-            },
-            &system_context,
-        )
-        .unwrap();
-
-    system_context.current_timestamp_ns =
-        system_context.current_timestamp_ns + BATCH_EXPIRY_NANOS + 1;
-    let _batch_2 = state.create_batch(&system_context);
-
-    match state.create_chunks(
-        CreateChunksArg {
-            batch_id: batch_1,
-            content: vec![ByteBuf::from(BODY.to_vec())],
-        },
-        &system_context,
-    ) {
-        Err(err) if err.contains("batch not found") => (),
-        other => panic!("expected 'batch not found' error, got: {other:?}"),
+    match state.start_sync(owner_b, &system_context) {
+        StartSyncResult::Busy { owner, .. } => assert_eq!(owner, owner_a),
+        other => panic!("expected Busy, got {other:?}"),
     }
 }
 
 #[test]
-fn can_delete_batch_with_chunks() {
+fn owner_can_reclaim_their_own_sync_immediately() {
+    // The same principal restarting (e.g. retrying a failed deploy) reclaims
+    // its own non-stale sync and gets a fresh, monotonically larger id.
     let mut state = State::default();
     let system_context = mock_system_context();
+    let owner = some_principal();
 
-    let batch_1 = state.create_batch(&system_context);
+    let id1 = start_session(&mut state, &system_context);
+    let id2 = match state.start_sync(owner, &system_context) {
+        StartSyncResult::Started { session_id } => session_id,
+        other => panic!("expected Started, got {other:?}"),
+    };
+    assert!(id2 > id1, "session ids must be monotonic: {id2} > {id1}");
+}
+
+#[test]
+fn stale_sync_can_be_reclaimed_by_another_principal() {
+    // After the idle timeout, a different principal may take over an abandoned
+    // sync. Reclaiming clears the previous session's staged chunks.
+    let mut state = State::default();
+    let mut system_context = mock_system_context();
+    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+
+    let id1 = start_session(&mut state, &system_context);
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    let _chunk_1 = state
+    state
         .create_chunks(
             CreateChunksArg {
-                batch_id: batch_1.clone(),
+                session_id: id1,
+                content: vec![ByteBuf::from(BODY.to_vec())],
+            },
+            &system_context,
+        )
+        .unwrap();
+    assert!(!state.chunks.is_empty(), "chunk should be staged");
+
+    // Advance past the idle timeout, then a different principal reclaims it.
+    system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS + 1;
+    match state.start_sync(owner_b, &system_context) {
+        StartSyncResult::Started { session_id } => assert!(session_id > id1),
+        other => panic!("expected Started, got {other:?}"),
+    }
+    assert!(
+        state.chunks.is_empty(),
+        "reclaim must drop the previous session's chunks"
+    );
+
+    // The old session id is no longer valid.
+    let err = state
+        .create_chunks(
+            CreateChunksArg {
+                session_id: id1,
+                content: vec![ByteBuf::from(BODY.to_vec())],
+            },
+            &system_context,
+        )
+        .unwrap_err();
+    assert!(err.contains("no active sync"), "got: {err}");
+}
+
+#[test]
+fn cancel_sync_releases_the_lock_for_the_owner_only() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+    let owner = some_principal();
+    let other = Principal::from_text("aaaaa-aa").unwrap();
+
+    let session_id = start_session(&mut state, &system_context);
+
+    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+    state
+        .create_chunks(
+            CreateChunksArg {
+                session_id,
                 content: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
         .unwrap();
 
-    let delete_args = DeleteBatchArguments { batch_id: batch_1 };
-    assert_eq!(Ok(()), state.delete_batch(delete_args.clone()));
+    // A non-owner cannot cancel someone else's sync.
+    assert!(state
+        .cancel_sync(CancelSyncArguments { session_id }, other)
+        .is_err());
+
+    // The owner can, which clears staged chunks; a second cancel then errors.
     assert_eq!(
-        Err("batch not found".to_string()),
-        state.delete_batch(delete_args)
+        Ok(()),
+        state.cancel_sync(CancelSyncArguments { session_id }, owner)
     );
+    assert!(state.chunks.is_empty());
+    assert!(state
+        .cancel_sync(CancelSyncArguments { session_id }, owner)
+        .is_err());
 }
 
 #[test]
@@ -1462,7 +1522,7 @@ mod last_state_update_timestamp {
     use super::*;
 
     #[test]
-    fn timestamp_updates_on_commit_batch() {
+    fn timestamp_updates_on_execute_operations() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1470,23 +1530,17 @@ mod last_state_update_timestamp {
         assert_eq!(state.last_state_update_timestamp_ns(), 0);
 
         // Create and commit a batch with asset operations
-        let batch_id = state.create_batch(&system_context);
-
-        run_computation_until_completion(|progress| {
-            state.commit_batch(
-                &CommitBatchArguments {
-                    batch_id: batch_id.clone(),
-                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                        key: "/test.txt".to_string(),
-                        content_type: "text/plain".to_string(),
-                        headers: None,
-                    })],
-                },
-                progress,
-                &system_context,
-            )
-        })
-        .unwrap();
+        let session_id = start_session(&mut state, &system_context);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![BatchOperation::CreateAsset(CreateAssetArguments {
+                key: "/test.txt".to_string(),
+                content_type: "text/plain".to_string(),
+                headers: None,
+            })],
+            &system_context,
+        );
 
         // Timestamp should be updated to system context timestamp
         assert_eq!(
@@ -1505,48 +1559,35 @@ mod last_state_update_timestamp {
 
         // First operation at time T1: create an asset.
         let initial_time = system_context.current_timestamp_ns;
-        let batch_id = state.create_batch(&system_context);
-        run_computation_until_completion(|progress| {
-            state.commit_batch(
-                &CommitBatchArguments {
-                    batch_id: batch_id.clone(),
-                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                        key: "/test.txt".to_string(),
-                        content_type: "text/plain".to_string(),
-                        headers: None,
-                    })],
-                },
-                progress,
-                &system_context,
-            )
-        })
-        .unwrap();
+        let session_id = start_session(&mut state, &system_context);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![BatchOperation::CreateAsset(CreateAssetArguments {
+                key: "/test.txt".to_string(),
+                content_type: "text/plain".to_string(),
+                headers: None,
+            })],
+            &system_context,
+        );
         assert_eq!(state.last_state_update_timestamp_ns(), initial_time);
 
         // Second operation at time T2 (advanced)
         system_context.current_timestamp_ns += 1_000_000_000;
         let updated_time = system_context.current_timestamp_ns;
 
-        let batch_id = state.create_batch(&system_context);
-        run_computation_until_completion(|progress| {
-            state.commit_batch(
-                &CommitBatchArguments {
-                    batch_id: batch_id.clone(),
-                    operations: vec![BatchOperation::SetAssetProperties(
-                        SetAssetPropertiesArguments {
-                            key: "/test.txt".to_string(),
-                            headers: Some(Some(vec![(
-                                "x-custom".to_string(),
-                                "value".to_string(),
-                            )])),
-                        },
-                    )],
+        let session_id = start_session(&mut state, &system_context);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![BatchOperation::SetAssetProperties(
+                SetAssetPropertiesArguments {
+                    key: "/test.txt".to_string(),
+                    headers: Some(Some(vec![("x-custom".to_string(), "value".to_string())])),
                 },
-                progress,
-                &system_context,
-            )
-        })
-        .unwrap();
+            )],
+            &system_context,
+        );
 
         // Timestamp should be updated to new time
         assert_eq!(state.last_state_update_timestamp_ns(), updated_time);
@@ -1559,22 +1600,17 @@ mod last_state_update_timestamp {
         let system_context = mock_system_context();
 
         // Commit a batch to update the timestamp.
-        let batch_id = state.create_batch(&system_context);
-        run_computation_until_completion(|progress| {
-            state.commit_batch(
-                &CommitBatchArguments {
-                    batch_id: batch_id.clone(),
-                    operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                        key: "/test.txt".to_string(),
-                        content_type: "text/plain".to_string(),
-                        headers: None,
-                    })],
-                },
-                progress,
-                &system_context,
-            )
-        })
-        .unwrap();
+        let session_id = start_session(&mut state, &system_context);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![BatchOperation::CreateAsset(CreateAssetArguments {
+                key: "/test.txt".to_string(),
+                content_type: "text/plain".to_string(),
+                headers: None,
+            })],
+            &system_context,
+        );
 
         let expected_timestamp = state.last_state_update_timestamp_ns();
         assert_eq!(expected_timestamp, system_context.current_timestamp_ns);
@@ -1817,11 +1853,11 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context);
+        let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
-                    batch_id: batch_id.clone(),
+                    session_id,
                     content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
@@ -1861,11 +1897,11 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context);
+        let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
-                    batch_id: batch_id.clone(),
+                    session_id,
                     content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
@@ -1905,11 +1941,11 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context);
+        let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
-                    batch_id: batch_id.clone(),
+                    session_id,
                     content: vec![ByteBuf::from(CONTENT)],
                 },
                 &system_context,
@@ -1962,11 +1998,11 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunks
-        let batch_id = state.create_batch(&system_context);
+        let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
-                    batch_id: batch_id.clone(),
+                    session_id,
                     content: vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
                 },
                 &system_context,
@@ -2010,11 +2046,11 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // Create batch and chunk
-        let batch_id = state.create_batch(&system_context);
+        let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
-                    batch_id: batch_id.clone(),
+                    session_id,
                     content: vec![ByteBuf::from(CHUNK_1)],
                 },
                 &system_context,
@@ -2047,20 +2083,21 @@ mod compute_state_hash {
         let system_context = mock_system_context();
 
         // Setup state
-        let batch_id = state.create_batch(&system_context);
+        let session_id = start_session(&mut state, &system_context);
         let chunk_ids = state
             .create_chunks(
                 CreateChunksArg {
-                    batch_id: batch_id.clone(),
+                    session_id,
                     content: vec![ByteBuf::from(b"content1")],
                 },
                 &system_context,
             )
             .unwrap();
 
-        let args = CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations: vec![
+        execute_all(
+            &mut state,
+            session_id,
+            vec![
                 BatchOperation::CreateAsset(CreateAssetArguments {
                     key: "asset1".to_string(),
                     content_type: "text/plain".to_string(),
@@ -2074,32 +2111,27 @@ mod compute_state_hash {
                     sha256: None,
                 }),
             ],
-        };
-        run_computation_until_completion(|progress| {
-            state.commit_batch(&args, progress, &system_context)
-        })
-        .unwrap();
+            &system_context,
+        );
 
         // Reset computation
         run_computation_until_completion(|_progress| state.compute_state_hash()).unwrap(); // Ensure it's done or started
 
-        // Update state using commit_batch to ensure timestamp is updated
-        // We need a new system context with a later timestamp
+        // Update state using execute_operations to ensure timestamp is updated.
+        // We need a new system context with a later timestamp.
         let system_context_later = crate::system_context::SystemContext::new_with_options(200);
 
-        let batch_id = state.create_batch(&system_context_later);
-        let args = CommitBatchArguments {
-            batch_id: batch_id.clone(),
-            operations: vec![BatchOperation::CreateAsset(CreateAssetArguments {
+        let session_id = start_session(&mut state, &system_context_later);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![BatchOperation::CreateAsset(CreateAssetArguments {
                 key: "asset2".to_string(),
                 content_type: "text/plain".to_string(),
                 headers: None,
             })],
-        };
-        run_computation_until_completion(|progress| {
-            state.commit_batch(&args, progress, &system_context_later)
-        })
-        .unwrap();
+            &system_context_later,
+        );
 
         // Since the new API doesn't allow controlling instruction counter per call,
         // we can't easily test interruption. This test now just verifies completion.
@@ -2119,12 +2151,13 @@ mod redirect_rules {
 
     fn commit(state: &mut State, ops: Vec<BatchOperation>) -> Result<(), String> {
         let system_context = mock_system_context();
-        let batch_id = state.create_batch(&system_context);
+        let session_id = start_session(state, &system_context);
         run_computation_until_completion(|progress| {
-            state.commit_batch(
-                &CommitBatchArguments {
-                    batch_id: batch_id.clone(),
+            state.execute_operations(
+                &ExecuteOperationsArguments {
+                    session_id,
                     operations: ops.clone(),
+                    is_final: true,
                 },
                 progress,
                 &system_context,

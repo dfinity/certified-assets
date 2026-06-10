@@ -1,7 +1,7 @@
-type BatchId = nat;
-type ChunkId = nat;
+type SessionId = nat64;
+type ChunkId = nat64;
 type Key = text;
-type Time = int;
+type Time = nat64;
 
 type CreateAssetArguments = record {
   key: Key;
@@ -57,13 +57,23 @@ type RedirectRule = record {
   headers: opt vec HeaderField;
 };
 
-type CommitBatchArguments = record {
-  batch_id: BatchId;
-  operations: vec BatchOperationKind
+type ExecuteOperationsArguments = record {
+  session_id: SessionId;
+  operations: vec BatchOperationKind;
+  // Set on the last call of a sync: once all operations are applied, the
+  // canister finalizes the sync and returns to "no ongoing sync".
+  is_final: bool;
 };
 
-type DeleteBatchArguments = record {
-  batch_id: BatchId;
+type CancelSyncArguments = record {
+  session_id: SessionId;
+};
+
+// Result of start_sync. `Busy` is a normal outcome (not an error): a sync is
+// already in progress and the caller may not take it over yet.
+type StartSyncResult = variant {
+  Started: record { session_id: SessionId };
+  Busy: record { owner: principal; idle_for_secs: nat64 };
 };
 
 type HeaderField = record { text; text; };
@@ -170,20 +180,26 @@ service: {
     tree: blob;
   }) query;
 
-  // ───────── Batch upload ─────────
+  // ───────── Sync ─────────
   //
-  // Assets are only ever mutated through committed batches — there are no
-  // single-asset mutation endpoints. A batch's `operations` carry the
-  // per-asset changes (create, set/unset content, set properties, delete),
-  // applied atomically when the batch is committed.
+  // Assets are only ever mutated through a sync. At most one sync runs at a
+  // time. `start_sync` returns a session id that all subsequent calls of the
+  // sync must carry; the canister rejects calls bearing a superseded id.
+  // Operations (create, set/unset content, set properties, delete) are applied
+  // by `execute_operations`; the sync finalizes on the call flagged `is_final`.
 
-  create_batch : () -> (record { batch_id: BatchId });
-  create_chunks: (record { batch_id: BatchId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });
+  // Begin a sync. Returns a session id, or `Busy` if another non-stale sync is
+  // already in progress (the owner can always reclaim their own sync).
+  start_sync : () -> (StartSyncResult);
+  // Stage content chunks under the sync. Returns ids referenced by
+  // SetAssetContent operations.
+  create_chunks: (record { session_id: SessionId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });
 
-  // Perform all operations successfully, or reject
-  commit_batch: (CommitBatchArguments) -> ();
-  // Delete a batch that has been created but not yet committed
-  delete_batch: (DeleteBatchArguments) -> ();
+  // Apply a group of operations. Perform all successfully, or reject.
+  execute_operations: (ExecuteOperationsArguments) -> ();
+  // Abandon the active sync, releasing the lock without waiting for it to go
+  // stale. Only the sync's owner may cancel it.
+  cancel_sync: (CancelSyncArguments) -> ();
 
   // ───────── Authorization ─────────
   // A set of extra principals authorized to sync assets. Canister controllers
