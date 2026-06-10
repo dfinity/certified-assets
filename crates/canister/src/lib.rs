@@ -56,8 +56,8 @@ fn http_request_streaming_callback(
 }
 
 #[query]
-fn get_redirect_rules() -> Vec<RedirectRule> {
-    canister_core::get_redirect_rules()
+fn get_redirect_rules(start_index: u64) -> Vec<RedirectRule> {
+    canister_core::get_redirect_rules(start_index)
 }
 
 // Update methods

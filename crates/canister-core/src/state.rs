@@ -25,6 +25,11 @@ use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryInto;
 
+/// Maximum number of items the canister returns from a single paginated query
+/// (`get_asset_details`, `get_redirect_rules`). The caller follows the cursor
+/// until it sees a short or empty page; it never needs to know this value.
+pub(crate) const PAGE_SIZE: usize = 100;
+
 #[derive(Default)]
 pub struct State {
     // Ordered by key so `get_asset_details` can page with a key cursor — a
@@ -187,8 +192,6 @@ impl State {
     /// `PAGE_SIZE` assets are returned; an empty result means there is nothing
     /// after `start_after`.
     pub fn get_asset_details(&self, start_after: Option<AssetKey>) -> Vec<AssetDetails> {
-        const PAGE_SIZE: usize = 100;
-
         use std::ops::Bound::{Excluded, Unbounded};
         let lower = start_after.as_deref().map_or(Unbounded, Excluded);
 
@@ -421,8 +424,24 @@ impl State {
         Vec::new()
     }
 
-    pub fn get_redirect_rules(&self) -> Vec<crate::redirect::RedirectRule> {
-        self.redirect_rules.clone()
+    /// Serves the `get_redirect_rules` endpoint: one page of rules in match
+    /// order. Rules live in a `Vec` whose order is semantic (first match wins)
+    /// and where no element has a unique key, so the cursor is a positional
+    /// `start_index` rather than a value cursor like `get_asset_details` uses.
+    /// `start_index` is the number of rules already seen; at most `PAGE_SIZE`
+    /// rules are returned, and an empty result means there is nothing at or
+    /// after `start_index`. The seek is O(1) on a `Vec` — no sort or
+    /// allocation — so positional paging carries none of the cost that ruled it
+    /// out for the (hash-stored) asset list.
+    pub fn get_redirect_rules(&self, start_index: u64) -> Vec<crate::redirect::RedirectRule> {
+        let start = start_index as usize;
+        self.redirect_rules
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .take(PAGE_SIZE)
+            .cloned()
+            .collect()
     }
 
     /// Rebuild the certified-tree entries for `redirect_rules`. Called whenever

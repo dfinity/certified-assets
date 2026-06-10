@@ -1866,7 +1866,58 @@ mod redirect_rules {
         )
         .unwrap();
 
-        assert_eq!(state.get_redirect_rules(), rules);
+        assert_eq!(state.get_redirect_rules(0), rules);
+    }
+
+    #[test]
+    fn get_redirect_rules_paginates_by_index() {
+        // Paging is a pure read over the rule vec, so populate it directly
+        // rather than committing (and certifying) 200+ rules — the write path
+        // and certification are exercised by the round-trip tests. Each rule's
+        // `to` encodes its index so we can assert order and offset.
+        let mut state = State::default();
+        let total = crate::state::PAGE_SIZE * 2 + 37; // two full pages + a partial third
+        state.redirect_rules = (0..total)
+            .map(|i| RedirectRule {
+                from: RulePattern::Exact(format!("/from-{i}")),
+                to: format!("/to-{i}"),
+                status: 301,
+                headers: None,
+            })
+            .collect();
+
+        // A page is capped at PAGE_SIZE and begins exactly at the cursor.
+        let first = state.get_redirect_rules(0);
+        assert_eq!(first.len(), crate::state::PAGE_SIZE);
+        assert_eq!(first[0].to, "/to-0");
+
+        // The page at an offset begins at that index.
+        let mid = state.get_redirect_rules(crate::state::PAGE_SIZE as u64);
+        assert_eq!(mid[0].to, format!("/to-{}", crate::state::PAGE_SIZE));
+
+        // The final page is the short remainder; a cursor at or past the end is
+        // empty, terminating a caller's walk.
+        let last = state.get_redirect_rules((crate::state::PAGE_SIZE * 2) as u64);
+        assert_eq!(last.len(), 37);
+        assert!(state.get_redirect_rules(total as u64).is_empty());
+        assert!(state.get_redirect_rules(total as u64 + 1000).is_empty());
+
+        // Walking the cursor reassembles the full list in order.
+        let mut collected = Vec::new();
+        let mut start = 0u64;
+        loop {
+            let page = state.get_redirect_rules(start);
+            if page.is_empty() {
+                break;
+            }
+            start += page.len() as u64;
+            collected.extend(page);
+        }
+        assert_eq!(collected.len(), total);
+        assert!(collected
+            .iter()
+            .enumerate()
+            .all(|(i, r)| r.to == format!("/to-{i}")));
     }
 
     #[test]
@@ -1914,7 +1965,7 @@ mod redirect_rules {
         assert!(err.contains("unsupported status code"), "got: {err}");
 
         assert_eq!(
-            state.get_redirect_rules(),
+            state.get_redirect_rules(0),
             initial,
             "rules must be unchanged after a failed SetRedirectRules"
         );
@@ -1938,7 +1989,7 @@ mod redirect_rules {
         let stable: StableState = state.into();
         let state: State = stable.into();
 
-        assert_eq!(state.get_redirect_rules(), rules);
+        assert_eq!(state.get_redirect_rules(0), rules);
     }
 
     #[test]
@@ -1954,7 +2005,7 @@ mod redirect_rules {
             )],
         )
         .unwrap();
-        assert!(!state.get_redirect_rules().is_empty());
+        assert!(!state.get_redirect_rules(0).is_empty());
 
         commit(
             &mut state,
@@ -1963,7 +2014,7 @@ mod redirect_rules {
             )],
         )
         .unwrap();
-        assert!(state.get_redirect_rules().is_empty());
+        assert!(state.get_redirect_rules(0).is_empty());
     }
 
     #[test]

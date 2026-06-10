@@ -131,8 +131,37 @@ pub fn cancel_sync(c: &impl CanisterCall, session_id: u64) -> Result<(), String>
     )
 }
 
-pub fn get_redirect_rules(c: &impl CanisterCall) -> Result<Vec<RedirectRule>, String> {
-    c.call("get_redirect_rules", (), CallType::Query, true)
+// Fetch the complete redirect-rule list by paging through `get_redirect_rules`,
+// preserving order — the diff matches rules positionally and the canister
+// applies them first-match-wins, so order is significant (unlike the asset map).
+// The cursor is a positional `start_index` (the count seen so far) rather than a
+// value cursor like the asset walk uses: rules have no unique key, so only a
+// position can name "where we left off".
+//
+// As with `list_all_assets`, the canister owns the page size; a page shorter
+// than the previous full page is the last one (stop without the extra empty
+// round-trip), and an empty page also ends the walk.
+pub fn list_all_redirect_rules(c: &impl CanisterCall) -> Result<Vec<RedirectRule>, String> {
+    let mut all: Vec<RedirectRule> = Vec::new();
+    let mut start_index: u64 = 0;
+    let mut prev_page_size: Option<usize> = None;
+    loop {
+        let page: Vec<RedirectRule> =
+            c.call("get_redirect_rules", start_index, CallType::Query, true)?;
+        let n = page.len();
+        if n == 0 {
+            break;
+        }
+        start_index += n as u64;
+        all.extend(page);
+        if let Some(prev) = prev_page_size {
+            if n < prev {
+                break;
+            }
+        }
+        prev_page_size = Some(n);
+    }
+    Ok(all)
 }
 
 // Whether the signing identity may sync assets (authorized or a controller).
@@ -241,5 +270,85 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(result.len(), 273);
+    }
+
+    struct RulePagedMock {
+        pages: RefCell<VecDeque<Vec<RedirectRule>>>,
+    }
+
+    impl RulePagedMock {
+        fn new(pages: Vec<Vec<RedirectRule>>) -> Self {
+            Self {
+                pages: RefCell::new(VecDeque::from(pages)),
+            }
+        }
+    }
+
+    impl CanisterCall for RulePagedMock {
+        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
+        where
+            A: CandidType,
+            R: CandidType + DeserializeOwned,
+        {
+            assert_eq!(method, "get_redirect_rules");
+            let page = self.pages.borrow_mut().pop_front().unwrap_or_default();
+            let bytes = candid::encode_one(page).map_err(|e| e.to_string())?;
+            candid::decode_one(&bytes).map_err(|e| e.to_string())
+        }
+    }
+
+    // Rules whose `to` encodes a global index, so a reassembled walk can be
+    // checked for both completeness and order.
+    fn mk_rules(start: usize, n: usize) -> Vec<RedirectRule> {
+        (start..start + n)
+            .map(|i| RedirectRule {
+                from: RulePattern::Exact(format!("/from-{i}")),
+                to: format!("/to-{i}"),
+                status: 301,
+                headers: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_all_redirect_rules_empty_canister_returns_empty() {
+        let result = list_all_redirect_rules(&RulePagedMock::new(vec![])).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_all_redirect_rules_single_partial_page_returns_all() {
+        let result = list_all_redirect_rules(&RulePagedMock::new(vec![mk_rules(0, 5)])).unwrap();
+        assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn list_all_redirect_rules_partial_last_page_terminates_early() {
+        // 100 + 50: the smaller second page ends the walk with no third request.
+        let mock = RulePagedMock::new(vec![mk_rules(0, 100), mk_rules(100, 50)]);
+        let result = list_all_redirect_rules(&mock).unwrap();
+        assert_eq!(result.len(), 150);
+        assert!(
+            mock.pages.borrow().is_empty(),
+            "no third request should be made"
+        );
+    }
+
+    #[test]
+    fn list_all_redirect_rules_full_pages_then_empty_preserve_order() {
+        // 100 + 100 + 0: order must survive across pages. Unlike the asset walk
+        // (which dedupes into a map), rules are matched positionally, so the
+        // concatenation order is the contract.
+        let result = list_all_redirect_rules(&RulePagedMock::new(vec![
+            mk_rules(0, 100),
+            mk_rules(100, 100),
+            vec![],
+        ]))
+        .unwrap();
+        assert_eq!(result.len(), 200);
+        assert!(result
+            .iter()
+            .enumerate()
+            .all(|(i, r)| r.to == format!("/to-{i}")));
     }
 }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::canister::{
     api_version, authorize_via_proxy, can_sync, create_chunks, execute_operations,
-    get_redirect_rules, list_all_assets, start_sync, AssetDetails, BatchOperationKind,
+    list_all_assets, list_all_redirect_rules, start_sync, AssetDetails, BatchOperationKind,
     CanisterCall, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
     RedirectRule, SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
     UnsetAssetContentArguments,
@@ -158,7 +158,7 @@ pub fn sync<C: CanisterCall>(
     let canister_assets: HashMap<String, AssetDetails> = list_all_assets(canister)?;
     println!("canister currently has {} asset(s)", canister_assets.len());
 
-    let canister_rules = get_redirect_rules(canister)?;
+    let canister_rules = list_all_redirect_rules(canister)?;
     println!(
         "canister currently has {} redirect rule(s)",
         canister_rules.len()
@@ -1511,6 +1511,8 @@ mod tests {
                 301,
             )],
         );
+        // Trailing empty page terminates list_all_redirect_rules' cursor walk.
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
 
         let result = sync(
             &mock,
@@ -2296,6 +2298,8 @@ mod tests {
         );
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", canister_rules);
+        // Trailing empty page terminates list_all_redirect_rules' cursor walk.
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
 
         let result = sync(
             &mock,

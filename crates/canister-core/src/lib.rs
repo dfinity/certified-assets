@@ -95,8 +95,8 @@ pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
     with_state(|s| s.get_asset_details(start_after))
 }
 
-pub fn get_redirect_rules() -> Vec<crate::redirect::RedirectRule> {
-    with_state(|s| s.get_redirect_rules())
+pub fn get_redirect_rules(start_index: u64) -> Vec<crate::redirect::RedirectRule> {
+    with_state(|s| s.get_redirect_rules(start_index))
 }
 
 pub fn http_request(req: HttpRequest) -> HttpResponse {
