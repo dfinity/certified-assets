@@ -13,3 +13,6 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking"] 
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true
