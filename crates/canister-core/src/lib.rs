@@ -8,7 +8,6 @@ pub mod rc_bytes;
 pub mod redirect;
 pub mod stable;
 pub mod state;
-pub mod state_hash;
 pub mod system_context;
 pub mod types;
 mod url;
@@ -18,15 +17,14 @@ mod tests;
 
 pub use crate::stable::StableState;
 use crate::{
-    asset::{AssetDetails, EncodedAsset},
+    asset::AssetDetails,
     batch::ComputationStatus,
     certification::AssetKey,
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
     },
-    rc_bytes::RcBytes,
-    state::{CertifiedTree, State},
+    state::State,
     system_context::SystemContext,
     types::*,
 };
@@ -56,13 +54,6 @@ pub fn deauthorize(principal: Principal) {
 
 pub fn list_authorized() -> Vec<Principal> {
     with_state(|s| s.list_authorized().iter().cloned().collect())
-}
-
-pub fn retrieve(key: AssetKey) -> RcBytes {
-    with_state(|s| match s.retrieve(&key) {
-        Ok(bytes) => bytes,
-        Err(msg) => trap(&msg),
-    })
 }
 
 pub fn start_sync() -> StartSyncResult {
@@ -95,37 +86,11 @@ pub async fn execute_operations(arg: ExecuteOperationsArguments) {
     with_state_mut(|s| certified_data_set(s.root_hash()));
 }
 
-pub async fn compute_state_hash() -> Option<String> {
-    loop_with_message_extension_until_completion(|_progress| {
-        with_state_mut(|s| s.compute_state_hash())
-    })
-    .await
-    .ok()
-}
-
-pub fn get_state_info() -> StateInfo {
-    with_state(|s| s.get_state_info())
-}
-
 pub fn cancel_sync(arg: CancelSyncArguments) {
     let caller = msg_caller();
     if let Err(msg) = with_state_mut(|s| s.cancel_sync(arg, caller)) {
         trap(&msg);
     }
-}
-
-pub fn get(arg: GetArg) -> EncodedAsset {
-    with_state(|s| match s.get(arg) {
-        Ok(asset) => asset,
-        Err(msg) => trap(&msg),
-    })
-}
-
-pub fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
-    with_state(|s| match s.get_chunk(arg) {
-        Ok(content) => GetChunkResponse { content },
-        Err(msg) => trap(&msg),
-    })
 }
 
 pub fn list(request: ListRequest) -> Vec<AssetDetails> {
@@ -134,12 +99,6 @@ pub fn list(request: ListRequest) -> Vec<AssetDetails> {
 
 pub fn get_redirect_rules() -> Vec<crate::redirect::RedirectRule> {
     with_state(|s| s.get_redirect_rules())
-}
-
-pub fn certified_tree() -> CertifiedTree {
-    let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
-
-    with_state(|s| s.certified_tree(&certificate))
 }
 
 pub fn http_request(req: HttpRequest) -> HttpResponse {

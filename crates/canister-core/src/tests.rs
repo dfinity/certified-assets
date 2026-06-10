@@ -7,7 +7,7 @@ use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
     AssetProperties, BatchOperationKind, CancelSyncArguments, CreateAssetArguments,
-    DeleteAssetArguments, ExecuteOperationsArguments, GetArg, GetChunkArg, ListRequest, SessionId,
+    DeleteAssetArguments, ExecuteOperationsArguments, ListRequest, SessionId,
     SetAssetContentArguments, SetAssetPropertiesArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
@@ -818,53 +818,6 @@ fn uses_streaming_for_multichunk_assets() {
 }
 
 #[test]
-fn get_and_get_chunk_for_multichunk_assets() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const INDEX_BODY_CHUNK_0: &[u8] = b"<!DOCTYPE html>";
-    const INDEX_BODY_CHUNK_1: &[u8] = b"<html>Index</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![INDEX_BODY_CHUNK_0, INDEX_BODY_CHUNK_1])],
-    );
-
-    let chunk_0 = state
-        .get(GetArg {
-            key: "/index.html".to_string(),
-            accept_encodings: vec!["identity".to_string()],
-        })
-        .unwrap();
-    assert_eq!(chunk_0.content.as_ref(), INDEX_BODY_CHUNK_0);
-
-    let chunk_1 = state
-        .get_chunk(GetChunkArg {
-            key: "/index.html".to_string(),
-            content_encoding: "identity".to_string(),
-            index: Nat::from(1_u8),
-            sha256: chunk_0.sha256,
-        })
-        .unwrap();
-    assert_eq!(chunk_1.as_ref(), INDEX_BODY_CHUNK_1);
-
-    // get_chunk fails if we don't pass the sha256
-    assert_eq!(
-        state
-            .get_chunk(GetChunkArg {
-                key: "/index.html".to_string(),
-                content_encoding: "identity".to_string(),
-                index: Nat::from(1_u8),
-                sha256: None,
-            })
-            .unwrap_err(),
-        "sha256 required".to_string()
-    );
-}
-
-#[test]
 fn supports_cache_control_via_headers() {
     let mut state = State::default();
     let system_context = mock_system_context();
@@ -1518,116 +1471,6 @@ mod certification {
 }
 
 #[cfg(test)]
-mod last_state_update_timestamp {
-    use super::*;
-
-    #[test]
-    fn timestamp_updates_on_execute_operations() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Initial timestamp should be 0
-        assert_eq!(state.last_state_update_timestamp_ns(), 0);
-
-        // Create and commit a batch with asset operations
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context,
-        );
-
-        // Timestamp should be updated to system context timestamp
-        assert_eq!(
-            state.last_state_update_timestamp_ns(),
-            system_context.current_timestamp_ns
-        );
-    }
-
-    #[test]
-    fn timestamp_updates_on_multiple_operations() {
-        let mut state = State::default();
-        let mut system_context = mock_system_context();
-
-        // Initial timestamp should be 0
-        assert_eq!(state.last_state_update_timestamp_ns(), 0);
-
-        // First operation at time T1: create an asset.
-        let initial_time = system_context.current_timestamp_ns;
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context,
-        );
-        assert_eq!(state.last_state_update_timestamp_ns(), initial_time);
-
-        // Second operation at time T2 (advanced)
-        system_context.current_timestamp_ns += 1_000_000_000;
-        let updated_time = system_context.current_timestamp_ns;
-
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperationKind::SetAssetProperties(
-                SetAssetPropertiesArguments {
-                    key: "/test.txt".to_string(),
-                    headers: Some(Some(vec![("x-custom".to_string(), "value".to_string())])),
-                },
-            )],
-            &system_context,
-        );
-
-        // Timestamp should be updated to new time
-        assert_eq!(state.last_state_update_timestamp_ns(), updated_time);
-        assert!(state.last_state_update_timestamp_ns() > initial_time);
-    }
-
-    #[test]
-    fn timestamp_persists_in_stable_state() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Commit a batch to update the timestamp.
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context,
-        );
-
-        let expected_timestamp = state.last_state_update_timestamp_ns();
-        assert_eq!(expected_timestamp, system_context.current_timestamp_ns);
-
-        // Convert to stable state and back
-        let stable_state: StableState = state.into();
-        let restored_state: State = stable_state.into();
-
-        // Timestamp should be preserved
-        assert_eq!(
-            restored_state.last_state_update_timestamp_ns(),
-            expected_timestamp
-        );
-    }
-}
-
-#[cfg(test)]
 mod list_assets {
     use super::*;
 
@@ -1966,14 +1809,21 @@ mod set_asset_content_sha256_verification {
 
         assert!(result.is_ok());
 
-        // Verify the hash was computed correctly by retrieving the asset
-        let retrieved = state
-            .get(GetArg {
-                key: "/test.txt".to_string(),
-                accept_encodings: vec!["identity".to_string()],
+        // Verify the hash was computed correctly by inspecting the listed encoding.
+        let details = state.list_assets(ListRequest::default());
+        let encoding = details
+            .iter()
+            .find(|a| a.key == "/test.txt")
+            .and_then(|a| {
+                a.encodings
+                    .iter()
+                    .find(|e| e.content_encoding == "identity")
             })
-            .unwrap();
-        assert_eq!(retrieved.sha256.unwrap().as_ref(), expected_hash.as_slice());
+            .expect("identity encoding should be listed");
+        assert_eq!(
+            encoding.sha256.as_ref().unwrap().as_ref(),
+            expected_hash.as_slice()
+        );
     }
 
     #[test]
@@ -2069,77 +1919,6 @@ mod set_asset_content_sha256_verification {
             &system_context,
         );
 
-        assert!(result.is_ok());
-    }
-}
-
-#[cfg(test)]
-mod compute_state_hash {
-    use super::*;
-
-    #[test]
-    fn test_compute_state_hash_interruption() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Setup state
-        let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArguments {
-                    session_id,
-                    content: vec![ByteBuf::from(b"content1")],
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        execute_all(
-            &mut state,
-            session_id,
-            vec![
-                BatchOperationKind::CreateAsset(CreateAssetArguments {
-                    key: "asset1".to_string(),
-                    content_type: "text/plain".to_string(),
-                    headers: None,
-                }),
-                BatchOperationKind::SetAssetContent(SetAssetContentArguments {
-                    key: "asset1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids,
-                    last_chunk: None,
-                    sha256: None,
-                }),
-            ],
-            &system_context,
-        );
-
-        // Reset computation
-        run_computation_until_completion(|_progress| state.compute_state_hash()).unwrap(); // Ensure it's done or started
-
-        // Update state using execute_operations to ensure timestamp is updated.
-        // We need a new system context with a later timestamp.
-        let system_context_later = crate::system_context::SystemContext::new_with_options(200);
-
-        let session_id = start_session(&mut state, &system_context_later);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperationKind::CreateAsset(CreateAssetArguments {
-                key: "asset2".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context_later,
-        );
-
-        // Since the new API doesn't allow controlling instruction counter per call,
-        // we can't easily test interruption. This test now just verifies completion.
-        let result = run_computation_until_completion(|_progress| state.compute_state_hash());
-        assert!(result.is_ok());
-
-        // Verify we can call it again
-        let result = run_computation_until_completion(|_progress| state.compute_state_hash());
         assert!(result.is_ok());
     }
 }

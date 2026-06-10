@@ -2,17 +2,14 @@ mod state;
 
 use candid::Principal;
 use canister_core::{
-    asset::{AssetDetails, EncodedAsset},
+    asset::AssetDetails,
     certification::AssetKey,
     guard_can_sync, guard_is_controller,
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
-    rc_bytes::RcBytes,
     redirect::RedirectRule,
-    state::CertifiedTree,
     types::{
         AssetProperties, CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
-        ExecuteOperationsArguments, GetArg, GetChunkArg, GetChunkResponse, ListRequest,
-        StartSyncResult, StateInfo,
+        ExecuteOperationsArguments, ListRequest, StartSyncResult,
     },
 };
 use ic_cdk::{post_upgrade, pre_upgrade, query, update};
@@ -44,28 +41,8 @@ fn api_version() -> u16 {
 }
 
 #[query]
-fn retrieve(key: AssetKey) -> RcBytes {
-    canister_core::retrieve(key)
-}
-
-#[query]
-fn get(arg: GetArg) -> EncodedAsset {
-    canister_core::get(arg)
-}
-
-#[query]
-fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
-    canister_core::get_chunk(arg)
-}
-
-#[query]
 fn list(request: ListRequest) -> Vec<AssetDetails> {
     canister_core::list(request)
-}
-
-#[query]
-fn certified_tree() -> CertifiedTree {
-    canister_core::certified_tree()
 }
 
 #[query]
@@ -83,11 +60,6 @@ fn http_request_streaming_callback(
 #[query]
 fn get_asset_properties(key: AssetKey) -> AssetProperties {
     canister_core::get_asset_properties(key)
-}
-
-#[query]
-fn get_state_info() -> StateInfo {
-    canister_core::get_state_info()
 }
 
 #[query]
@@ -134,11 +106,6 @@ async fn execute_operations(arg: ExecuteOperationsArguments) {
     canister_core::execute_operations(arg).await
 }
 
-#[update]
-async fn compute_state_hash() -> Option<String> {
-    canister_core::compute_state_hash().await
-}
-
 #[update(guard = "guard_can_sync")]
 fn cancel_sync(arg: CancelSyncArguments) {
     canister_core::cancel_sync(arg)
@@ -154,8 +121,8 @@ fn candid_interface_compatibility() {
     let new_interface = __export_service();
 
     // crates/canister -> crates -> workspace root, then candid/assets.did
-    let old_interface = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("../../candid/assets.did");
+    let old_interface =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../candid/assets.did");
 
     println!("Exported interface: {new_interface}");
 

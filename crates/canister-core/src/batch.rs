@@ -210,7 +210,6 @@ impl State {
                     // the batch ends with a consistent rule tree.
                     self.on_redirect_rules_change();
 
-                    self.last_state_update_timestamp_ns = system_context.current_timestamp_ns;
                     return ComputationStatus::Done(());
                 }
 
@@ -256,7 +255,9 @@ impl State {
                         };
                         return ComputationStatus::InProgress(progress);
                     }
-                    BatchOperationKind::UnsetAssetContent(arg) => self.unset_asset_content(arg.clone()),
+                    BatchOperationKind::UnsetAssetContent(arg) => {
+                        self.unset_asset_content(arg.clone())
+                    }
                     BatchOperationKind::DeleteAsset(arg) => {
                         self.delete_asset(arg.clone());
                         Ok(())

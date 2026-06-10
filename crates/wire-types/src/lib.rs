@@ -13,8 +13,7 @@
 //!   [`RedirectRule`] in stable state via CBOR), plus `Clone`/`Debug`/`Eq`.
 //!
 //! Types that only ever live on one side stay in that crate: the canister's
-//! internal response types (`GetChunkResponse`, `StateInfo`, `ListRequest`,
-//! `GetArg`/`GetChunkArg`) and its fuller, authoritative `AssetDetails` producer
+//! internal `ListRequest` and its fuller, authoritative `AssetDetails` producer
 //! type (which carries `length`/`modified`/`headers`) remain in `canister-core`.
 
 use candid::{CandidType, Principal};

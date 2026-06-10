@@ -11,7 +11,6 @@ pub struct StableState {
     pub(crate) stable_assets: HashMap<String, StableAsset>,
 
     pub(crate) next_session_id: u64,
-    pub(crate) last_state_update_timestamp: Option<u64>,
 
     /// Optional so a `StableState` serialized before this field existed still
     /// deserializes cleanly (yields `None`, which we treat as "no rules").
@@ -29,7 +28,6 @@ impl From<crate::state::State> for StableState {
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
             next_session_id: state.next_session_id,
-            last_state_update_timestamp: Some(state.last_state_update_timestamp_ns),
             redirect_rules: Some(state.redirect_rules),
         }
     }

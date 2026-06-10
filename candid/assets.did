@@ -87,11 +87,6 @@ type SetAssetPropertiesArguments = record {
   headers: opt opt vec HeaderField;
 };
 
-type StateInfo = record {
-  last_state_update_timestamp: nat64;
-  state_hash: opt text;
-};
-
 service: {
   // ───────── Canister metadata ─────────
 
@@ -105,29 +100,6 @@ service: {
   http_request_streaming_callback: (token: StreamingToken) -> (opt StreamingCallbackHttpResponse) query;
 
   // ───────── Asset queries ─────────
-
-  // Single-call retrieval of a small asset that fits in one response message.
-  retrieve: (key: Key) -> (blob) query;
-
-  get: (record {
-    key: Key;
-    accept_encodings: vec text;
-  }) -> (record {
-    content: blob; // may be the entirety of the content, or just chunk index 0
-    content_type: text;
-    content_encoding: text;
-    sha256: opt blob; // sha256 of entire asset encoding, calculated by dfx and passed in SetAssetContentArguments
-    total_length: nat; // all chunks except last have size == content.size()
-  }) query;
-
-  // if get() returned chunks > 1, call this to retrieve them.
-  // chunks may or may not be split up at the same boundaries as presented to create_chunks().
-  get_chunk: (record {
-    key: Key;
-    content_encoding: text;
-    index: nat;
-    sha256: opt blob;  // sha256 of entire asset encoding, calculated by dfx and passed in SetAssetContentArguments
-  }) -> (record { content: blob }) query;
 
   list : (record { start: opt nat; length: opt nat }) -> (vec record {
     key: Key;
@@ -144,10 +116,7 @@ service: {
   get_asset_properties : (key: Key) -> (record {
     headers: opt vec HeaderField; } ) query;
 
-  certified_tree : () -> (record {
-    certificate: blob;
-    tree: blob;
-  }) query;
+  get_redirect_rules: () -> (vec RedirectRule) query;
 
   // ───────── Sync ─────────
   //
@@ -180,15 +149,4 @@ service: {
   list_authorized: () -> (vec principal);
   // Whether the calling identity may sync assets (authorized or a controller).
   can_sync: () -> (bool) query;
-
-  // ───────── Redirect rules ─────────
-
-  get_redirect_rules: () -> (vec RedirectRule) query;
-
-  // ───────── State integrity ─────────
-
-  // Get information about the current state of the canister
-  get_state_info: () -> (StateInfo) query;
-  // Compute a hash over the canister content. Call until it returns Some(hash).
-  compute_state_hash: () -> (opt text);
 }

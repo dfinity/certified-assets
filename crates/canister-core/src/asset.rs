@@ -4,8 +4,8 @@
 //! - [`Asset`] / [`AssetEncoding`] hold an asset and its per-encoding response
 //!   metadata, including the per-encoding response hashes used for v2
 //!   certification.
-//! - [`EncodedAsset`], [`AssetDetails`], [`AssetEncodingDetails`] are the
-//!   Candid surface types used by `get` / `list`.
+//! - [`AssetDetails`], [`AssetEncodingDetails`] are the Candid surface types
+//!   returned by `list`.
 //! - [`on_asset_change`] is the central re-certification routine: every State
 //!   method that mutates an asset funnels through it.
 //! - [`encoding_certification_order`] is a small encoding utility shared
@@ -115,15 +115,6 @@ pub struct Asset {
     pub content_type: String,
     pub encodings: HashMap<String, AssetEncoding>,
     pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct EncodedAsset {
-    pub content: RcBytes,
-    pub content_type: String,
-    pub content_encoding: String,
-    pub total_length: Nat,
-    pub sha256: Option<ByteBuf>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]

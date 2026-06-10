@@ -5,10 +5,8 @@
 //! as formal arguments. This approach makes it very easy to test the state machine.
 
 use crate::{
-    asset::{
-        on_asset_change, Asset, AssetDetails, AssetEncoding, AssetEncodingDetails, EncodedAsset,
-    },
-    batch::{Chunk, ComputationStatus, SyncSession},
+    asset::{on_asset_change, Asset, AssetDetails, AssetEncoding, AssetEncodingDetails},
+    batch::{Chunk, SyncSession},
     certification::{AssetKey, CertifiedResponses},
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -16,25 +14,17 @@ use crate::{
     },
     rc_bytes::RcBytes,
     stable::StableState,
-    state_hash::StateHashComputation,
     system_context::SystemContext,
     types::*,
     url::url_decode,
 };
-use candid::{CandidType, Deserialize, Nat, Principal};
+use candid::{Nat, Principal};
 use ic_certification::{AsHashTree, Hash};
 use num_traits::ToPrimitive;
-use serde::Serialize;
 use serde_bytes::ByteBuf;
 use sha2::Digest;
 use std::collections::{BTreeSet, HashMap};
 use std::convert::TryInto;
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CertifiedTree {
-    pub certificate: Vec<u8>,
-    pub tree: Vec<u8>,
-}
 
 #[derive(Default)]
 pub struct State {
@@ -60,10 +50,6 @@ pub struct State {
     /// asset shadows an exact rule at the same path, or because an alias rule
     /// (200/4xx) points at a target asset that doesn't exist yet.
     pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
-
-    pub(crate) state_hash_computation: Option<StateHashComputation>,
-    pub(crate) last_state_update_timestamp_ns: u64,
-    pub(crate) last_state_hash_timestamp: u64,
 }
 
 impl State {
@@ -91,10 +77,6 @@ impl State {
 
     pub fn root_hash(&self) -> Hash {
         self.asset_hashes.root_hash()
-    }
-
-    pub fn last_state_update_timestamp_ns(&self) -> u64 {
-        self.last_state_update_timestamp_ns
     }
 
     pub fn create_asset(&mut self, arg: CreateAssetArguments) -> Result<(), String> {
@@ -208,53 +190,6 @@ impl State {
         }
     }
 
-    pub fn retrieve(&self, key: &AssetKey) -> Result<RcBytes, String> {
-        let asset = self.get_asset(key)?;
-
-        let id_enc = asset
-            .encodings
-            .get("identity")
-            .ok_or_else(|| "no identity encoding".to_string())?;
-
-        if id_enc.content_chunks.len() > 1 {
-            return Err("Asset too large. Use get() and get_chunk() instead.".to_string());
-        }
-
-        Ok(id_enc.content_chunks[0].clone())
-    }
-
-    pub fn compute_state_hash(&mut self) -> ComputationStatus<String, (), ()> {
-        if self.last_state_hash_timestamp != self.last_state_update_timestamp_ns {
-            self.state_hash_computation = None;
-            self.last_state_hash_timestamp = self.last_state_update_timestamp_ns;
-        }
-
-        if let Some(StateHashComputation::Computed(evidence)) = &self.state_hash_computation {
-            return ComputationStatus::Done(hex::encode(evidence.as_slice()));
-        }
-
-        let ec = self
-            .state_hash_computation
-            .take()
-            .unwrap_or_else(|| StateHashComputation::new(self));
-        let ec = ec.advance(self);
-        self.state_hash_computation = Some(ec);
-        ComputationStatus::InProgress(())
-    }
-
-    pub fn get_state_info(&self) -> StateInfo {
-        let state_hash =
-            if let Some(StateHashComputation::Computed(evidence)) = &self.state_hash_computation {
-                Some(hex::encode(evidence.as_slice()))
-            } else {
-                None
-            };
-        StateInfo {
-            last_state_update_timestamp: self.last_state_update_timestamp_ns,
-            state_hash,
-        }
-    }
-
     pub fn list_assets(&self, request: ListRequest) -> Vec<AssetDetails> {
         const PAGE_SIZE: usize = 100;
 
@@ -305,58 +240,6 @@ impl State {
                 })
             })
             .collect()
-    }
-
-    pub fn certified_tree(&self, certificate: &[u8]) -> CertifiedTree {
-        let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
-        serializer.self_describe().unwrap();
-        self.asset_hashes
-            .as_hash_tree()
-            .serialize(&mut serializer)
-            .unwrap();
-
-        CertifiedTree {
-            certificate: certificate.to_vec(),
-            tree: serializer.into_inner(),
-        }
-    }
-
-    pub fn get(&self, arg: GetArg) -> Result<EncodedAsset, String> {
-        let asset = self.get_asset(&arg.key)?;
-
-        for enc in arg.accept_encodings.iter() {
-            if let Some(asset_enc) = asset.encodings.get(enc) {
-                return Ok(EncodedAsset {
-                    content: asset_enc.content_chunks[0].clone(),
-                    content_type: asset.content_type.clone(),
-                    content_encoding: enc.clone(),
-                    total_length: Nat::from(asset_enc.total_length as u64),
-                    sha256: Some(ByteBuf::from(asset_enc.sha256)),
-                });
-            }
-        }
-        Err("no such encoding".to_string())
-    }
-
-    pub fn get_chunk(&self, arg: GetChunkArg) -> Result<RcBytes, String> {
-        let asset = self.get_asset(&arg.key)?;
-
-        let enc = asset
-            .encodings
-            .get(&arg.content_encoding)
-            .ok_or_else(|| "no such encoding".to_string())?;
-
-        let expected_hash = arg.sha256.ok_or("sha256 required")?;
-        if expected_hash != enc.sha256 {
-            return Err("sha256 mismatch".to_string());
-        }
-
-        if arg.index >= enc.content_chunks.len() {
-            return Err("chunk index out of bounds".to_string());
-        }
-        let index: usize = arg.index.0.to_usize().unwrap();
-
-        Ok(enc.content_chunks[index].clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -685,7 +568,6 @@ impl From<StableState> for State {
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
             next_session_id: stable_state.next_session_id,
-            last_state_update_timestamp_ns: stable_state.last_state_update_timestamp.unwrap_or(0),
             redirect_rules: stable_state.redirect_rules.unwrap_or_default(),
             ..Self::default()
         };
