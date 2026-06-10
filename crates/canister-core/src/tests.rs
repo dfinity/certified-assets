@@ -7,8 +7,8 @@ use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
     BatchOperationKind, CancelSyncArguments, CreateAssetArguments, DeleteAssetArguments,
-    ExecuteOperationsArguments, ListAssetsRequest, SessionId, SetAssetContentArguments,
-    SetAssetPropertiesArguments, StartSyncResult,
+    ExecuteOperationsArguments, SessionId, SetAssetContentArguments, SetAssetPropertiesArguments,
+    StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
 use crate::CreateChunksArguments;
@@ -976,7 +976,7 @@ fn supports_getting_and_setting_asset_properties() {
     // through a dedicated per-asset query.
     let headers_of = |state: &State, key: &str| {
         state
-            .list_assets(ListAssetsRequest::default())
+            .get_asset_details(None)
             .into_iter()
             .find(|d| d.key == key)
             .expect("asset should exist")
@@ -1471,11 +1471,11 @@ mod certification {
 }
 
 #[cfg(test)]
-mod list_assets {
+mod get_asset_details {
     use super::*;
 
     #[test]
-    fn list_pagination_starts_from_beginning_by_default() {
+    fn list_starts_from_beginning_when_no_cursor() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1491,25 +1491,16 @@ mod list_assets {
 
         create_assets(&mut state, &system_context, assets);
 
-        // List with None should start from beginning
-        let list = state.list_assets(ListAssetsRequest::default());
+        // `None` lists from the beginning, ordered by key.
+        let list = state.get_asset_details(None);
         assert_eq!(list.len(), 10);
-
-        // List with Some(0) should be the same
-        let list_from_zero = state.list_assets(ListAssetsRequest {
-            start: Some(Nat::from(0u8)),
-            length: None,
-        });
-        assert_eq!(list_from_zero.len(), 10);
-
-        // Results should be sorted by key
         for i in 0..9 {
             assert!(list[i].key < list[i + 1].key);
         }
     }
 
     #[test]
-    fn list_pagination_with_start_index() {
+    fn list_start_after_is_exclusive() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1525,26 +1516,18 @@ mod list_assets {
 
         create_assets(&mut state, &system_context, assets);
 
-        // Get first page
-        let first_page = state.list_assets(ListAssetsRequest::default());
+        // All 20 fit in a single page.
+        let first_page = state.get_asset_details(None);
         assert_eq!(first_page.len(), 20);
 
-        // Get second page starting at index 10
-        let second_page = state.list_assets(ListAssetsRequest {
-            start: Some(Nat::from(10u8)),
-            length: None,
-        });
+        // Resume strictly after the 10th key. The cursor is exclusive, so this
+        // returns the remaining 10 assets and never the cursor key itself.
+        let cursor = first_page[9].key.clone();
+        let second_page = state.get_asset_details(Some(cursor.clone()));
         assert_eq!(second_page.len(), 10);
+        assert!(second_page.iter().all(|a| a.key > cursor));
 
-        // Verify no overlap
-        let first_page_keys: Vec<_> = first_page.iter().take(10).map(|a| &a.key).collect();
-        let second_page_keys: Vec<_> = second_page.iter().map(|a| &a.key).collect();
-
-        for key in &second_page_keys {
-            assert!(!first_page_keys.contains(key));
-        }
-
-        // Concat the two pages and verify ordering
+        // Concatenating the first 10 with the resumed page reproduces the order.
         let mut combined: Vec<_> = first_page.iter().take(10).collect();
         combined.extend(second_page.iter());
 
@@ -1560,7 +1543,7 @@ mod list_assets {
     }
 
     #[test]
-    fn list_pagination_limits_to_100_assets() {
+    fn list_pages_are_capped_at_page_size() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1576,101 +1559,23 @@ mod list_assets {
 
         create_assets(&mut state, &system_context, assets);
 
-        // First page should have exactly 100 assets
-        let first_page = state.list_assets(ListAssetsRequest::default());
+        // First page holds exactly PAGE_SIZE (100).
+        let first_page = state.get_asset_details(None);
         assert_eq!(first_page.len(), 100);
 
-        // Second page starting at 100 should have 50 assets
-        let second_page = state.list_assets(ListAssetsRequest {
-            start: Some(Nat::from(100u8)),
-            length: None,
-        });
+        // Resuming after the 100th key yields the remaining 50.
+        let second_page = state.get_asset_details(Some(first_page[99].key.clone()));
         assert_eq!(second_page.len(), 50);
 
-        // Third page starting at 150 should be empty
-        let third_page = state.list_assets(ListAssetsRequest {
-            start: Some(Nat::from(150u8)),
-            length: None,
-        });
-        assert_eq!(third_page.len(), 0);
+        // Nothing remains after the last key.
+        let third_page = state.get_asset_details(Some(second_page[49].key.clone()));
+        assert!(third_page.is_empty());
     }
 
     #[test]
     fn list_returns_empty_for_no_assets() {
         let state = State::default();
-        let list = state.list_assets(ListAssetsRequest::default());
-        assert_eq!(list.len(), 0);
-    }
-
-    #[test]
-    fn list_respects_custom_length_limit() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"content";
-
-        // Create 50 assets
-        let assets: Vec<_> = (0..50)
-            .map(|i| {
-                AssetBuilder::new(format!("/asset{i:02}.txt"), "text/plain")
-                    .with_encoding("identity", vec![BODY])
-            })
-            .collect();
-
-        create_assets(&mut state, &system_context, assets);
-
-        // Request only 5 assets
-        let list = state.list_assets(ListAssetsRequest {
-            start: None,
-            length: Some(Nat::from(5u8)),
-        });
-        assert_eq!(list.len(), 5);
-
-        // Request 20 assets starting at index 10
-        let list = state.list_assets(ListAssetsRequest {
-            start: Some(Nat::from(10u8)),
-            length: Some(Nat::from(20u8)),
-        });
-        assert_eq!(list.len(), 20);
-
-        // Request more than available (should return all remaining)
-        let list = state.list_assets(ListAssetsRequest {
-            start: Some(Nat::from(45u8)),
-            length: Some(Nat::from(20u8)),
-        });
-        assert_eq!(list.len(), 5);
-    }
-
-    #[test]
-    fn list_length_limit_capped_at_page_size() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"content";
-
-        // Create 150 assets
-        let assets: Vec<_> = (0..150)
-            .map(|i| {
-                AssetBuilder::new(format!("/asset{i:03}.txt"), "text/plain")
-                    .with_encoding("identity", vec![BODY])
-            })
-            .collect();
-
-        create_assets(&mut state, &system_context, assets);
-
-        // Request 150 assets, but should be capped at PAGE_SIZE (100)
-        let list = state.list_assets(ListAssetsRequest {
-            start: None,
-            length: Some(Nat::from(150u8)),
-        });
-        assert_eq!(list.len(), 100);
-
-        // Request with length smaller than PAGE_SIZE should be respected
-        let list = state.list_assets(ListAssetsRequest {
-            start: None,
-            length: Some(Nat::from(50u8)),
-        });
-        assert_eq!(list.len(), 50);
+        assert!(state.get_asset_details(None).is_empty());
     }
 }
 
@@ -1708,15 +1613,13 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // set_asset_content with correct hash should succeed
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: Some(ByteBuf::from(correct_hash.as_slice())),
-            },
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            last_chunk: None,
+            sha256: Some(ByteBuf::from(correct_hash.as_slice())),
+        });
 
         assert!(result.is_ok());
     }
@@ -1751,15 +1654,13 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // set_asset_content with incorrect hash should fail
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
-            },
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            last_chunk: None,
+            sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
+        });
 
         assert_eq!(result.unwrap_err(), "sha256 mismatch");
     }
@@ -1794,20 +1695,18 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // set_asset_content without hash should succeed and compute it
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: None,
-            },
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            last_chunk: None,
+            sha256: None,
+        });
 
         assert!(result.is_ok());
 
         // Verify the hash was computed correctly by inspecting the listed encoding.
-        let details = state.list_assets(ListAssetsRequest::default());
+        let details = state.get_asset_details(None);
         let encoding = details
             .iter()
             .find(|a| a.key == "/test.txt")
@@ -1857,15 +1756,13 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // set_asset_content with correct hash for combined chunks should succeed
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: Some(ByteBuf::from(correct_hash.as_slice())),
-            },
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            last_chunk: None,
+            sha256: Some(ByteBuf::from(correct_hash.as_slice())),
+        });
 
         assert!(result.is_ok());
     }
@@ -1904,15 +1801,13 @@ mod set_asset_content_sha256_verification {
             .unwrap();
 
         // set_asset_content with last_chunk and correct hash should succeed
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: Some(ByteBuf::from(LAST_CHUNK)),
-                sha256: Some(ByteBuf::from(correct_hash.as_slice())),
-            },
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            last_chunk: Some(ByteBuf::from(LAST_CHUNK)),
+            sha256: Some(ByteBuf::from(correct_hash.as_slice())),
+        });
 
         assert!(result.is_ok());
     }

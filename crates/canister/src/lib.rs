@@ -7,7 +7,7 @@ use canister_core::{
     redirect::RedirectRule,
     types::{
         AssetDetails, CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
-        ExecuteOperationsArguments, ListAssetsRequest, StartSyncResult,
+        ExecuteOperationsArguments, StartSyncResult,
     },
 };
 use ic_cdk::{post_upgrade, pre_upgrade, query, update};
@@ -39,8 +39,8 @@ fn api_version() -> u16 {
 }
 
 #[query]
-fn get_asset_details(request: ListAssetsRequest) -> Vec<AssetDetails> {
-    canister_core::get_asset_details(request)
+fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
+    canister_core::get_asset_details(start_after)
 }
 
 #[query]

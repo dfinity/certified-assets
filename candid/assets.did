@@ -88,11 +88,6 @@ type SetAssetPropertiesArguments = record {
 
 // ───────── Asset query types ─────────
 
-type ListAssetsRequest = record {
-  start: opt nat;
-  length: opt nat;
-};
-
 type AssetEncodingDetails = record {
   content_encoding: text;
   sha256: opt blob; // sha256 of the entire encoded asset
@@ -119,9 +114,11 @@ service: {
 
   // ───────── Asset queries ─────────
 
-  // Asset details for a page of assets, ordered by key. `start`/`length`
-  // paginate; `length` is capped at the canister's page size.
-  get_asset_details : (ListAssetsRequest) -> (vec AssetDetails) query;
+  // A page of asset details, ordered by key. Pass the last key from the
+  // previous page as `start_after` to fetch the next page (`null` starts at the
+  // beginning); each page holds at most the canister's page size. An empty
+  // result means there are no assets after `start_after`.
+  get_asset_details : (start_after: opt Key) -> (vec AssetDetails) query;
 
   get_redirect_rules: () -> (vec RedirectRule) query;
 

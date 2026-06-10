@@ -11,9 +11,9 @@ use std::collections::HashMap;
 
 use crate::canister::{
     api_version, authorize_via_proxy, can_sync, create_chunks, execute_operations,
-    get_redirect_rules, list_assets, start_sync, AssetDetails, BatchOperationKind, CanisterCall,
-    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, RedirectRule,
-    SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
+    get_redirect_rules, list_all_assets, start_sync, AssetDetails, BatchOperationKind,
+    CanisterCall, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
+    RedirectRule, SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
     UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
@@ -155,10 +155,7 @@ pub fn sync<C: CanisterCall>(
         project_header_rules.len()
     );
 
-    let canister_assets: HashMap<String, AssetDetails> = list_assets(canister)?
-        .into_iter()
-        .map(|d| (d.key.clone(), d))
-        .collect();
+    let canister_assets: HashMap<String, AssetDetails> = list_all_assets(canister)?;
     println!("canister currently has {} asset(s)", canister_assets.len());
 
     let canister_rules = get_redirect_rules(canister)?;

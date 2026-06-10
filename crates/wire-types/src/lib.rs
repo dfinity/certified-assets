@@ -15,7 +15,7 @@
 //! Internal canister types that never cross the wire — `Asset`, `AssetEncoding`,
 //! and the stable-state shapes — stay in `canister-core`.
 
-use candid::{CandidType, Nat, Principal};
+use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
@@ -147,15 +147,6 @@ pub struct CreateChunksArguments {
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct CreateChunksResponse {
     pub chunk_ids: Vec<ChunkId>,
-}
-
-/// Pagination request for the `get_asset_details` query. Both bounds are
-/// optional: `start` defaults to the beginning, `length` to (and is capped at)
-/// the canister's page size.
-#[derive(Clone, Debug, Default, PartialEq, Eq, CandidType, Serialize, Deserialize)]
-pub struct ListAssetsRequest {
-    pub start: Option<Nat>,
-    pub length: Option<Nat>,
 }
 
 /// One encoding of an asset, as the `get_asset_details` query reports it.

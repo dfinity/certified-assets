@@ -192,7 +192,7 @@ pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
             "call",
             "frontend",
             "get_asset_details",
-            "(record {})",
+            "(null)",
             "-o",
             "hex",
         ])

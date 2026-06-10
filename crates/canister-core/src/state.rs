@@ -22,12 +22,14 @@ use ic_certification::{AsHashTree, Hash};
 use num_traits::ToPrimitive;
 use serde_bytes::ByteBuf;
 use sha2::Digest;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryInto;
 
 #[derive(Default)]
 pub struct State {
-    pub(crate) assets: HashMap<AssetKey, Asset>,
+    // Ordered by key so `get_asset_details` can page with a key cursor — a
+    // `range` seek — instead of sorting the whole keyspace on every query.
+    pub(crate) assets: BTreeMap<AssetKey, Asset>,
 
     pub(crate) chunks: HashMap<ChunkId, Chunk>,
     pub(crate) next_chunk_id: ChunkId,
@@ -94,10 +96,7 @@ impl State {
         Ok(())
     }
 
-    pub fn set_asset_content(
-        &mut self,
-        arg: SetAssetContentArguments,
-    ) -> Result<(), String> {
+    pub fn set_asset_content(&mut self, arg: SetAssetContentArguments) -> Result<(), String> {
         if arg.chunk_ids.is_empty() && arg.last_chunk.is_none() {
             return Err("encoding must have at least one chunk or contain last_chunk".to_string());
         }
@@ -182,52 +181,37 @@ impl State {
         }
     }
 
-    pub fn list_assets(&self, request: ListAssetsRequest) -> Vec<AssetDetails> {
+    /// Serves the `get_asset_details` endpoint: one page of assets ordered by
+    /// key. `start_after` is exclusive — pass the last key of the previous page
+    /// to get the next one, or `None` to start at the beginning. At most
+    /// `PAGE_SIZE` assets are returned; an empty result means there is nothing
+    /// after `start_after`.
+    pub fn get_asset_details(&self, start_after: Option<AssetKey>) -> Vec<AssetDetails> {
         const PAGE_SIZE: usize = 100;
 
-        let start_idx = request
-            .start
-            .and_then(|n| {
-                let n_u64: u64 = n.0.try_into().ok()?;
-                usize::try_from(n_u64).ok()
-            })
-            .unwrap_or(0);
+        use std::ops::Bound::{Excluded, Unbounded};
+        let lower = start_after.as_deref().map_or(Unbounded, Excluded);
 
-        let page_size = request
-            .length
-            .and_then(|n| {
-                let n_u64: u64 = n.0.try_into().ok()?;
-                let n_usize = usize::try_from(n_u64).ok()?;
-                Some(PAGE_SIZE.min(n_usize))
-            })
-            .unwrap_or(PAGE_SIZE);
+        self.assets
+            .range::<str, _>((lower, Unbounded))
+            .take(PAGE_SIZE)
+            .map(|(key, asset)| {
+                let mut encodings: Vec<_> = asset
+                    .encodings
+                    .iter()
+                    .map(|(enc_name, enc)| AssetEncodingDetails {
+                        content_encoding: enc_name.clone(),
+                        sha256: Some(ByteBuf::from(enc.sha256)),
+                    })
+                    .collect();
+                encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
 
-        let mut sorted_keys: Vec<_> = self.assets.keys().collect();
-        sorted_keys.sort();
-
-        sorted_keys
-            .into_iter()
-            .skip(start_idx)
-            .take(page_size)
-            .filter_map(|key| {
-                self.assets.get(key).map(|asset| {
-                    let mut encodings: Vec<_> = asset
-                        .encodings
-                        .iter()
-                        .map(|(enc_name, enc)| AssetEncodingDetails {
-                            content_encoding: enc_name.clone(),
-                            sha256: Some(ByteBuf::from(enc.sha256)),
-                        })
-                        .collect();
-                    encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
-
-                    AssetDetails {
-                        key: key.clone(),
-                        content_type: asset.content_type.clone(),
-                        encodings,
-                        headers: asset.headers.clone(),
-                    }
-                })
+                AssetDetails {
+                    key: key.clone(),
+                    content_type: asset.content_type.clone(),
+                    encodings,
+                    headers: asset.headers.clone(),
+                }
             })
             .collect()
     }

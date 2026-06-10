@@ -8,7 +8,6 @@
 pub use wire_types::{
     AssetDetails, AssetEncodingDetails, BatchOperationKind, CancelSyncArguments, ChunkId,
     CreateAssetArguments, CreateChunksArguments, CreateChunksResponse, DeleteAssetArguments,
-    ExecuteOperationsArguments, ListAssetsRequest, SessionId, SetAssetContentArguments,
-    SetAssetPropertiesArguments, SetRedirectRulesArguments, StartSyncResult,
-    UnsetAssetContentArguments,
+    ExecuteOperationsArguments, SessionId, SetAssetContentArguments, SetAssetPropertiesArguments,
+    SetRedirectRulesArguments, StartSyncResult, UnsetAssetContentArguments,
 };

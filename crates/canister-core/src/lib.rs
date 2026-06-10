@@ -91,8 +91,8 @@ pub fn cancel_sync(arg: CancelSyncArguments) {
     }
 }
 
-pub fn get_asset_details(request: ListAssetsRequest) -> Vec<AssetDetails> {
-    with_state(|s| s.list_assets(request))
+pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
+    with_state(|s| s.get_asset_details(start_after))
 }
 
 pub fn get_redirect_rules() -> Vec<crate::redirect::RedirectRule> {

@@ -7,16 +7,17 @@
 
 #![allow(dead_code)]
 
-use candid::{CandidType, Nat, Principal};
+use candid::{CandidType, Principal};
 use serde::de::DeserializeOwned;
 use serde_bytes::ByteBuf;
+use std::collections::HashMap;
 
 pub use wire_types::{
     AssetDetails, AssetEncodingDetails, BatchOperationKind, CancelSyncArguments,
     CreateAssetArguments, CreateChunksArguments, CreateChunksResponse, DeleteAssetArguments,
-    ExecuteOperationsArguments, ListAssetsRequest, RedirectRule, RulePattern,
-    SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
-    StartSyncResult, UnsetAssetContentArguments,
+    ExecuteOperationsArguments, RedirectRule, RulePattern, SetAssetContentArguments,
+    SetAssetPropertiesArguments, SetRedirectRulesArguments, StartSyncResult,
+    UnsetAssetContentArguments,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -42,25 +43,32 @@ pub fn api_version(c: &impl CanisterCall) -> Result<u16, String> {
     c.call("api_version", (), CallType::Query, true)
 }
 
-// Ported from ic-asset. Unlike ic-asset, which must handle older canister versions
-// that ignore `start`, this plugin targets only the canister in this repo, which
-// always honours pagination.
-pub fn list_assets(c: &impl CanisterCall) -> Result<Vec<AssetDetails>, String> {
-    let mut all: Vec<AssetDetails> = Vec::new();
-    let mut start: u64 = 0;
+// Fetch the complete asset list by paging through `get_asset_details`, returned
+// as a map keyed by asset key — the shape the sync diff consumes. Building the
+// map directly avoids materializing an intermediate Vec of every asset and a
+// second pass to index it. Keys never collide: the canister returns assets
+// ordered by key and `start_after` is exclusive, so each page begins strictly
+// after the last.
+//
+// The canister owns the page size; we just follow its cursor, passing the last
+// key we saw as `start_after`. We never need to know the page size: a page
+// shorter than the previous full page is the last one (stop without the extra
+// empty round-trip), and an empty page also ends the walk.
+pub fn list_all_assets(c: &impl CanisterCall) -> Result<HashMap<String, AssetDetails>, String> {
+    let mut all: HashMap<String, AssetDetails> = HashMap::new();
+    let mut start_after: Option<String> = None;
     let mut prev_page_size: Option<usize> = None;
     loop {
-        let req = ListAssetsRequest {
-            start: Some(Nat::from(start)),
-            length: None,
-        };
-        let entries: Vec<AssetDetails> = c.call("get_asset_details", req, CallType::Query, true)?;
+        let entries: Vec<AssetDetails> =
+            c.call("get_asset_details", &start_after, CallType::Query, true)?;
         let n = entries.len();
-        if n == 0 {
+        let Some(last) = entries.last() else {
             break;
+        };
+        start_after = Some(last.key.clone());
+        for d in entries {
+            all.insert(d.key.clone(), d);
         }
-        start += n as u64;
-        all.extend(entries);
         if let Some(prev) = prev_page_size {
             if n < prev {
                 break;
@@ -172,8 +180,10 @@ mod tests {
         }
     }
 
-    fn mk_assets(n: usize) -> Vec<AssetDetails> {
-        (0..n)
+    // Pages of assets with globally unique keys, mirroring the canister's
+    // ordered-by-key, exclusive-cursor pagination (no key repeats across pages).
+    fn mk_assets(start: usize, n: usize) -> Vec<AssetDetails> {
+        (start..start + n)
             .map(|i| AssetDetails {
                 key: format!("/asset-{i}"),
                 encodings: vec![],
@@ -184,24 +194,24 @@ mod tests {
     }
 
     #[test]
-    fn list_assets_empty_canister_returns_empty() {
-        let result = list_assets(&PagedMock::new(vec![])).unwrap();
+    fn list_all_assets_empty_canister_returns_empty() {
+        let result = list_all_assets(&PagedMock::new(vec![])).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn list_assets_single_partial_page_returns_all() {
+    fn list_all_assets_single_partial_page_returns_all() {
         // 5 assets — one partial page, then the implicit empty page terminates the loop.
-        let result = list_assets(&PagedMock::new(vec![mk_assets(5)])).unwrap();
+        let result = list_all_assets(&PagedMock::new(vec![mk_assets(0, 5)])).unwrap();
         assert_eq!(result.len(), 5);
     }
 
     #[test]
-    fn list_assets_partial_last_page_terminates_early() {
+    fn list_all_assets_partial_last_page_terminates_early() {
         // 100 + 50: the 50-item page is smaller than the 100-item page, so the loop
         // breaks without making a third request.
-        let mock = PagedMock::new(vec![mk_assets(100), mk_assets(50)]);
-        let result = list_assets(&mock).unwrap();
+        let mock = PagedMock::new(vec![mk_assets(0, 100), mk_assets(100, 50)]);
+        let result = list_all_assets(&mock).unwrap();
         assert_eq!(result.len(), 150);
         assert!(
             mock.pages.borrow().is_empty(),
@@ -210,11 +220,11 @@ mod tests {
     }
 
     #[test]
-    fn list_assets_full_pages_then_empty_returns_all() {
+    fn list_all_assets_full_pages_then_empty_returns_all() {
         // 100 + 100 + 0: two full pages followed by an empty page.
-        let result = list_assets(&PagedMock::new(vec![
-            mk_assets(100),
-            mk_assets(100),
+        let result = list_all_assets(&PagedMock::new(vec![
+            mk_assets(0, 100),
+            mk_assets(100, 100),
             vec![],
         ]))
         .unwrap();
@@ -222,12 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn list_assets_multiple_full_pages_then_partial() {
+    fn list_all_assets_multiple_full_pages_then_partial() {
         // 100 + 100 + 73: terminates on the smaller page.
-        let result = list_assets(&PagedMock::new(vec![
-            mk_assets(100),
-            mk_assets(100),
-            mk_assets(73),
+        let result = list_all_assets(&PagedMock::new(vec![
+            mk_assets(0, 100),
+            mk_assets(100, 100),
+            mk_assets(200, 73),
         ]))
         .unwrap();
         assert_eq!(result.len(), 273);
