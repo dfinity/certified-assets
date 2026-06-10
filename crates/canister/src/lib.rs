@@ -153,8 +153,9 @@ fn candid_interface_compatibility() {
 
     let new_interface = __export_service();
 
-    let old_interface =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets.did");
+    // crates/canister -> crates -> workspace root, then candid/assets.did
+    let old_interface = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("../../candid/assets.did");
 
     println!("Exported interface: {new_interface}");
 
