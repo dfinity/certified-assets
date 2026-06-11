@@ -112,6 +112,10 @@ impl AssetPath {
         hash_path.push(NestedTreeKey::Hash(response_hash));
         HashTreePath(hash_path)
     }
+
+    pub fn fallback_path() -> Self {
+        Self(vec!["http_expr".into(), "<*>".into()])
+    }
 }
 
 /// AssetPath that is ready to be inserted into asset_hashes.
@@ -386,6 +390,39 @@ impl CertifiedResponses {
             .collect()
     }
 
+    /// Certifies a response that can be used if no certified response is available for the requested path.
+    ///
+    /// # Arguments
+    /// * `status_code`: HTTP status code of the response
+    /// * `headers`: All certified headers. It is possible to respond with additional headers, but only the ones supplied in this argument are certified
+    /// * `body`: Response body. Ignored if `body_hash.is_some()`
+    /// * `body_hash`: Hash of the response body. If supplied the response body will not be hashed, which can save a lot of computation
+    ///
+    /// # Return Value
+    /// * `HashTreePath`: `HashTreePath` corresponding to the supplied response. Can be used to remove or re-insert certification for this specific response without having to re-compute the full path
+    pub fn certify_fallback_response(
+        &mut self,
+        status_code: u16,
+        headers: &[(String, Value)],
+        body: &[u8],
+        body_hash: Option<[u8; 32]>,
+    ) -> HashTreePath {
+        let certificate_expression = build_ic_certificate_expression_from_headers(headers);
+        let cert_expr_header = build_ic_certificate_expression_header(&certificate_expression);
+        let cert_expr_header = (cert_expr_header.0, Value::String(cert_expr_header.1));
+        let mut certified_headers = Vec::from(headers);
+        certified_headers.push(cert_expr_header);
+        let request_hash = RequestHash::default(); // request certification currently not supported
+        let body_hash = body_hash.unwrap_or_else(|| sha2::Sha256::digest(body).into());
+        let response_hash = response_hash(&certified_headers, status_code, &body_hash);
+
+        let asset_path = AssetPath::fallback_path();
+        let hash_tree_path =
+            asset_path.hash_tree_path(&certificate_expression, &request_hash, response_hash);
+        self.certify_response_precomputed(&hash_tree_path);
+        hash_tree_path
+    }
+
     /// Certifies a response. Expects a finished `HashTreePath`, skipping the (sometimes expensive) computation of the `HashTreePath`.
     pub fn certify_response_precomputed(&mut self, path: &HashTreePath) {
         self.insert(path.as_vec(), Vec::new());
@@ -395,6 +432,16 @@ impl CertifiedResponses {
     pub fn remove_responses_for_path(&mut self, path: &str) {
         let key = AssetPath::from(path);
         self.delete(key.asset_hash_path_root().as_vec());
+    }
+
+    /// True if a fallback (`<*>`) response is currently certified.
+    pub fn has_fallback_response(&self) -> bool {
+        self.contains_path(HashTreePath::not_found_base_path().as_vec())
+    }
+
+    /// Removes all certified fallback responses.
+    pub fn remove_fallback_responses(&mut self) {
+        self.delete(HashTreePath::not_found_base_path().as_vec());
     }
 
     /// Removes a specific response from the certified responses. Expects a finished `HashTreePath`, skipping the (sometimes expensive) computation of the `HashTreePath`.

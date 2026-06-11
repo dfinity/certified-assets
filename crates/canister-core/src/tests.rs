@@ -404,19 +404,18 @@ fn serve_correct_encoding() {
     assert_eq!(gzip_response.body.as_ref(), GZIP_BODY);
     assert!(lookup_header(&gzip_response, "IC-Certificate").is_some());
 
-    // An asset with no encodings has nothing to serve → plain 404. With no
-    // catch-all rule covering the path this 404 is uncertified, so request it
-    // directly rather than through the certifying helper.
-    let no_encoding_response = state.http_request(
+    // An asset with no encodings has nothing to serve → the built-in certified
+    // 404 (no rule occupies `<*>`, so the fallback is certified there).
+    let no_encoding_response = certified_http_request(
+        &state,
         RequestBuilder::get("/no-encoding.html")
             .with_header("Accept-Encoding", "identity")
             .with_certificate_version(2)
             .build(),
-        &[],
-        unused_callback(),
     );
     assert_eq!(no_encoding_response.status_code, 404);
     assert_eq!(no_encoding_response.body.as_ref(), "not found".as_bytes());
+    assert!(lookup_header(&no_encoding_response, "IC-Certificate").is_some());
 }
 
 #[test]
@@ -2294,11 +2293,11 @@ mod redirect_rules {
     }
 
     #[test]
-    fn no_rules_returns_uncertified_404() {
-        // No `_redirects` rules at all: missing paths return a plain 404
-        // ("not found" body). The canister no longer certifies a built-in
-        // fallback, so to get a *certified* 404 a user adds a catch-all rule
-        // (`/* /404.html 404`); without one the 404 is served uncertified.
+    fn no_rules_falls_through_to_builtin_404() {
+        // No `_redirects` rules at all: missing paths return the canister's
+        // built-in *certified* 404 ("not found" body). With no rule occupying
+        // the `<*>` slot, `on_redirect_rules_change` certifies the fallback
+        // there, so the response verifies (via `certified_http_request`).
         let mut state = State::default();
         let system_context = mock_system_context();
         const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
@@ -2310,17 +2309,49 @@ mod redirect_rules {
             ],
         );
 
-        let response =
-            state.http_request(RequestBuilder::get("/missing").build(), &[], unused_callback());
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
         assert_eq!(response.status_code, 404);
         assert_eq!(response.body.as_ref(), b"not found");
-        // The response advertises the `<*>` fallback expr_path, but nothing is
-        // certified there anymore, so the verifier rejects it: an uncertified
-        // 404 cannot pass verification.
-        assert!(
-            verify_response(&state, &RequestBuilder::get("/missing").build(), &response).is_err(),
-            "404 with no catch-all rule must not be certifiable"
+    }
+
+    #[test]
+    fn builtin_404_yields_to_root_rule_then_returns_when_removed() {
+        // The built-in 404 and a root `/*` rule are mutually exclusive
+        // occupants of `<*>`. Adding a root rule must hand the slot to the
+        // rule; removing it must restore the *certified* built-in 404. Both
+        // directions verify, which guards the rebuild ordering in
+        // `on_redirect_rules_change`.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const INDEX: &[u8] = b"<!DOCTYPE html><html>spa</html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/index.html", "text/html")
+                .with_encoding("identity", vec![INDEX])],
         );
+
+        // No rule → certified built-in 404 on a missing path.
+        let before = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(before.status_code, 404);
+        assert_eq!(before.body.as_ref(), b"not found");
+
+        // Root `/*` 200 rule takes over `<*>` → the missing path serves the SPA
+        // index (certified), not the built-in 404.
+        set_root_spa_rule(&mut state, "/index.html");
+        let via_rule = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(via_rule.status_code, 200);
+        assert_eq!(via_rule.body.as_ref(), INDEX);
+
+        // Remove all rules → the certified built-in 404 returns.
+        commit(
+            &mut state,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments { rules: vec![] })],
+        )
+        .unwrap();
+        let after = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(after.status_code, 404);
+        assert_eq!(after.body.as_ref(), b"not found");
     }
 
     #[test]
