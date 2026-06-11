@@ -434,6 +434,11 @@ impl CertifiedResponses {
         self.delete(key.asset_hash_path_root().as_vec());
     }
 
+    /// True if a fallback (`<*>`) response is currently certified.
+    pub fn has_fallback_response(&self) -> bool {
+        self.contains_path(HashTreePath::not_found_base_path().as_vec())
+    }
+
     /// Removes all certified fallback responses.
     pub fn remove_fallback_responses(&mut self) {
         self.delete(HashTreePath::not_found_base_path().as_vec());

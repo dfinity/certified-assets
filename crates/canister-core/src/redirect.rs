@@ -209,9 +209,8 @@ pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
 
     let expression = build_ic_certificate_expression_from_headers(&header_values);
 
-    // Mirror `certify_fallback_response`: the synthesized
-    // `ic-certificateexpression` header is itself part of the certified
-    // response.
+    // The synthesized `ic-certificateexpression` header is itself part of the
+    // certified response, so fold it into the hashed headers.
     let cert_expr_header = build_ic_certificate_expression_header(&expression);
     let mut certified = header_values.clone();
     certified.push((cert_expr_header.0, Value::String(cert_expr_header.1)));

@@ -10,8 +10,6 @@
 //! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
 
-use crate::certification::HashTreePath;
-use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
 use crate::redirect;
 use crate::state::State;
@@ -21,7 +19,6 @@ use crate::types::{
     UploadChunksArguments,
 };
 use candid::Principal;
-use ic_representation_independent_hash::Value;
 use sha2::Digest;
 
 /// How long a sync may sit idle (no calls carrying its session id) before a
@@ -192,7 +189,6 @@ impl State {
                         self.sync_session = None;
                         self.chunks.clear();
                     }
-                    self.certify_404_if_required();
                     // Asset ops in this call may have clobbered tree entries
                     // that redirect rules own (any rule whose source path
                     // collides with an asset's `<$>` slot). Re-cert them so
@@ -308,26 +304,6 @@ impl State {
                     ComputationStatus::InProgress(progress)
                 }
             }
-        }
-    }
-
-    pub(crate) fn certify_404_if_required(&mut self) {
-        if !self
-            .asset_hashes
-            .contains_path(HashTreePath::not_found_base_path().as_vec())
-        {
-            let response = HttpResponse::uncertified_404();
-            let headers: Vec<_> = response
-                .headers
-                .into_iter()
-                .map(|(k, v)| (k, Value::String(v)))
-                .collect();
-            self.asset_hashes.certify_fallback_response(
-                response.status_code,
-                &headers,
-                &response.body,
-                None,
-            );
         }
     }
 }

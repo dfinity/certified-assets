@@ -655,6 +655,13 @@ impl State {
 
         match url_decode(path) {
             Ok(path) => self.build_http_response(certificate, &path, encodings, 0, callback, etags),
+            // Malformed percent-encoding (invalid UTF-8 once decoded). This 400
+            // is intentionally uncertified: the body is per-request (it echoes
+            // the bad path), so it can't be pinned to a certified hash, and a
+            // malformed URL has no certifiable response anyway. The HTTP gateway
+            // rejects uncertified responses, so a browser never sees this body —
+            // it surfaces only to a direct query call of `http_request` (e.g.
+            // `dfx canister call`), where it serves as a diagnostic.
             Err(err) => HttpResponse {
                 status_code: 400,
                 headers: vec![],
@@ -714,12 +721,23 @@ impl State {
     /// Status-200 rules borrow each encoding's certificate expression and
     /// response hash from the target asset, so this also has to run after any
     /// asset change that could affect those values.
+    ///
+    /// This is also the single owner of the root `<*>` fallback slot: a root
+    /// `/*` rule and the built-in 404 are mutually exclusive occupants of it, so
+    /// after rebuilding the rules we (re)certify the built-in 404 exactly when
+    /// no active rule claims `<*>`. That keeps `build_http_response`'s
+    /// fallthrough certified — the gateway rejects uncertified responses, so an
+    /// uncertified fallback 404 would be unservable.
     pub(crate) fn on_redirect_rules_change(&mut self) {
         for entry in self.rule_certified_entries.drain(..).flatten() {
             for tp in &entry.tree_paths {
                 self.asset_hashes.remove_response_precomputed(tp);
             }
         }
+        // Drop any built-in 404 before rebuilding so a rule taking over `<*>`
+        // doesn't leave a stale fallback hash beside it (and removing it now is
+        // safe — we re-add below if `<*>` ends up rule-free).
+        self.asset_hashes.remove_fallback_responses();
 
         let rules = self.redirect_rules.get().0.clone();
         let mut new_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>> =
@@ -728,6 +746,28 @@ impl State {
             new_entries.push(self.build_rule_entry(rule));
         }
         self.rule_certified_entries = new_entries;
+
+        if !self.asset_hashes.has_fallback_response() {
+            self.certify_not_found_fallback();
+        }
+    }
+
+    /// Certifies the canister's built-in last-resort 404 ("not found") at the
+    /// root `<*>` fallback path. Callers must ensure `<*>` is otherwise free;
+    /// `on_redirect_rules_change` is the only caller and gates on that.
+    fn certify_not_found_fallback(&mut self) {
+        let response = HttpResponse::uncertified_404();
+        let headers: Vec<_> = response
+            .headers
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect();
+        self.asset_hashes.certify_fallback_response(
+            response.status_code,
+            &headers,
+            &response.body,
+            None,
+        );
     }
 
     /// Replaces the redirect rules and rebuilds their certified entries.
@@ -812,8 +852,9 @@ impl State {
 
     /// Rebuilds all derived heap state from the durable stable-memory state
     /// after an upgrade: the certified-response tree for every asset, the
-    /// redirect-rule certified entries, and the built-in 404 fallback. The
-    /// caller publishes `certified_data` afterwards.
+    /// redirect-rule certified entries, and the built-in 404 fallback (the last
+    /// two via `on_redirect_rules_change`). The caller publishes `certified_data`
+    /// afterwards.
     pub fn post_upgrade_rebuild(&mut self) {
         let keys: Vec<AssetKey> = self.metadata.keys().collect();
         for key in keys {
@@ -822,6 +863,5 @@ impl State {
             }
         }
         self.on_redirect_rules_change();
-        self.certify_404_if_required();
     }
 }

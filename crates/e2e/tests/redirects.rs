@@ -266,6 +266,45 @@ fn html_handling_with_catchall_redirect() {
     );
 }
 
+/// A project that ships no `404.html` and declares no `/*` rule still gets a
+/// *certified* 404 for unknown paths: the sync plugin injects a branded default
+/// `/404.html` asset plus a `/* /404.html 404` catch-all (see
+/// `sync-core::not_found`). The subdomain-style URL forces full v2 verification
+/// at the gateway, so a returned 404 body — rather than a 503 verification
+/// error — is proof the injected fallback is certified.
+#[test]
+fn branded_404_injected_when_project_ships_none() {
+    // The `basic` fixture is just index.html + style.css: no 404.html, no
+    // _redirects.
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+    icp_cmd(project).arg("deploy").assert().success();
+
+    // Unknown path → certified branded 404.
+    let r = http_fetch_subdomain(project, "/no/such/page");
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "unknown path expected a certified 404 (a 503 here means it wasn't certified), got {}",
+        r.status()
+    );
+    let body = r.text().expect("read body");
+    assert!(
+        body.contains("default page served by the assets canister"),
+        "expected the branded default 404 body, got: {body}"
+    );
+
+    // The injected page is a real asset, directly fetchable at /404.html (200).
+    let r = http_fetch_subdomain(project, "/404.html");
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "/404.html should serve 200, got {}",
+        r.status()
+    );
+}
+
 fn expect_307(project: &std::path::Path, path: &str, location: &str) {
     let r = http_fetch(project, path);
     assert_eq!(
