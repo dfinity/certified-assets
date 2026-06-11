@@ -7,7 +7,7 @@
 // Shared wire types (defined once in `wire-types`, used by both sides).
 pub use wire_types::{
     AssetDetails, AssetEncodingDetails, ChunkId, CreateAssetArguments, DeleteAssetArguments,
-    ExecuteOperationsArguments, Operation, SessionId, SetAssetContentArguments,
+    Encoding, ExecuteOperationsArguments, Operation, SessionId, SetAssetContentArguments,
     SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
     UnsetAssetContentArguments, UploadChunksArguments,
 };

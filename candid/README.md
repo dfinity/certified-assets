@@ -44,7 +44,7 @@ We fill that placeholder in with the assets canister's concrete token:
 ```candid
 type StreamingToken = record {
   key: text;
-  content_encoding: text;
+  encoding: text;
   index: nat;
   sha256: opt blob;
 };

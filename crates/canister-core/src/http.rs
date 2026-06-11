@@ -4,6 +4,7 @@ use crate::certification::{
 use crate::rc_bytes::RcBytes;
 use candid::{define_function, CandidType, Deserialize, Nat};
 use serde_bytes::ByteBuf;
+use wire_types::Encoding;
 
 pub type HeaderField = (String, String);
 
@@ -28,7 +29,7 @@ pub struct HttpResponse {
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct StreamingCallbackToken {
     pub key: String,
-    pub content_encoding: String,
+    pub encoding: Encoding,
     pub index: Nat,
     pub sha256: ByteBuf,
 }
@@ -50,7 +51,7 @@ pub struct StreamingCallbackHttpResponse {
 
 impl StreamingCallbackToken {
     pub fn create_token(
-        enc_name: &str,
+        encoding: Encoding,
         content_chunks_count: usize,
         content_sha256: [u8; 32],
         key: &str,
@@ -61,7 +62,7 @@ impl StreamingCallbackToken {
         } else {
             Some(StreamingCallbackToken {
                 key: key.to_string(),
-                content_encoding: enc_name.to_string(),
+                encoding,
                 index: Nat::from(chunk_index + 1),
                 sha256: ByteBuf::from(content_sha256),
             })

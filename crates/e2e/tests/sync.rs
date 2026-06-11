@@ -1,5 +1,5 @@
 use candid::Principal;
-use e2e::{icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
+use e2e::{icp_cmd, list_assets, setup_project, AssetDetails, Encoding, LocalNetwork};
 use std::fs;
 
 /// Deploy the test fixture to a local replica and verify that `/index.html` appears
@@ -89,8 +89,7 @@ fn no_op_sync() {
     let mut assets_before = list_assets(project);
     assets_before.sort_by(|a, b| a.key.cmp(&b.key));
     for a in assets_before.iter_mut() {
-        a.encodings
-            .sort_by(|x, y| x.content_encoding.cmp(&y.content_encoding));
+        a.encodings.sort_by_key(|x| x.encoding);
     }
 
     let output = icp_cmd(project)
@@ -112,8 +111,7 @@ fn no_op_sync() {
     let mut assets_after = list_assets(project);
     assets_after.sort_by(|a, b| a.key.cmp(&b.key));
     for a in assets_after.iter_mut() {
-        a.encodings
-            .sort_by(|x, y| x.content_encoding.cmp(&y.content_encoding));
+        a.encodings.sort_by_key(|x| x.encoding);
     }
     assert_eq!(
         assets_before, assets_after,
@@ -128,7 +126,7 @@ fn identity_sha(assets: &[AssetDetails], key: &str) -> Option<Vec<u8>> {
         .and_then(|a| {
             a.encodings
                 .iter()
-                .find(|e| e.content_encoding == "identity")
+                .find(|e| e.encoding == Encoding::Identity)
         })
         .map(|e| e.sha256.to_vec())
 }

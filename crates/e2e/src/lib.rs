@@ -6,7 +6,7 @@ use std::{
 };
 
 // Wire types shared with the canister and sync plugin.
-pub use wire_types::{AssetDetails, AssetEncodingDetails};
+pub use wire_types::{AssetDetails, AssetEncodingDetails, Encoding};
 
 /// Build an `icp` subprocess command rooted at `project_dir`.
 ///

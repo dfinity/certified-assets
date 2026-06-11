@@ -12,11 +12,11 @@ use std::collections::HashMap;
 use crate::canister::{
     authorize_via_proxy, bundle_tag, can_sync, execute_operations, list_all_assets,
     list_all_redirect_rules, start_sync, upload_chunks, AssetDetails, CanisterCall,
-    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, Operation,
+    CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
     RedirectRule, SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments,
     UnsetAssetContentArguments,
 };
-use crate::content::{encoders_for, Content, Encoder};
+use crate::content::{encoders_for, Content};
 use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
 use crate::html_handling;
 use crate::not_found;
@@ -38,7 +38,7 @@ struct ProjectAssetEncoding {
 struct ProjectAsset {
     source: AssetSource,
     media_type: Mime,
-    encodings: HashMap<String, ProjectAssetEncoding>,
+    encodings: HashMap<Encoding, ProjectAssetEncoding>,
 }
 
 /// Ensures the signing identity can sync assets, before any expensive scanning
@@ -300,23 +300,24 @@ fn prepare_content_asset(
     content: Content,
     canister_assets: &HashMap<String, AssetDetails>,
 ) -> Result<ProjectAsset, String> {
-    // gzip for text/* and js/html, identity for everything else.
-    let encoders: Vec<Encoder> = encoders_for(&content.media_type);
+    // Brotli + gzip for compressible types, identity for everything else.
+    let encoders: Vec<Encoding> = encoders_for(&content.media_type);
 
-    let mut encodings: HashMap<String, ProjectAssetEncoding> = HashMap::new();
-    for encoder in encoders {
-        let encoded = content.encode(encoder)?;
-        // Identity is always uploaded. Alternate encodings only get uploaded if
-        // they save bytes vs. identity.
-        if encoder != Encoder::Identity && encoded.data.len() >= content.data.len() {
+    let mut encodings: HashMap<Encoding, ProjectAssetEncoding> = HashMap::new();
+    for encoding in encoders {
+        let encoded = content.encode(encoding)?;
+        // Identity is always uploaded. A compressed encoding is only kept if it
+        // actually saves bytes vs. identity — otherwise storing it just wastes
+        // canister space (e.g. a tiny file where the gzip/brotli framing alone
+        // exceeds the savings).
+        if !encoding.is_identity() && encoded.data.len() >= content.data.len() {
             continue;
         }
-        let name = encoder.name().to_string();
         let sha256 = encoded.sha256();
         let already_in_place = is_already_in_place(
             &source.key,
             &content.media_type,
-            &name,
+            encoding,
             &sha256,
             canister_assets,
         );
@@ -325,14 +326,14 @@ fn prepare_content_asset(
             println!(
                 "  {}{} ({} bytes) sha {} already in place",
                 source.key,
-                encoding_suffix(&name),
+                encoding_suffix(encoding),
                 encoded.data.len(),
                 hex::encode(&sha256)
             );
         }
 
         encodings.insert(
-            name,
+            encoding,
             ProjectAssetEncoding {
                 chunk_ids: Vec::new(),
                 sha256,
@@ -356,7 +357,7 @@ fn prepare_content_asset(
 fn is_already_in_place(
     key: &str,
     media_type: &Mime,
-    encoding: &str,
+    encoding: Encoding,
     sha256: &[u8],
     canister_assets: &HashMap<String, AssetDetails>,
 ) -> bool {
@@ -369,15 +370,15 @@ fn is_already_in_place(
     canister_asset
         .encodings
         .iter()
-        .find(|d| d.content_encoding == encoding)
+        .find(|d| d.encoding == encoding)
         .is_some_and(|d| d.sha256.as_ref() == sha256)
 }
 
-fn encoding_suffix(encoding: &str) -> String {
-    if encoding == "identity" {
+fn encoding_suffix(encoding: Encoding) -> String {
+    if encoding.is_identity() {
         String::new()
     } else {
-        format!(" ({encoding})")
+        format!(" ({})", encoding.label())
     }
 }
 
@@ -404,7 +405,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
 ) -> Result<(), String> {
     struct PendingChunk {
         asset_key: String,
-        encoding: String,
+        encoding: Encoding,
         chunk_index: usize,
         data: Vec<u8>,
     }
@@ -412,7 +413,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
     let mut pending: Vec<PendingChunk> = Vec::new();
     for asset in project_assets.values_mut() {
         let key = asset.source.key.clone();
-        for (encoding_name, enc) in &mut asset.encodings {
+        for (&encoding, enc) in &mut asset.encodings {
             if enc.already_in_place {
                 continue;
             }
@@ -428,7 +429,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
             for (i, chunk) in chunks.into_iter().enumerate() {
                 pending.push(PendingChunk {
                     asset_key: key.clone(),
-                    encoding: encoding_name.clone(),
+                    encoding,
                     chunk_index: i,
                     data: chunk,
                 });
@@ -672,10 +673,10 @@ fn build_operations(
     for (key, ca) in &canister_assets {
         if let Some(pa) = project_assets.get(key) {
             for enc in &ca.encodings {
-                if !pa.encodings.contains_key(&enc.content_encoding) {
+                if !pa.encodings.contains_key(&enc.encoding) {
                     ops.push(Operation::UnsetAssetContent(UnsetAssetContentArguments {
                         key: key.clone(),
-                        content_encoding: enc.content_encoding.clone(),
+                        encoding: enc.encoding,
                     }));
                 }
             }
@@ -684,13 +685,13 @@ fn build_operations(
 
     // 4. Set content for every encoding that wasn't already in place.
     for (key, pa) in project_assets {
-        for (encoding, enc) in &pa.encodings {
+        for (&encoding, enc) in &pa.encodings {
             if enc.already_in_place {
                 continue;
             }
             ops.push(Operation::SetAssetContent(SetAssetContentArguments {
                 key: key.clone(),
-                content_encoding: encoding.clone(),
+                encoding,
                 chunk_ids: enc.chunk_ids.clone(),
                 sha256: ByteBuf::from(enc.sha256.clone()),
             }));
@@ -849,11 +850,11 @@ mod tests {
             .encodings
             .iter()
             .map(|(name, enc)| AssetEncodingDetails {
-                content_encoding: name.clone(),
+                encoding: *name,
                 sha256: serde_bytes::ByteBuf::from(enc.sha256.clone()),
             })
             .collect();
-        encodings.sort_by(|a, b| a.content_encoding.cmp(&b.content_encoding));
+        encodings.sort_by_key(|a| a.encoding);
         AssetDetails {
             key: not_found::ROOT_404_KEY.to_string(),
             content_type: asset.media_type.to_string(),
@@ -904,7 +905,7 @@ mod tests {
     fn mk_pending_asset(key: &str, encoding: &str, data: Vec<u8>) -> (String, ProjectAsset) {
         let mut enc_map = HashMap::new();
         enc_map.insert(
-            encoding.to_string(),
+            Encoding::from_token(encoding).expect("supported test encoding"),
             ProjectAssetEncoding {
                 chunk_ids: Vec::new(),
                 sha256: vec![0; 32],
@@ -936,7 +937,10 @@ mod tests {
         let mock = ChunkBatchRecorder::new();
         pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         assert_eq!(*mock.batches.borrow(), vec![1]);
-        assert_eq!(assets["/f"].encodings["identity"].chunk_ids.len(), 1);
+        assert_eq!(
+            assets["/f"].encodings[&Encoding::Identity].chunk_ids.len(),
+            1
+        );
     }
 
     #[test]
@@ -952,7 +956,12 @@ mod tests {
         let mock = ChunkBatchRecorder::new();
         pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
         assert_eq!(*mock.batches.borrow(), vec![1, 1, 1, 1]);
-        assert_eq!(assets["/big"].encodings["identity"].chunk_ids.len(), 4);
+        assert_eq!(
+            assets["/big"].encodings[&Encoding::Identity]
+                .chunk_ids
+                .len(),
+            4
+        );
     }
 
     #[test]
@@ -1005,8 +1014,8 @@ mod tests {
         ]);
         let mock = ChunkBatchRecorder::new();
         pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
-        let a_ids = &assets["/a"].encodings["identity"].chunk_ids;
-        let b_ids = &assets["/b"].encodings["identity"].chunk_ids;
+        let a_ids = &assets["/a"].encodings[&Encoding::Identity].chunk_ids;
+        let b_ids = &assets["/b"].encodings[&Encoding::Identity].chunk_ids;
         assert_eq!(a_ids.len(), 2);
         assert_eq!(b_ids.len(), 1);
         let mut all: Vec<u64> = a_ids.iter().chain(b_ids.iter()).copied().collect();
@@ -1022,15 +1031,23 @@ mod tests {
         let mut assets = HashMap::from([mk_pending_asset("/empty", "identity", vec![])]);
         let mock = ChunkBatchRecorder::new();
         pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
-        assert_eq!(assets["/empty"].encodings["identity"].chunk_ids.len(), 1);
+        assert_eq!(
+            assets["/empty"].encodings[&Encoding::Identity]
+                .chunk_ids
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn pack_skips_already_in_place_encodings() {
         // Nothing to upload → no calls made.
         let (k, mut pa) = mk_pending_asset("/skip", "identity", vec![0u8; 100]);
-        pa.encodings.get_mut("identity").unwrap().already_in_place = true;
-        pa.encodings.get_mut("identity").unwrap().data = Vec::new();
+        pa.encodings
+            .get_mut(&Encoding::Identity)
+            .unwrap()
+            .already_in_place = true;
+        pa.encodings.get_mut(&Encoding::Identity).unwrap().data = Vec::new();
         let mut assets = HashMap::from([(k, pa)]);
         let mock = ChunkBatchRecorder::new();
         pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
@@ -1053,7 +1070,7 @@ mod tests {
     fn set_content_op(key: &str) -> Operation {
         Operation::SetAssetContent(SetAssetContentArguments {
             key: key.to_string(),
-            content_encoding: "identity".to_string(),
+            encoding: Encoding::Identity,
             chunk_ids: vec![0u64],
             sha256: serde_bytes::ByteBuf::from(vec![0u8; 32]),
         })
@@ -1077,7 +1094,7 @@ mod tests {
         assert_eq!(
             header_bytes_of(&Operation::UnsetAssetContent(UnsetAssetContentArguments {
                 key: "/k".to_string(),
-                content_encoding: "identity".to_string(),
+                encoding: Encoding::Identity,
             })),
             0
         );
@@ -1255,7 +1272,7 @@ mod tests {
                 vec![1u64]
             };
             enc_map.insert(
-                name.to_string(),
+                Encoding::from_token(name).expect("supported test encoding"),
                 ProjectAssetEncoding {
                     chunk_ids,
                     sha256: sha.clone(),
@@ -1285,7 +1302,7 @@ mod tests {
         let encs = encodings
             .iter()
             .map(|(enc, sha)| AssetEncodingDetails {
-                content_encoding: enc.to_string(),
+                encoding: Encoding::from_token(enc).expect("supported test encoding"),
                 sha256: serde_bytes::ByteBuf::from(sha.clone()),
             })
             .collect();
@@ -1662,12 +1679,37 @@ mod tests {
         };
         let asset = prepare_asset(source, &[], &HashMap::new()).unwrap();
         assert!(
-            asset.encodings.contains_key("identity"),
+            asset.encodings.contains_key(&Encoding::Identity),
             "identity must be present"
         );
         assert!(
-            !asset.encodings.contains_key("gzip"),
+            !asset.encodings.contains_key(&Encoding::Gzip),
             "gzip must be absent when not smaller"
+        );
+    }
+
+    // A compressible asset whose content actually shrinks gets all three stored
+    // encodings: identity (always), plus gzip and brotli. This is the headline
+    // behaviour change — brotli is now produced alongside gzip for text-like
+    // content. Highly repetitive text guarantees both compressors beat identity,
+    // so neither is dropped by the keep-if-smaller guard.
+    #[test]
+    fn prepare_asset_keeps_gzip_and_brotli_for_compressible() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".css").tempfile().unwrap();
+        f.write_all("body { color: red; }\n".repeat(500).as_bytes())
+            .unwrap();
+        let source = AssetSource {
+            path: f.path().to_path_buf(),
+            key: "/style.css".to_string(),
+        };
+        let asset = prepare_asset(source, &[], &HashMap::new()).unwrap();
+        let mut encs: Vec<Encoding> = asset.encodings.keys().copied().collect();
+        encs.sort();
+        assert_eq!(
+            encs,
+            vec![Encoding::Identity, Encoding::Gzip, Encoding::Brotli],
+            "compressible content should store identity + gzip + brotli"
         );
     }
 
@@ -1697,7 +1739,7 @@ mod tests {
         // No override: mime_guess returns octet-stream, gzip is not selected.
         let without = prepare_asset(mk_source(), &[], &HashMap::new()).unwrap();
         assert_eq!(without.media_type.to_string(), "application/octet-stream");
-        assert!(!without.encodings.contains_key("gzip"));
+        assert!(!without.encodings.contains_key(&Encoding::Gzip));
 
         // With override to text/plain via `_headers`, both the media type
         // and the encoder pick change.
@@ -1706,7 +1748,7 @@ mod tests {
         let with = prepare_asset(mk_source(), &rules, &HashMap::new()).unwrap();
         assert_eq!(with.media_type.to_string(), "text/plain; charset=utf-8");
         assert!(
-            with.encodings.contains_key("gzip"),
+            with.encodings.contains_key(&Encoding::Gzip),
             "gzip should be selected for text/* override"
         );
     }
@@ -1725,7 +1767,7 @@ mod tests {
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert!(!ops.iter().any(|op| matches!(
             op,
-            Operation::SetAssetContent(a) if a.content_encoding == "gzip"
+            Operation::SetAssetContent(a) if a.encoding == Encoding::Gzip
         )));
     }
 
@@ -2247,7 +2289,7 @@ mod tests {
                     key: "/notes.txt".to_string(),
                     content_type: "text/plain".to_string(),
                     encodings: vec![AssetEncodingDetails {
-                        content_encoding: "identity".to_string(),
+                        encoding: Encoding::Identity,
                         sha256: serde_bytes::ByteBuf::from(identity_sha),
                     }],
                     // Matches what `_headers` resolves to, so no SetAssetHeaders.
@@ -2391,7 +2433,7 @@ mod tests {
                     key: "/index.html".to_string(),
                     content_type: "text/html".to_string(),
                     encodings: vec![AssetEncodingDetails {
-                        content_encoding: "identity".to_string(),
+                        encoding: Encoding::Identity,
                         sha256: serde_bytes::ByteBuf::from(identity_sha),
                     }],
                     headers: vec![],

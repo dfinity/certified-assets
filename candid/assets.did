@@ -19,7 +19,7 @@ type Key = text;
 
 // One encoding of an asset, as the `get_asset_details` query reports it.
 type AssetEncodingDetails = record {
-  content_encoding: text;
+  encoding: Encoding;
   sha256: blob; // sha256 of the entire encoded asset
 };
 
@@ -75,7 +75,7 @@ type CreateAssetArguments = record {
 // must match the hash of those chunks concatenated.
 type SetAssetContentArguments = record {
   key: Key;
-  content_encoding: text;
+  encoding: Encoding;
   chunk_ids: vec ChunkId;
   sha256: blob;
 };
@@ -84,7 +84,7 @@ type SetAssetContentArguments = record {
 // other encodings exist.
 type UnsetAssetContentArguments = record {
   key: Key;
-  content_encoding: text;
+  encoding: Encoding;
 };
 
 // Replace an asset's per-asset response headers. The whole list is overwritten,

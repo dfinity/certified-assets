@@ -27,6 +27,7 @@ use ic_stable_structures::Storable;
 use serde::{Deserialize, Serialize};
 
 use crate::redirect::RedirectRule;
+use wire_types::Encoding;
 
 /// Principals authorized to sync (controllers are always allowed and are not
 /// stored here). Newtype so it can carry a `Storable` impl (the orphan rule
@@ -47,7 +48,7 @@ pub struct RedirectRules(pub Vec<RedirectRule>);
 pub struct AssetMeta {
     pub content_type: String,
     pub headers: Vec<(String, String)>,
-    pub encodings: BTreeMap<String, EncodingMeta>,
+    pub encodings: BTreeMap<Encoding, EncodingMeta>,
 }
 
 /// Per-encoding metadata. The certificate expression and response hashes are

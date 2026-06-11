@@ -301,17 +301,17 @@ pub fn response_hash(
 
 pub fn build_ic_certificate_expression_from_headers_and_encoding<T>(
     headers: &[(String, T)],
-    encoding_name: Option<&str>,
+    encoding_header_value: Option<&str>,
 ) -> CertificateExpression {
     let mut headers = headers
         .iter()
         .map(|(h, _)| format!(", \"{h}\""))
         .collect::<Vec<_>>()
         .join("");
-    if let Some(encoding) = encoding_name {
-        if encoding != "identity" {
-            headers = format!(", \"content-encoding\"{headers}");
-        }
+    // `Some` carries a real `Content-Encoding` header value (identity passes
+    // `None`), so its presence alone decides whether the header is certified.
+    if encoding_header_value.is_some() {
+        headers = format!(", \"content-encoding\"{headers}");
     }
 
     let expression = IC_CERTIFICATE_EXPRESSION_VALUE.replace("{headers}", &headers);
