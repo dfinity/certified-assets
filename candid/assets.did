@@ -140,10 +140,6 @@ type ExecuteOperationsArguments = record {
   is_final: bool;
 };
 
-type CancelSyncArguments = record {
-  session_id: SessionId;
-};
-
 service: {
   // ───────── Canister metadata ─────────
 
@@ -192,9 +188,6 @@ service: {
 
   // Apply a group of operations. Perform all successfully, or reject.
   execute_operations: (ExecuteOperationsArguments) -> ();
-  // Abandon the active sync, releasing the lock without waiting for it to go
-  // stale. Only the sync's owner may cancel it.
-  cancel_sync: (CancelSyncArguments) -> ();
 
   // ───────── Authorization ─────────
   // A set of extra principals authorized to sync assets. Canister controllers

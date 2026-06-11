@@ -6,8 +6,8 @@ use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::system_context::SystemContext;
 use crate::types::{
-    CancelSyncArguments, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
-    Operation, SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
+    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, Operation, SessionId,
+    SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
@@ -604,39 +604,96 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
 }
 
 #[test]
-fn cancel_sync_releases_the_lock_for_the_owner_only() {
+fn active_sync_idle_clock_resets_on_each_call() {
+    // Staleness is measured from the last call, not from sync start: a deploy
+    // that keeps making calls must never become reclaimable, however long it
+    // runs in total. Without the touch_session reset a different principal
+    // could steal an actively-progressing sync mid-flight.
     let mut state = State::default();
-    let system_context = mock_system_context();
-    let owner = some_principal();
-    let other = Principal::from_text("aaaaa-aa").unwrap();
+    let mut system_context = mock_system_context();
+    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
 
     let session_id = start_session(&mut state, &system_context);
 
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+    // Advance to just under the timeout, then make a call that touches the
+    // session and resets its idle clock.
+    system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
     state
         .upload_chunks(
             UploadChunksArguments {
                 session_id,
-                chunks: vec![ByteBuf::from(BODY.to_vec())],
+                chunks: vec![ByteBuf::from(b"x".to_vec())],
             },
             &system_context,
         )
         .unwrap();
 
-    // A non-owner cannot cancel someone else's sync.
-    assert!(state
-        .cancel_sync(CancelSyncArguments { session_id }, other)
-        .is_err());
+    // Advance again by just under the timeout. Total elapsed since start now
+    // far exceeds the timeout, but only `TIMEOUT - 1` has passed since the
+    // last call, so the sync is still active and a different principal is
+    // refused rather than allowed to reclaim it.
+    system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
+    match state.start_sync(owner_b, &system_context) {
+        StartSyncResult::Busy { owner, .. } => assert_eq!(owner, some_principal()),
+        other => panic!("expected Busy while the sync is being actively touched, got {other:?}"),
+    }
+}
 
-    // The owner can, which clears staged chunks; a second cancel then errors.
-    assert_eq!(
-        Ok(()),
-        state.cancel_sync(CancelSyncArguments { session_id }, owner)
-    );
-    assert!(state.chunks.is_empty());
-    assert!(state
-        .cancel_sync(CancelSyncArguments { session_id }, owner)
-        .is_err());
+#[test]
+fn reclaim_boundary_is_inclusive_at_the_idle_timeout() {
+    // The reclaim guard is `idle >= SYNC_IDLE_TIMEOUT_NANOS`: a different
+    // principal is refused one nanosecond before the timeout and reclaims at
+    // exactly the timeout.
+    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+
+    // Just under the timeout: still Busy.
+    {
+        let mut state = State::default();
+        let mut system_context = mock_system_context();
+        start_session(&mut state, &system_context);
+        system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
+        match state.start_sync(owner_b, &system_context) {
+            StartSyncResult::Busy { .. } => {}
+            other => panic!("expected Busy one ns before the timeout, got {other:?}"),
+        }
+    }
+
+    // Exactly at the timeout: reclaimable.
+    {
+        let mut state = State::default();
+        let mut system_context = mock_system_context();
+        let id1 = start_session(&mut state, &system_context);
+        system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS;
+        match state.start_sync(owner_b, &system_context) {
+            StartSyncResult::Started { session_id } => assert!(session_id > id1),
+            other => panic!("expected Started at exactly the timeout, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn busy_reports_holders_idle_seconds() {
+    // The Busy variant reports how long the holder has been idle, in whole
+    // seconds (sub-second nanos truncated toward zero).
+    let mut state = State::default();
+    let mut system_context = mock_system_context();
+    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+
+    start_session(&mut state, &system_context);
+
+    // 5.5s of idle time, still under the timeout; the reported value truncates
+    // to whole seconds.
+    system_context.current_timestamp_ns += 5_500_000_000;
+    match state.start_sync(owner_b, &system_context) {
+        StartSyncResult::Busy {
+            owner,
+            idle_for_secs,
+        } => {
+            assert_eq!(owner, some_principal());
+            assert_eq!(idle_for_secs, 5);
+        }
+        other => panic!("expected Busy, got {other:?}"),
+    }
 }
 
 #[test]

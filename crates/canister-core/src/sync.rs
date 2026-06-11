@@ -6,7 +6,7 @@
 //! calls ([`ComputationStatus`], [`ExecuteOperationsProgress`]).
 //!
 //! The State methods that drive a sync — `start_sync`, `upload_chunks`,
-//! `execute_operations`, `cancel_sync` — live here too, alongside the small
+//! `execute_operations` — live here too, alongside the small
 //! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
 
@@ -17,8 +17,8 @@ use crate::redirect;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    CancelSyncArguments, ExecuteOperationsArguments, Operation, SessionId,
-    SetAssetContentArguments, StartSyncResult, UploadChunksArguments,
+    ExecuteOperationsArguments, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
+    UploadChunksArguments,
 };
 use candid::Principal;
 use ic_representation_independent_hash::Value;
@@ -319,25 +319,6 @@ impl State {
                     ComputationStatus::InProgress(progress)
                 }
             }
-        }
-    }
-
-    /// Cancels the active sync, if it matches `session_id` and is owned by
-    /// `caller`. Lets a client cleanly release the sync lock on abort instead
-    /// of waiting for it to go stale. A caller cannot cancel someone else's
-    /// sync (a stale one is reclaimed via `start_sync` instead).
-    pub fn cancel_sync(
-        &mut self,
-        arg: CancelSyncArguments,
-        caller: Principal,
-    ) -> Result<(), String> {
-        match &self.sync_session {
-            Some(s) if s.id == arg.session_id && s.owner == caller => {
-                self.sync_session = None;
-                self.chunks.clear();
-                Ok(())
-            }
-            _ => Err("no active sync for this session id".to_string()),
         }
     }
 

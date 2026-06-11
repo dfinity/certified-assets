@@ -13,9 +13,9 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 pub use wire_types::{
-    AssetDetails, AssetEncodingDetails, CancelSyncArguments, CreateAssetArguments,
-    DeleteAssetArguments, ExecuteOperationsArguments, Operation, RedirectRule, RulePattern,
-    SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
+    AssetDetails, AssetEncodingDetails, CreateAssetArguments, DeleteAssetArguments,
+    ExecuteOperationsArguments, Operation, RedirectRule, RulePattern, SetAssetContentArguments,
+    SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
     UnsetAssetContentArguments, UploadChunksArguments,
 };
 
@@ -117,17 +117,6 @@ pub fn execute_operations(
     args: ExecuteOperationsArguments,
 ) -> Result<(), String> {
     c.call("execute_operations", args, CallType::Update, true)
-}
-
-/// Abandons the active sync, releasing the lock. Best-effort cleanup on an
-/// aborted sync; a sync left uncancelled is reclaimed once it goes stale.
-pub fn cancel_sync(c: &impl CanisterCall, session_id: u64) -> Result<(), String> {
-    c.call(
-        "cancel_sync",
-        CancelSyncArguments { session_id },
-        CallType::Update,
-        true,
-    )
 }
 
 // Fetch the complete redirect-rule list by paging through `get_redirect_rules`,

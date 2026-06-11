@@ -89,13 +89,6 @@ pub async fn execute_operations(arg: ExecuteOperationsArguments) {
     with_state_mut(|s| certified_data_set(s.root_hash()));
 }
 
-pub fn cancel_sync(arg: CancelSyncArguments) {
-    let caller = msg_caller();
-    if let Err(msg) = with_state_mut(|s| s.cancel_sync(arg, caller)) {
-        trap(&msg);
-    }
-}
-
 pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
     with_state(|s| s.get_asset_details(start_after))
 }
