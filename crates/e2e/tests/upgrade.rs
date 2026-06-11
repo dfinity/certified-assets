@@ -13,8 +13,7 @@ fn sorted_assets(project: &std::path::Path) -> Vec<AssetDetails> {
     let mut assets = list_assets(project);
     assets.sort_by(|a, b| a.key.cmp(&b.key));
     for a in assets.iter_mut() {
-        a.encodings
-            .sort_by(|x, y| x.content_encoding.cmp(&y.content_encoding));
+        a.encodings.sort_by_key(|x| x.encoding);
     }
     assets
 }

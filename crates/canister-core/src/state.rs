@@ -15,8 +15,7 @@
 //! upgrade roundtrip over a shared memory handle).
 
 use crate::asset::{
-    certificate_expression_for, encoding_certification_order, headers_for, response_hashes_for,
-    STATUS_CODES_TO_CERTIFY,
+    certificate_expression_for, headers_for, response_hashes_for, STATUS_CODES_TO_CERTIFY,
 };
 use crate::certification::{
     response_hash, AssetKey, AssetPath, CertifiedResponses, RequestHash, ResponseHash,
@@ -266,7 +265,7 @@ impl State {
             .ok_or_else(|| "asset not found".to_string())?;
 
         // Free the chunks of any encoding we're replacing.
-        if let Some(old) = meta.encodings.get(&arg.content_encoding) {
+        if let Some(old) = meta.encodings.get(&arg.encoding) {
             self.delete_content(old.content_id);
         }
 
@@ -281,7 +280,7 @@ impl State {
         }
 
         meta.encodings.insert(
-            arg.content_encoding,
+            arg.encoding,
             EncodingMeta {
                 content_id,
                 num_chunks,
@@ -300,7 +299,7 @@ impl State {
             .get(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
-        if let Some(old) = meta.encodings.remove(&arg.content_encoding) {
+        if let Some(old) = meta.encodings.remove(&arg.encoding) {
             self.delete_content(old.content_id);
             self.recertify_asset(&arg.key, &meta);
             self.metadata.insert(arg.key, meta);
@@ -341,12 +340,12 @@ impl State {
         }
 
         let path = AssetPath::from(key.as_str());
-        for (enc_name, enc) in &meta.encodings {
-            let cert_expr = certificate_expression_for(&meta.headers, enc_name);
+        for (&encoding, enc) in &meta.encodings {
+            let cert_expr = certificate_expression_for(&meta.headers, encoding);
             let response_hashes = response_hashes_for(
                 &meta.headers,
                 &meta.content_type,
-                enc_name,
+                encoding,
                 &cert_expr,
                 &enc.sha256,
             );
@@ -384,12 +383,12 @@ impl State {
                 let mut encodings: Vec<_> = meta
                     .encodings
                     .iter()
-                    .map(|(enc_name, enc)| AssetEncodingDetails {
-                        content_encoding: enc_name.clone(),
+                    .map(|(&encoding, enc)| AssetEncodingDetails {
+                        encoding,
                         sha256: ByteBuf::from(enc.sha256),
                     })
                     .collect();
-                encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
+                encodings.sort_by_key(|l| l.encoding);
 
                 AssetDetails {
                     key,
@@ -427,7 +426,7 @@ impl State {
         &self,
         certificate: &[u8],
         path: &str,
-        requested_encodings: Vec<String>,
+        requested_encodings: Vec<Encoding>,
         chunk_index: usize,
         callback: CallbackFunc,
         etags: Vec<Hash>,
@@ -486,7 +485,7 @@ impl State {
     fn build_asset_response(
         &self,
         meta: &AssetMeta,
-        requested_encodings: &[String],
+        requested_encodings: &[Encoding],
         key: &str,
         chunk_index: usize,
         certificate_header: Option<&HeaderField>,
@@ -494,19 +493,21 @@ impl State {
         etags: &[Hash],
         status_override: Option<u16>,
     ) -> Option<HttpResponse> {
-        let enc_name = requested_encodings
+        // Honour the client's listed order first; if it expressed no acceptable
+        // encoding, fall back to our preference order (identity-first).
+        let encoding = requested_encodings
             .iter()
-            .find(|e| meta.encodings.contains_key(*e))
-            .cloned()
+            .copied()
+            .find(|e| meta.encodings.contains_key(e))
             .or_else(|| {
-                encoding_certification_order(meta.encodings.keys())
+                Encoding::PREFERENCE_ORDER
                     .into_iter()
                     .find(|e| meta.encodings.contains_key(e))
             })?;
-        let enc = meta.encodings.get(&enc_name)?;
+        let enc = meta.encodings.get(&encoding)?;
         Some(self.build_ok_http_response(
             meta,
-            &enc_name,
+            encoding,
             enc,
             key,
             chunk_index,
@@ -527,7 +528,7 @@ impl State {
     fn build_ok_http_response(
         &self,
         meta: &AssetMeta,
-        enc_name: &str,
+        encoding: Encoding,
         enc: &EncodingMeta,
         key: &str,
         chunk_index: usize,
@@ -536,13 +537,13 @@ impl State {
         etags: &[Hash],
         status_override: Option<u16>,
     ) -> HttpResponse {
-        let mut headers = headers_for(&meta.headers, &meta.content_type, enc_name);
+        let mut headers = headers_for(&meta.headers, &meta.content_type, encoding);
         if let Some(head) = certificate_header {
             headers.push((head.0.clone(), head.1.clone()));
         }
 
         let streaming_strategy = StreamingCallbackToken::create_token(
-            enc_name,
+            encoding,
             enc.num_chunks as usize,
             enc.sha256,
             key,
@@ -586,7 +587,7 @@ impl State {
         entry: &crate::redirect::CertifiedRuleEntry,
         path: &str,
         certificate: &[u8],
-        requested_encodings: &[String],
+        requested_encodings: &[Encoding],
         chunk_index: usize,
         callback: &CallbackFunc,
         etags: &[Hash],
@@ -637,14 +638,12 @@ impl State {
         certificate: &[u8],
         callback: CallbackFunc,
     ) -> HttpResponse {
-        let mut encodings = vec![];
+        let mut encodings: Vec<Encoding> = vec![];
         // waiting for https://dfinity.atlassian.net/browse/BOUN-446
         let etags = Vec::new();
         for (name, value) in req.headers.iter() {
             if name.eq_ignore_ascii_case("Accept-Encoding") {
-                for v in value.split(',') {
-                    encodings.push(v.trim().to_string());
-                }
+                encodings.extend(Encoding::parse_accept_encoding(value));
             }
         }
 
@@ -678,7 +677,7 @@ impl State {
         &self,
         StreamingCallbackToken {
             key,
-            content_encoding,
+            encoding,
             index,
             sha256,
         }: StreamingCallbackToken,
@@ -689,7 +688,7 @@ impl State {
             .ok_or_else(|| "Invalid token on streaming: key not found.".to_string())?;
         let enc = meta
             .encodings
-            .get(&content_encoding)
+            .get(&encoding)
             .ok_or_else(|| "Invalid token on streaming: encoding not found.".to_string())?;
 
         if sha256 != ByteBuf::from(enc.sha256) {
@@ -702,7 +701,7 @@ impl State {
         Ok(StreamingCallbackHttpResponse {
             body: self.chunk_bytes(enc.content_id, chunk_index),
             token: StreamingCallbackToken::create_token(
-                &content_encoding,
+                encoding,
                 enc.num_chunks as usize,
                 enc.sha256,
                 &key,
@@ -812,14 +811,14 @@ impl State {
         let meta = self.metadata.get(&target_key)?;
         let location = crate::redirect::tree_location(rule);
         let mut tree_paths = Vec::new();
-        for (enc_name, enc) in &meta.encodings {
-            let cert_expr = certificate_expression_for(&meta.headers, enc_name);
+        for (&encoding, enc) in &meta.encodings {
+            let cert_expr = certificate_expression_for(&meta.headers, encoding);
             let resp_hash = if status == 200 {
                 // The encoding's already-certified 200 response hash.
                 response_hashes_for(
                     &meta.headers,
                     &meta.content_type,
-                    enc_name,
+                    encoding,
                     &cert_expr,
                     &enc.sha256,
                 )[&200]
@@ -827,7 +826,7 @@ impl State {
                 // 4xx custom error page: re-certify with the override status
                 // using the same headers and body the asset would serve at 200.
                 let base_headers: Vec<(String, Value)> =
-                    headers_for(&meta.headers, &meta.content_type, enc_name)
+                    headers_for(&meta.headers, &meta.content_type, encoding)
                         .into_iter()
                         .map(|(k, v)| (k, Value::String(v)))
                         .collect();

@@ -15,26 +15,7 @@ use crate::certification::{
 use ic_representation_independent_hash::Value;
 use sha2::Digest;
 use std::collections::HashMap;
-
-/// The preferred order in which we pick encodings.
-const ENCODING_CERTIFICATION_ORDER: &[&str] = &["identity", "gzip", "compress", "deflate", "br"];
-
-/// All encodings get certified; this returns them in preference order (preferred
-/// names first, then any remaining encodings in iteration order).
-pub fn encoding_certification_order<'a>(
-    actual_encodings: impl Iterator<Item = &'a String>,
-) -> Vec<String> {
-    let mut order: Vec<String> = ENCODING_CERTIFICATION_ORDER
-        .iter()
-        .map(|enc| enc.to_string())
-        .collect();
-    order.extend(
-        actual_encodings
-            .filter(|encoding| !ENCODING_CERTIFICATION_ORDER.contains(&encoding.as_str()))
-            .map(|s| s.to_owned()),
-    );
-    order
-}
+use wire_types::Encoding;
 
 /// Status codes we certify for every asset encoding.
 pub(crate) const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
@@ -45,9 +26,12 @@ pub(crate) const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 /// non-identity encodings, plus the custom headers.
 pub(crate) fn certificate_expression_for(
     custom_headers: &[(String, String)],
-    encoding_name: &str,
+    encoding: Encoding,
 ) -> CertificateExpression {
-    build_ic_certificate_expression_from_headers_and_encoding(custom_headers, Some(encoding_name))
+    build_ic_certificate_expression_from_headers_and_encoding(
+        custom_headers,
+        encoding.header_name(),
+    )
 }
 
 /// The full response header list for an encoding: `content-type`,
@@ -56,13 +40,13 @@ pub(crate) fn certificate_expression_for(
 pub(crate) fn headers_for(
     custom_headers: &[(String, String)],
     content_type: &str,
-    encoding_name: &str,
+    encoding: Encoding,
 ) -> Vec<(String, String)> {
-    let cert_expr = certificate_expression_for(custom_headers, encoding_name);
+    let cert_expr = certificate_expression_for(custom_headers, encoding);
     build_headers(
         custom_headers.iter().map(|(k, v)| (k, v)),
         content_type,
-        encoding_name,
+        encoding,
         Some(&cert_expr),
     )
 }
@@ -71,14 +55,14 @@ pub(crate) fn headers_for(
 pub(crate) fn response_hashes_for(
     custom_headers: &[(String, String)],
     content_type: &str,
-    encoding_name: &str,
+    encoding: Encoding,
     cert_expr: &CertificateExpression,
     sha256: &[u8; 32],
 ) -> HashMap<u16, [u8; 32]> {
     let base_headers: Vec<(String, Value)> = build_headers(
         custom_headers.iter().map(|(k, v)| (k, v)),
         content_type,
-        encoding_name,
+        encoding,
         Some(cert_expr),
     )
     .into_iter()
@@ -104,14 +88,14 @@ pub(crate) fn response_hashes_for(
 fn build_headers(
     custom_headers: impl Iterator<Item = (impl Into<String>, impl Into<String>)>,
     content_type: impl Into<String>,
-    encoding_name: impl Into<String>,
+    encoding: Encoding,
     cert_expr: Option<&CertificateExpression>,
 ) -> Vec<(String, String)> {
     let mut headers: Vec<(String, String)> =
         vec![("content-type".to_string(), content_type.into())];
-    let encoding_name = encoding_name.into();
-    if encoding_name != "identity" {
-        headers.push(("content-encoding".to_string(), encoding_name));
+    // Identity carries no `Content-Encoding` header; every other encoding does.
+    if let Some(name) = encoding.header_name() {
+        headers.push(("content-encoding".to_string(), name.to_string()));
     }
     for (k, v) in custom_headers {
         headers.push((k.into().to_lowercase(), v.into()));

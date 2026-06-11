@@ -3,30 +3,10 @@
 //! Mirrors `ic-asset`'s `asset/content.rs` and `asset/content_encoder.rs`.
 
 use mime::Mime;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Encoder {
-    Identity,
-    Gzip,
-    /// Serialized as `"brotli"`; also accepted as `"br"` for compatibility.
-    #[serde(alias = "br")]
-    Brotli,
-}
-
-impl Encoder {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Encoder::Identity => "identity",
-            Encoder::Gzip => "gzip",
-            Encoder::Brotli => "br",
-        }
-    }
-}
+use wire_types::Encoding;
 
 #[derive(Clone)]
 pub struct Content {
@@ -43,10 +23,10 @@ impl Content {
         Ok(Content { data, media_type })
     }
 
-    pub fn encode(&self, encoder: Encoder) -> Result<Content, String> {
-        match encoder {
-            Encoder::Identity => Ok(self.clone()),
-            Encoder::Gzip => {
+    pub fn encode(&self, encoding: Encoding) -> Result<Content, String> {
+        match encoding {
+            Encoding::Identity => Ok(self.clone()),
+            Encoding::Gzip => {
                 let mut e =
                     flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 e.write_all(&self.data).map_err(|e| format!("gzip: {e}"))?;
@@ -56,7 +36,7 @@ impl Content {
                     media_type: self.media_type.clone(),
                 })
             }
-            Encoder::Brotli => {
+            Encoding::Brotli => {
                 let mut compressed = Vec::new();
                 {
                     let mut w = brotli::CompressorWriter::new(&mut compressed, 4096, 11, 22);
@@ -77,13 +57,52 @@ impl Content {
     }
 }
 
-/// Returns the encoders to apply for a given media type, matching `ic-asset`'s policy.
-pub fn encoders_for(media_type: &Mime) -> Vec<Encoder> {
-    match (media_type.type_(), media_type.subtype()) {
-        (mime::TEXT, _) | (_, mime::JAVASCRIPT) | (_, mime::HTML) => {
-            vec![Encoder::Identity, Encoder::Gzip]
+/// Whether content of this media type is worth compressing.
+///
+/// We deliberately support a small, curated set of encodings (Identity, Gzip,
+/// Brotli) rather than the full IANA list — trading a little bandwidth for
+/// implementation simplicity and bounded canister storage. Compressible:
+/// - all `text/*` (html, css, plain, markdown, csv, …);
+/// - JavaScript and WebAssembly;
+/// - structured types with a `+json` / `+xml` suffix — this one rule catches
+///   `image/svg+xml`, `application/xhtml+xml`, `application/rss+xml`, etc. —
+///   plus the bare `application/json` / `application/xml`;
+/// - uncompressed font containers (`font/ttf`, `font/otf`, `.eot`).
+///
+/// Already-compressed formats are left alone: images/audio/video, archives, and
+/// `font/woff` + `font/woff2` (which embed their own compression — `woff2` is
+/// itself Brotli, so re-compressing only wastes space and CPU).
+pub fn is_compressible(media_type: &Mime) -> bool {
+    let ty = media_type.type_();
+    let subtype = media_type.subtype();
+
+    if ty == mime::TEXT {
+        return true;
+    }
+    if ty == mime::FONT {
+        return !matches!(subtype.as_str(), "woff" | "woff2");
+    }
+    if let Some(suffix) = media_type.suffix() {
+        if suffix == mime::JSON || suffix == mime::XML {
+            return true;
         }
-        _ => vec![Encoder::Identity],
+    }
+    subtype == mime::JAVASCRIPT
+        || subtype == mime::JSON
+        || subtype == mime::XML
+        || matches!(subtype.as_str(), "wasm" | "vnd.ms-fontobject")
+}
+
+/// The encodings to *attempt* for a given media type: every compressible asset
+/// gets Brotli and Gzip alongside the always-present uncompressed Identity copy;
+/// everything else is stored as Identity only. Whether a produced compressed
+/// encoding is actually kept is decided afterwards by a size check against
+/// Identity — see `prepare_content_asset`.
+pub fn encoders_for(media_type: &Mime) -> Vec<Encoding> {
+    if is_compressible(media_type) {
+        vec![Encoding::Identity, Encoding::Gzip, Encoding::Brotli]
+    } else {
+        vec![Encoding::Identity]
     }
 }
 
@@ -99,50 +118,58 @@ mod tests {
         }
     }
 
-    // --- encoders_for ---
+    // --- is_compressible / encoders_for ---
+
+    fn mime_of(s: &str) -> Mime {
+        s.parse().unwrap()
+    }
+
+    const ALL_THREE: [Encoding; 3] = [Encoding::Identity, Encoding::Gzip, Encoding::Brotli];
 
     #[test]
-    fn encoders_for_text_html() {
-        let mime: Mime = "text/html".parse().unwrap();
-        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
+    fn compressible_types() {
+        for s in [
+            "text/html",
+            "text/css",
+            "text/plain",
+            "text/markdown",
+            "application/javascript",
+            "text/javascript",
+            "application/json",
+            "application/vnd.api+json",
+            "application/xml",
+            "text/xml",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "application/rss+xml",
+            "application/wasm",
+            "font/ttf",
+            "font/otf",
+            "application/vnd.ms-fontobject",
+        ] {
+            let m = mime_of(s);
+            assert!(is_compressible(&m), "{s} should be compressible");
+            assert_eq!(encoders_for(&m), ALL_THREE.to_vec(), "{s}");
+        }
     }
 
     #[test]
-    fn encoders_for_text_css() {
-        let mime: Mime = "text/css".parse().unwrap();
-        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
-    }
-
-    #[test]
-    fn encoders_for_application_javascript() {
-        let mime: Mime = "application/javascript".parse().unwrap();
-        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
-    }
-
-    #[test]
-    fn encoders_for_text_javascript() {
-        let mime: Mime = "text/javascript".parse().unwrap();
-        assert_eq!(encoders_for(&mime), vec![Encoder::Identity, Encoder::Gzip]);
-    }
-
-    #[test]
-    fn encoders_for_image_png() {
-        let mime: Mime = "image/png".parse().unwrap();
-        assert_eq!(encoders_for(&mime), vec![Encoder::Identity]);
-    }
-
-    #[test]
-    fn encoders_for_application_wasm() {
-        let mime: Mime = "application/wasm".parse().unwrap();
-        assert_eq!(encoders_for(&mime), vec![Encoder::Identity]);
-    }
-
-    #[test]
-    fn encoders_for_unknown_uses_octet_stream() {
-        assert_eq!(
-            encoders_for(&mime::APPLICATION_OCTET_STREAM),
-            vec![Encoder::Identity]
-        );
+    fn incompressible_types() {
+        for s in [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "video/mp4",
+            "audio/mpeg",
+            "font/woff",
+            "font/woff2",
+            "application/zip",
+            "application/octet-stream",
+        ] {
+            let m = mime_of(s);
+            assert!(!is_compressible(&m), "{s} should NOT be compressible");
+            assert_eq!(encoders_for(&m), vec![Encoding::Identity], "{s}");
+        }
     }
 
     // --- encode ---
@@ -150,7 +177,7 @@ mod tests {
     #[test]
     fn encode_identity_passthrough() {
         let c = content(b"hello world");
-        let out = c.encode(Encoder::Identity).unwrap();
+        let out = c.encode(Encoding::Identity).unwrap();
         assert_eq!(out.data, b"hello world");
     }
 
@@ -160,7 +187,7 @@ mod tests {
 
         let original = b"hello gzip world, hello gzip world";
         let c = content(original);
-        let compressed = c.encode(Encoder::Gzip).unwrap();
+        let compressed = c.encode(Encoding::Gzip).unwrap();
 
         let mut decoder = GzDecoder::new(compressed.data.as_slice());
         let mut decompressed = Vec::new();
@@ -172,7 +199,7 @@ mod tests {
     fn encode_brotli_round_trip() {
         let original = b"hello brotli world, hello brotli world";
         let c = content(original);
-        let compressed = c.encode(Encoder::Brotli).unwrap();
+        let compressed = c.encode(Encoding::Brotli).unwrap();
 
         let mut decompressed = Vec::new();
         brotli::Decompressor::new(compressed.data.as_slice(), 4096)

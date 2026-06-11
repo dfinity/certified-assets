@@ -23,13 +23,21 @@ type HttpResponse = record {
   streaming_strategy: opt StreamingStrategy;
 };
 
+// The content encodings the canister and sync plugin support — a deliberately
+// small, closed set (see `wire-types::Encoding`). Carried as a variant
+// (one byte on the wire) rather than a string. `Identity` is the uncompressed
+// form; it is a real stored encoding but never emitted as a `Content-Encoding`
+// header. Defined here, in the imported base interface, so the asset types below
+// and the streaming token can both reference it.
+type Encoding = variant { Identity; Gzip; Brotli };
+
 // Each canister that uses the streaming feature gets to choose their concrete
 // type; the HTTP Gateway will treat it as an opaque value that is only fed to
 // the callback method. This is the assets canister's concrete token.
 
 type StreamingToken = record {
   key: text;
-  content_encoding: text;
+  encoding: Encoding;
   index: nat;
   sha256: blob;
 };

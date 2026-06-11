@@ -5,8 +5,8 @@ use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::system_context::SystemContext;
 use crate::types::{
-    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, Operation, SessionId,
-    SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
+    CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
+    SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
@@ -143,7 +143,7 @@ fn certified_http_request(state: &State, request: HttpRequest) -> HttpResponse {
 struct AssetBuilder {
     name: String,
     content_type: String,
-    encodings: Vec<(String, Vec<ByteBuf>)>,
+    encodings: Vec<(Encoding, Vec<ByteBuf>)>,
     headers: Vec<(String, String)>,
 }
 
@@ -158,8 +158,10 @@ impl AssetBuilder {
     }
 
     fn with_encoding(mut self, name: impl AsRef<str>, chunks: Vec<impl AsRef<[u8]>>) -> Self {
+        let encoding = Encoding::from_token(name.as_ref())
+            .unwrap_or_else(|| panic!("unsupported test encoding {:?}", name.as_ref()));
         self.encodings.push((
-            name.as_ref().to_string(),
+            encoding,
             chunks
                 .into_iter()
                 .map(|c| ByteBuf::from(c.as_ref().to_vec()))
@@ -304,7 +306,7 @@ fn assemble_create_assets_and_set_contents_operations(
             operations.push(Operation::SetAssetContent({
                 SetAssetContentArguments {
                     key: asset.name.clone(),
-                    content_encoding: enc,
+                    encoding: enc,
                     chunk_ids,
                     sha256,
                 }
@@ -370,6 +372,7 @@ fn serve_correct_encoding() {
 
     const IDENTITY_BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     const GZIP_BODY: &[u8] = b"this is 'gzipped' content";
+    const BROTLI_BODY: &[u8] = b"this is 'brotli' content";
 
     create_assets(
         &mut state,
@@ -377,11 +380,14 @@ fn serve_correct_encoding() {
         vec![
             AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("identity", vec![IDENTITY_BODY])
-                .with_encoding("gzip", vec![GZIP_BODY]),
+                .with_encoding("gzip", vec![GZIP_BODY])
+                .with_encoding("br", vec![BROTLI_BODY]),
             AssetBuilder::new("/no-encoding.html", "text/html"),
         ],
     );
 
+    // Identity is served verbatim and carries NO `content-encoding` header (the
+    // `identity` token is not a valid response value).
     let identity_response = certified_http_request(
         &state,
         RequestBuilder::get("/contents.html")
@@ -391,6 +397,7 @@ fn serve_correct_encoding() {
     );
     assert_eq!(identity_response.status_code, 200);
     assert_eq!(identity_response.body.as_ref(), IDENTITY_BODY);
+    assert_eq!(lookup_header(&identity_response, "content-encoding"), None);
     assert!(lookup_header(&identity_response, "IC-Certificate").is_some());
 
     let gzip_response = certified_http_request(
@@ -402,7 +409,28 @@ fn serve_correct_encoding() {
     );
     assert_eq!(gzip_response.status_code, 200);
     assert_eq!(gzip_response.body.as_ref(), GZIP_BODY);
+    assert_eq!(
+        lookup_header(&gzip_response, "content-encoding"),
+        Some("gzip")
+    );
     assert!(lookup_header(&gzip_response, "IC-Certificate").is_some());
+
+    // Brotli is selected and labelled `br`, including from a weighted, multi-coding
+    // Accept-Encoding header (the `;q=` parsing that previously matched nothing).
+    let brotli_response = certified_http_request(
+        &state,
+        RequestBuilder::get("/contents.html")
+            .with_header("Accept-Encoding", "br;q=1.0, gzip;q=0.8")
+            .with_certificate_version(2)
+            .build(),
+    );
+    assert_eq!(brotli_response.status_code, 200);
+    assert_eq!(brotli_response.body.as_ref(), BROTLI_BODY);
+    assert_eq!(
+        lookup_header(&brotli_response, "content-encoding"),
+        Some("br")
+    );
+    assert!(lookup_header(&brotli_response, "IC-Certificate").is_some());
 
     // An asset with no encodings has nothing to serve → the built-in certified
     // 404 (no rule occupies `<*>`, so the fallback is certified there).
@@ -870,7 +898,7 @@ fn uses_streaming_for_multichunk_assets() {
         state
             .http_request_streaming_callback(StreamingCallbackToken {
                 key: "/index.html".to_string(),
-                content_encoding: "identity".to_string(),
+                encoding: Encoding::Identity,
                 index: Nat::from(1_u8),
                 sha256: ByteBuf::from([0u8; 32].as_slice()),
             })
@@ -1333,12 +1361,16 @@ mod certificate_expression {
             ("c".into(), Value::String("".into())),
         ]
         .to_vec();
-        let c = build_ic_certificate_expression_from_headers_and_encoding(&h, Some("not identity"));
+        // `Some(value)` certifies a `content-encoding` header (a real encoding,
+        // e.g. `Encoding::Gzip.header_name()` == `Some("gzip")`).
+        let c = build_ic_certificate_expression_from_headers_and_encoding(&h, Some("gzip"));
         assert_eq!(
             c.expression,
             r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "a", "b", "c"]}}}})"#
         );
-        let c2 = build_ic_certificate_expression_from_headers_and_encoding(&h, Some("identity"));
+        // `None` — which identity maps to via `Encoding::header_name` —
+        // omits the `content-encoding` header.
+        let c2 = build_ic_certificate_expression_from_headers_and_encoding(&h, None);
         assert_eq!(
             c2.expression,
             r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "a", "b", "c"]}}}})"#
@@ -1671,7 +1703,7 @@ mod set_asset_content_sha256_verification {
         // set_asset_content with correct hash should succeed
         let result = state.set_asset_content(SetAssetContentArguments {
             key: "/test.txt".to_string(),
-            content_encoding: "identity".to_string(),
+            encoding: Encoding::Identity,
             chunk_ids,
             sha256: ByteBuf::from(correct_hash.as_slice()),
         });
@@ -1710,7 +1742,7 @@ mod set_asset_content_sha256_verification {
         // set_asset_content with incorrect hash should fail
         let result = state.set_asset_content(SetAssetContentArguments {
             key: "/test.txt".to_string(),
-            content_encoding: "identity".to_string(),
+            encoding: Encoding::Identity,
             chunk_ids,
             sha256: ByteBuf::from(incorrect_hash.as_slice()),
         });
@@ -1748,7 +1780,7 @@ mod set_asset_content_sha256_verification {
 
         let result = state.set_asset_content(SetAssetContentArguments {
             key: "/test.txt".to_string(),
-            content_encoding: "identity".to_string(),
+            encoding: Encoding::Identity,
             chunk_ids,
             sha256: ByteBuf::from(expected_hash.as_slice()),
         });
@@ -1763,7 +1795,7 @@ mod set_asset_content_sha256_verification {
             .and_then(|a| {
                 a.encodings
                     .iter()
-                    .find(|e| e.content_encoding == "identity")
+                    .find(|e| e.encoding == Encoding::Identity)
             })
             .expect("identity encoding should be listed");
         assert_eq!(encoding.sha256.as_ref(), expected_hash.as_slice());
@@ -1804,7 +1836,7 @@ mod set_asset_content_sha256_verification {
         // set_asset_content with correct hash for combined chunks should succeed
         let result = state.set_asset_content(SetAssetContentArguments {
             key: "/test.txt".to_string(),
-            content_encoding: "identity".to_string(),
+            encoding: Encoding::Identity,
             chunk_ids,
             sha256: ByteBuf::from(correct_hash.as_slice()),
         });
