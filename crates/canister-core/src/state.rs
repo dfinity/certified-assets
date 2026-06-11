@@ -655,6 +655,13 @@ impl State {
 
         match url_decode(path) {
             Ok(path) => self.build_http_response(certificate, &path, encodings, 0, callback, etags),
+            // Malformed percent-encoding (invalid UTF-8 once decoded). This 400
+            // is intentionally uncertified: the body is per-request (it echoes
+            // the bad path), so it can't be pinned to a certified hash, and a
+            // malformed URL has no certifiable response anyway. The HTTP gateway
+            // rejects uncertified responses, so a browser never sees this body —
+            // it surfaces only to a direct query call of `http_request` (e.g.
+            // `dfx canister call`), where it serves as a diagnostic.
             Err(err) => HttpResponse {
                 status_code: 400,
                 headers: vec![],

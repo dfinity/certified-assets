@@ -79,16 +79,6 @@ impl HttpRequest {
 }
 
 impl HttpResponse {
-    pub fn build_400(err_msg: &str) -> Self {
-        HttpResponse {
-            status_code: 400,
-            headers: vec![],
-            body: RcBytes::from(ByteBuf::from(err_msg)),
-            upgrade: None,
-            streaming_strategy: None,
-        }
-    }
-
     pub fn build_404(certificate_header: HeaderField) -> HttpResponse {
         let base_404 = Self::uncertified_404();
         let mut headers = base_404.headers.clone();
