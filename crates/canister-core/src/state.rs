@@ -407,7 +407,7 @@ impl State {
         })
     }
 
-    pub fn set_asset_properties(&mut self, arg: SetAssetPropertiesArguments) -> Result<(), String> {
+    pub fn set_asset_headers(&mut self, arg: SetAssetHeadersArguments) -> Result<(), String> {
         let dependent_keys = self.dependent_keys(&arg.key);
         let asset = self
             .assets

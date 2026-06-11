@@ -259,9 +259,7 @@ impl State {
                         self.delete_asset(arg.clone());
                         Ok(())
                     }
-                    BatchOperationKind::SetAssetProperties(arg) => {
-                        self.set_asset_properties(arg.clone())
-                    }
+                    BatchOperationKind::SetAssetHeaders(arg) => self.set_asset_headers(arg.clone()),
                     BatchOperationKind::SetRedirectRules(arg) => {
                         // Validate every rule before mutating state so a single
                         // bad rule fails the whole op with no partial update.

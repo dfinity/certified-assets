@@ -37,10 +37,8 @@ type DeleteAssetArguments = record {
 type BatchOperationKind = variant {
   CreateAsset: CreateAssetArguments;
   SetAssetContent: SetAssetContentArguments;
-
-  SetAssetProperties: SetAssetPropertiesArguments;
-
   UnsetAssetContent: UnsetAssetContentArguments;
+  SetAssetHeaders: SetAssetHeadersArguments;
   DeleteAsset: DeleteAssetArguments;
 
   SetRedirectRules: SetRedirectRulesArguments;
@@ -86,7 +84,7 @@ type StartSyncResult = variant {
   Busy: record { owner: principal; idle_for_secs: nat64 };
 };
 
-type SetAssetPropertiesArguments = record {
+type SetAssetHeadersArguments = record {
   key: Key;
   headers: vec HeaderField;
 };
@@ -139,7 +137,7 @@ service: {
   // Assets are only ever mutated through a sync. At most one sync runs at a
   // time. `start_sync` returns a session id that all subsequent calls of the
   // sync must carry; the canister rejects calls bearing a superseded id.
-  // Operations (create, set/unset content, set properties, delete) are applied
+  // Operations (create, set/unset content, set headers, delete) are applied
   // by `execute_operations`; the sync finalizes on the call flagged `is_final`.
 
   // Begin a sync. Returns a session id, or `Busy` if another non-stale sync is

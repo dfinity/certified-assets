@@ -60,7 +60,7 @@ pub struct DeleteAssetArguments {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
-pub struct SetAssetPropertiesArguments {
+pub struct SetAssetHeadersArguments {
     pub key: String,
     pub headers: Vec<(String, String)>,
 }
@@ -105,7 +105,7 @@ pub enum BatchOperationKind {
     SetAssetContent(SetAssetContentArguments),
     UnsetAssetContent(UnsetAssetContentArguments),
     DeleteAsset(DeleteAssetArguments),
-    SetAssetProperties(SetAssetPropertiesArguments),
+    SetAssetHeaders(SetAssetHeadersArguments),
     SetRedirectRules(SetRedirectRulesArguments),
 }
 

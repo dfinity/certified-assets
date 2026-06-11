@@ -1,9 +1,7 @@
 //! Layer 1 benchmark — measures the canister-call pattern `sync()` emits.
 //!
 //! The mock returns instantly, so wall-clock here reflects scan + encode +
-//! Candid only. The wins we're targeting (chunk batching, `last_chunk`
-//! inlining, eliminating per-asset `get_asset_properties`) all move the
-//! *call pattern*, which is what the printed table surfaces.
+//! Candid only.
 //!
 //! Run on a baseline branch, save the output, then re-run on a changed
 //! branch and diff:

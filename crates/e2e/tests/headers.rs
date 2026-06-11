@@ -45,9 +45,9 @@ fn header_rules_honoured() {
 }
 
 /// Edit `_headers` and redeploy. Expectation: new headers propagate without
-/// re-uploading content (drift detected via `SetAssetProperties`).
+/// re-uploading content (drift detected via `SetAssetHeaders`).
 #[test]
-fn header_edit_propagates_via_set_asset_properties() {
+fn header_edit_propagates_via_set_asset_headers() {
     let tmp = setup_project("tests/fixture/headers");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
@@ -84,6 +84,6 @@ fn header_edit_propagates_via_set_asset_properties() {
     assert_eq!(
         header_value(r.headers(), "x-robots-tag"),
         Some("none"),
-        "edited X-Robots-Tag should reach the canister via SetAssetProperties",
+        "edited X-Robots-Tag should reach the canister via SetAssetHeaders",
     );
 }

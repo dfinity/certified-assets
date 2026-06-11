@@ -7,7 +7,7 @@ use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
     BatchOperationKind, CancelSyncArguments, CreateAssetArguments, DeleteAssetArguments,
-    ExecuteOperationsArguments, SessionId, SetAssetContentArguments, SetAssetPropertiesArguments,
+    ExecuteOperationsArguments, SessionId, SetAssetContentArguments, SetAssetHeadersArguments,
     StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
@@ -952,7 +952,7 @@ fn supports_custom_http_headers() {
 }
 
 #[test]
-fn supports_getting_and_setting_asset_properties() {
+fn supports_getting_and_setting_asset_headers() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -993,7 +993,7 @@ fn supports_getting_and_setting_asset_properties() {
 
     // A non-empty `headers` replaces the headers map.
     assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
+        .set_asset_headers(SetAssetHeadersArguments {
             key: "/props.html".into(),
             headers: vec![("new-header".into(), "value".into())],
         })
@@ -1005,7 +1005,7 @@ fn supports_getting_and_setting_asset_properties() {
 
     // An empty `headers` clears the headers map.
     assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
+        .set_asset_headers(SetAssetHeadersArguments {
             key: "/props.html".into(),
             headers: vec![],
         })
@@ -1309,7 +1309,7 @@ mod certificate_expression {
     }
 
     #[test]
-    fn ic_certificate_expression_gets_updated_on_asset_properties_update() {
+    fn ic_certificate_expression_gets_updated_on_asset_headers_update() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1342,7 +1342,7 @@ mod certificate_expression {
         );
 
         state
-            .set_asset_properties(SetAssetPropertiesArguments {
+            .set_asset_headers(SetAssetHeadersArguments {
                 key: "/contents.html".into(),
                 headers: vec![("custom-header".into(), "value".into())],
             })

@@ -13,7 +13,7 @@ use crate::canister::{
     authorize_via_proxy, bundle_tag, can_sync, execute_operations, list_all_assets,
     list_all_redirect_rules, start_sync, upload_chunks, AssetDetails, BatchOperationKind,
     CanisterCall, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
-    RedirectRule, SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
+    RedirectRule, SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments,
     UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
@@ -547,7 +547,7 @@ fn split_operation_groups(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchO
 ///
 /// Kinds with inlined headers:
 /// - `CreateAsset` — the per-key resolution of `_headers`.
-/// - `SetAssetProperties` — same, when properties drift.
+/// - `SetAssetHeaders` — same, when headers drift.
 /// - `SetRedirectRules` — each 3xx rule inlines its resolved headers
 ///   (3xx rules synthesise their own response, so there's no target
 ///   asset to inherit headers from). Summed across all rules.
@@ -557,7 +557,7 @@ fn header_bytes_of(op: &BatchOperationKind) -> usize {
     }
     match op {
         BatchOperationKind::CreateAsset(a) => sum(&a.headers),
-        BatchOperationKind::SetAssetProperties(a) => sum(&a.headers),
+        BatchOperationKind::SetAssetHeaders(a) => sum(&a.headers),
         BatchOperationKind::SetRedirectRules(a) => a.rules.iter().map(|r| sum(&r.headers)).sum(),
         BatchOperationKind::DeleteAsset(_)
         | BatchOperationKind::UnsetAssetContent(_)
@@ -641,9 +641,9 @@ fn build_operations(
         }
     }
 
-    // 5. Update properties for assets that already exist on the canister and
-    //    whose properties drifted from the project config.
-    update_properties(
+    // 5. Update headers for assets that already exist on the canister and
+    //    whose headers drifted from the project config.
+    update_headers(
         &mut ops,
         project_assets,
         &canister_assets,
@@ -713,7 +713,7 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
 
 // For each asset that already exists on the canister, reset its `headers` when
 // they drifted from the project config. Newly-created assets get the same
-// values via `CreateAssetArguments`, so we don't emit `SetAssetProperties` for
+// values via `CreateAssetArguments`, so we don't emit `SetAssetHeaders` for
 // them.
 //
 // Headers are resolved from `_headers` per-key.
@@ -721,9 +721,9 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
 // `canister_assets` is the post-deletion view: keys removed in step 1 (missing
 // from the project, or content_type drift forcing delete-then-create) are
 // absent. Skipping those keys here avoids emitting a redundant
-// `SetAssetProperties` op for an asset whose properties are already being set
+// `SetAssetHeaders` op for an asset whose headers are already being set
 // by `CreateAssetArguments` in this same batch.
-fn update_properties(
+fn update_headers(
     ops: &mut Vec<BatchOperationKind>,
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
@@ -740,8 +740,8 @@ fn update_properties(
         let resolved = headers::resolve(key, project_header_rules);
 
         if canister_asset.headers != resolved {
-            ops.push(BatchOperationKind::SetAssetProperties(
-                SetAssetPropertiesArguments {
+            ops.push(BatchOperationKind::SetAssetHeaders(
+                SetAssetHeadersArguments {
                     key: key.clone(),
                     headers: resolved,
                 },
@@ -1218,7 +1218,7 @@ mod tests {
     }
 
     // Like `mk_canister_asset`, but with the per-asset response headers the
-    // `list` query would report — for exercising the properties diff.
+    // `list` query would report — for exercising the headers diff.
     fn mk_canister_asset_with_headers(
         key: &str,
         content_type: &str,
@@ -1661,19 +1661,19 @@ mod tests {
         assert!(create_op.headers.is_empty());
     }
 
-    fn set_props_ops(
+    fn set_header_ops(
         ops: &[BatchOperationKind],
-    ) -> std::collections::BTreeMap<&str, &SetAssetPropertiesArguments> {
+    ) -> std::collections::BTreeMap<&str, &SetAssetHeadersArguments> {
         ops.iter()
             .filter_map(|op| match op {
-                BatchOperationKind::SetAssetProperties(a) => Some((a.key.as_str(), a)),
+                BatchOperationKind::SetAssetHeaders(a) => Some((a.key.as_str(), a)),
                 _ => None,
             })
             .collect()
     }
 
     #[test]
-    fn update_properties_emits_nothing_when_canister_matches_defaults() {
+    fn update_headers_emits_nothing_when_canister_matches_defaults() {
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1686,13 +1686,13 @@ mod tests {
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         assert!(
-            set_props_ops(&ops).is_empty(),
-            "no SetAssetProperties op when canister already matches defaults"
+            set_header_ops(&ops).is_empty(),
+            "no SetAssetHeaders op when canister already matches defaults"
         );
     }
 
     #[test]
-    fn update_properties_clears_canister_headers() {
+    fn update_headers_clears_canister_headers() {
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1705,17 +1705,17 @@ mod tests {
             &[("X-Frame-Options", "DENY")],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
-        let by_key = set_props_ops(&ops);
+        let by_key = set_header_ops(&ops);
         assert_eq!(by_key.len(), 1);
         // An empty headers vec clears the headers map on the canister.
         assert!(by_key["/index.html"].headers.is_empty());
     }
 
     #[test]
-    fn update_properties_skips_assets_being_recreated_due_to_content_type_drift() {
+    fn update_headers_skips_assets_being_recreated_due_to_content_type_drift() {
         // Asset on canister has a different content_type → step 1 deletes it
-        // and step 2 recreates it with default properties. update_properties
-        // must not emit a redundant SetAssetProperties op for that key, even
+        // and step 2 recreates it with default headers. update_headers
+        // must not emit a redundant SetAssetHeaders op for that key, even
         // though the canister asset still carries (pre-deletion) headers.
         let project = HashMap::from([mk_project_asset(
             "/file",
@@ -1732,22 +1732,22 @@ mod tests {
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
         assert_eq!(count_op(&ops, "CreateAsset"), 1);
         assert!(
-            set_props_ops(&ops).is_empty(),
-            "no SetAssetProperties op when the asset is being recreated in the same batch"
+            set_header_ops(&ops).is_empty(),
+            "no SetAssetHeaders op when the asset is being recreated in the same batch"
         );
     }
 
     #[test]
-    fn update_properties_skips_assets_not_on_canister() {
-        // Asset is new to the canister — properties get set via CreateAsset,
-        // not SetAssetProperties.
+    fn update_headers_skips_assets_not_on_canister() {
+        // Asset is new to the canister — headers get set via CreateAsset,
+        // not SetAssetHeaders.
         let project = HashMap::from([mk_project_asset(
             "/new.html",
             "text/html",
             &[("identity", vec![1, 2, 3], false)],
         )]);
         let ops = build_operations(&project, &HashMap::new(), &[], &[], &[]);
-        assert!(set_props_ops(&ops).is_empty());
+        assert!(set_header_ops(&ops).is_empty());
     }
 
     // ── _headers integration ───────────────────────────────────────────────
@@ -1805,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn update_properties_sets_headers_when_canister_missing_them() {
+    fn update_headers_sets_headers_when_canister_missing_them() {
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1818,7 +1818,7 @@ mod tests {
         )]);
         let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(&project, &canister, &[], &[], &header_rules);
-        let by_key = set_props_ops(&ops);
+        let by_key = set_header_ops(&ops);
         assert_eq!(by_key.len(), 1);
         assert_eq!(
             by_key["/index.html"].headers,
@@ -1827,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn update_properties_clears_headers_when_no_rules_match() {
+    fn update_headers_clears_headers_when_no_rules_match() {
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1841,7 +1841,7 @@ mod tests {
         )]);
         // No header rules — canister-stored headers should be cleared.
         let ops = build_operations(&project, &canister, &[], &[], &[]);
-        let by_key = set_props_ops(&ops);
+        let by_key = set_header_ops(&ops);
         assert_eq!(by_key.len(), 1);
         assert!(by_key["/index.html"].headers.is_empty());
     }
@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn update_properties_no_op_when_canister_headers_match_resolved() {
+    fn update_headers_no_op_when_canister_headers_match_resolved() {
         let project = HashMap::from([mk_project_asset(
             "/index.html",
             "text/html",
@@ -1963,8 +1963,8 @@ mod tests {
         let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(&project, &canister, &[], &[], &header_rules);
         assert!(
-            set_props_ops(&ops).is_empty(),
-            "no SetAssetProperties op when resolved headers byte-match canister-stored"
+            set_header_ops(&ops).is_empty(),
+            "no SetAssetHeaders op when resolved headers byte-match canister-stored"
         );
     }
 
@@ -2150,7 +2150,7 @@ mod tests {
                     content_encoding: "identity".to_string(),
                     sha256: Some(serde_bytes::ByteBuf::from(identity_sha)),
                 }],
-                // Matches what `_headers` resolves to, so no SetAssetProperties.
+                // Matches what `_headers` resolves to, so no SetAssetHeaders.
                 headers: vec![("X-Frame-Options".into(), "DENY".into())],
             }],
         );
