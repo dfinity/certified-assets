@@ -14,10 +14,6 @@
 //! The certified-response tree is *not* stored here — it is derived heap state
 //! rebuilt from this metadata after an upgrade (see `State::post_upgrade_rebuild`).
 
-// These types are wired into `State` in a follow-up commit; until then they are
-// defined but unused.
-#![allow(dead_code)]
-
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -10,7 +10,7 @@
 //! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
 
-use crate::certification::{AssetKey, HashTreePath};
+use crate::certification::HashTreePath;
 use crate::http::HttpResponse;
 use crate::rc_bytes::RcBytes;
 use crate::redirect;
@@ -82,7 +82,6 @@ pub enum ExecuteOperationsProgress {
         set_asset_content_arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
         chunk_index: usize,
-        dependent_keys: Vec<AssetKey>,
         hasher: sha2::Sha256,
     },
 }
@@ -121,8 +120,7 @@ impl State {
         // the previous session before starting fresh.
         self.chunks.clear();
 
-        let session_id = self.next_session_id;
-        self.next_session_id += 1;
+        let session_id = self.alloc_session_id();
         self.sync_session = Some(SyncSession {
             id: session_id,
             owner,
@@ -208,7 +206,7 @@ impl State {
                 let result = match op {
                     Operation::CreateAsset(arg) => self.create_asset(arg.clone()),
                     Operation::SetAssetContent(arg) => {
-                        if !self.assets.contains_key(&arg.key) {
+                        if !self.contains_asset(&arg.key) {
                             return ComputationStatus::Error("asset not found".to_string());
                         }
                         if arg.chunk_ids.is_empty() {
@@ -216,8 +214,6 @@ impl State {
                                 "encoding must have at least one chunk".to_string(),
                             );
                         }
-
-                        let dependent_keys = self.dependent_keys(&arg.key);
 
                         // Collect all chunks, taking each out of self.chunks so
                         // its bytes are freed as soon as it's consumed (the slot
@@ -243,7 +239,6 @@ impl State {
                             set_asset_content_arg: arg.clone(),
                             content_chunks,
                             chunk_index: 0,
-                            dependent_keys,
                             hasher: sha2::Sha256::new(),
                         };
                         return ComputationStatus::InProgress(progress);
@@ -264,10 +259,7 @@ impl State {
                                 break;
                             }
                         }
-                        validation.map(|_| {
-                            self.redirect_rules = arg.rules.clone();
-                            self.on_redirect_rules_change();
-                        })
+                        validation.map(|_| self.set_redirect_rules(arg.rules.clone()))
                     }
                 };
                 if let Err(e) = result {
@@ -284,7 +276,6 @@ impl State {
                 set_asset_content_arg,
                 content_chunks,
                 chunk_index,
-                dependent_keys,
                 mut hasher,
             } => {
                 if chunk_index >= content_chunks.len() {
@@ -295,7 +286,6 @@ impl State {
                         set_asset_content_arg.clone(),
                         content_chunks,
                         sha256,
-                        dependent_keys,
                     ) {
                         return ComputationStatus::Error(e);
                     }
@@ -313,7 +303,6 @@ impl State {
                         set_asset_content_arg,
                         content_chunks,
                         chunk_index: chunk_index + 1,
-                        dependent_keys,
                         hasher,
                     };
                     ComputationStatus::InProgress(progress)
@@ -322,7 +311,7 @@ impl State {
         }
     }
 
-    fn certify_404_if_required(&mut self) {
+    pub(crate) fn certify_404_if_required(&mut self) {
         if !self
             .asset_hashes
             .contains_path(HashTreePath::not_found_base_path().as_vec())

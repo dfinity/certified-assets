@@ -393,8 +393,6 @@ dependencies = [
  "candid_parser",
  "canister-core",
  "ic-cdk",
- "serde",
- "serde_cbor",
 ]
 
 [[package]]
