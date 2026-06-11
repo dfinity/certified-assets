@@ -5,9 +5,7 @@ use canister_core::{
     guard_can_sync, guard_is_controller,
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
     redirect::RedirectRule,
-    types::{
-        AssetDetails, ExecuteOperationsArguments, StartSyncResult, UploadChunksArguments,
-    },
+    types::{AssetDetails, ExecuteOperationsArguments, StartSyncResult, UploadChunksArguments},
 };
 use ic_cdk::{post_upgrade, pre_upgrade, query, update};
 

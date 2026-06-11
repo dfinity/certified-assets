@@ -13,9 +13,9 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 pub use wire_types::{
-    AssetDetails, AssetEncodingDetails, CreateAssetArguments,
-    DeleteAssetArguments, ExecuteOperationsArguments, Operation, RedirectRule, RulePattern,
-    SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
+    AssetDetails, AssetEncodingDetails, CreateAssetArguments, DeleteAssetArguments,
+    ExecuteOperationsArguments, Operation, RedirectRule, RulePattern, SetAssetContentArguments,
+    SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
     UnsetAssetContentArguments, UploadChunksArguments,
 };
 
