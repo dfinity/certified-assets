@@ -1,7 +1,6 @@
 use crate::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
-use crate::stable::StableState;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::system_context::SystemContext;
@@ -12,6 +11,7 @@ use crate::types::{
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
 use candid::{Nat, Principal};
+use ic_stable_structures::DefaultMemoryImpl;
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
 use ic_http_certification::{Method, StatusCode};
@@ -32,6 +32,19 @@ fn some_principal() -> Principal {
 
 fn unused_callback() -> CallbackFunc {
     CallbackFunc::new(some_principal(), "unused".to_string())
+}
+
+/// Simulates a canister upgrade: drop the live `State` and rebuild a fresh one
+/// over the same stable memory, running the post-upgrade derived-state rebuild —
+/// exactly what the canister's `post_upgrade` does. Off-wasm `DefaultMemoryImpl`
+/// is a shared `Rc<RefCell<Vec<u8>>>` handle, so the rebuilt state reads back the
+/// data the original persisted. Roundtrip tests build their `State` with
+/// `State::new(memory.clone())` so they can hand the same handle here.
+fn upgrade(state: State, memory: DefaultMemoryImpl) -> State {
+    drop(state);
+    let mut restored = State::new(memory);
+    restored.post_upgrade_rebuild();
+    restored
 }
 
 fn mock_system_context() -> SystemContext {
@@ -262,7 +275,7 @@ fn assemble_create_assets_and_set_contents_operations(
     let mut operations = vec![];
 
     for asset in assets {
-        if state.assets.contains_key(&asset.name) {
+        if state.contains_asset(&asset.name) {
             operations.push(Operation::DeleteAsset(DeleteAssetArguments {
                 key: asset.name.clone(),
             }));
@@ -761,7 +774,8 @@ fn no_implicit_aliasing_without_rules() {
 
 #[test]
 fn preserves_state_on_stable_roundtrip() {
-    let mut state = State::default();
+    let memory = DefaultMemoryImpl::default();
+    let mut state = State::new(memory.clone());
     let system_context = mock_system_context();
 
     const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>Index</html>";
@@ -773,8 +787,7 @@ fn preserves_state_on_stable_roundtrip() {
             .with_encoding("identity", vec![INDEX_BODY])],
     );
 
-    let stable_state: StableState = state.into();
-    let state: State = stable_state.into();
+    let state = upgrade(state, memory.clone());
 
     let response = certified_http_request(
         &state,
@@ -811,12 +824,12 @@ fn authorize_and_deauthorize_toggle_membership() {
 
 #[test]
 fn authorized_set_survives_stable_roundtrip() {
-    let mut state = State::default();
+    let memory = DefaultMemoryImpl::default();
+    let mut state = State::new(memory.clone());
     let p = some_principal();
     state.authorize(p);
 
-    let stable_state: StableState = state.into();
-    let restored: State = stable_state.into();
+    let restored = upgrade(state, memory.clone());
 
     assert!(restored.is_authorized(&p));
 }
@@ -1156,7 +1169,8 @@ fn aliases_via_explicit_rules() {
 fn rule_aliasing_persists_through_upgrade() {
     // Migrated from `alias_behavior_persists_through_upgrade`: rules survive
     // the upgrade and serve correctly afterward.
-    let mut state = State::default();
+    let memory = DefaultMemoryImpl::default();
+    let mut state = State::new(memory.clone());
     let system_context = mock_system_context();
     const SUBDIR_INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>subdir index</html>";
     const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
@@ -1185,8 +1199,7 @@ fn rule_aliasing_persists_through_upgrade() {
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
     assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
 
-    let stable_state: StableState = state.into();
-    let state: State = stable_state.into();
+    let state = upgrade(state, memory.clone());
 
     let no_alias = state.http_request(
         RequestBuilder::get("/contents").build(),
@@ -1863,14 +1876,16 @@ mod redirect_rules {
         // `to` encodes its index so we can assert order and offset.
         let mut state = State::default();
         let total = crate::state::PAGE_SIZE * 2 + 37; // two full pages + a partial third
-        state.redirect_rules = (0..total)
-            .map(|i| RedirectRule {
-                from: RulePattern::Exact(format!("/from-{i}")),
-                to: format!("/to-{i}"),
-                status: 301,
-                headers: vec![],
-            })
-            .collect();
+        state.set_redirect_rules(
+            (0..total)
+                .map(|i| RedirectRule {
+                    from: RulePattern::Exact(format!("/from-{i}")),
+                    to: format!("/to-{i}"),
+                    status: 301,
+                    headers: vec![],
+                })
+                .collect(),
+        );
 
         // A page is capped at PAGE_SIZE and begins exactly at the cursor.
         let first = state.get_redirect_rules(0);
@@ -1957,7 +1972,8 @@ mod redirect_rules {
 
     #[test]
     fn rules_persist_through_upgrade() {
-        let mut state = State::default();
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
         let rules = sample_rules();
 
         commit(
@@ -1968,8 +1984,7 @@ mod redirect_rules {
         )
         .unwrap();
 
-        let stable: StableState = state.into();
-        let state: State = stable.into();
+        let state = upgrade(state, memory.clone());
 
         assert_eq!(state.get_redirect_rules(0), rules);
     }
@@ -2071,7 +2086,8 @@ mod redirect_rules {
 
     #[test]
     fn rules_survive_post_upgrade_and_witnesses_still_validate() {
-        let mut state = State::default();
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
         commit(
             &mut state,
             vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
@@ -2083,8 +2099,7 @@ mod redirect_rules {
         let pre = certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
         assert_eq!(pre.status_code, 308);
 
-        let stable: StableState = state.into();
-        let state: State = stable.into();
+        let state = upgrade(state, memory.clone());
 
         let post = certified_http_request(&state, RequestBuilder::get("/legacy/anything").build());
         assert_eq!(post.status_code, 308);
