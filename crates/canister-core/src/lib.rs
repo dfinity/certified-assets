@@ -6,6 +6,7 @@ pub mod nested_tree;
 pub mod rc_bytes;
 pub mod redirect;
 pub mod stable;
+pub mod stable_store;
 pub mod state;
 pub mod sync;
 pub mod system_context;
