@@ -808,10 +808,7 @@ fn authorize_and_deauthorize_toggle_membership() {
 
     state.authorize(p);
     assert!(state.is_authorized(&p));
-    assert_eq!(
-        state.list_authorized().iter().copied().collect::<Vec<_>>(),
-        vec![p]
-    );
+    assert_eq!(state.list_authorized(), vec![p]);
 
     // Re-authorizing is idempotent (set semantics).
     state.authorize(p);
