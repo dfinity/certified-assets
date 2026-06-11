@@ -1,17 +1,16 @@
-use crate::batch::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
 use crate::stable::StableState;
 use crate::state::State;
+use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::system_context::SystemContext;
 use crate::types::{
-    AssetProperties, BatchOperation, CancelSyncArguments, CreateAssetArguments,
-    DeleteAssetArguments, ExecuteOperationsArguments, GetArg, GetChunkArg, ListRequest, SessionId,
-    SetAssetContentArguments, SetAssetPropertiesArguments, StartSyncResult,
+    CancelSyncArguments, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
+    Operation, SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
-use crate::CreateChunksArg;
+use crate::UploadChunksArguments;
 use candid::{Nat, Principal};
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
@@ -132,7 +131,7 @@ struct AssetBuilder {
     name: String,
     content_type: String,
     encodings: Vec<(String, Vec<ByteBuf>)>,
-    headers: Option<Vec<(String, String)>>,
+    headers: Vec<(String, String)>,
 }
 
 impl AssetBuilder {
@@ -141,7 +140,7 @@ impl AssetBuilder {
             name: name.as_ref().to_string(),
             content_type: content_type.as_ref().to_string(),
             encodings: vec![],
-            headers: None,
+            headers: vec![],
         }
     }
 
@@ -157,8 +156,8 @@ impl AssetBuilder {
     }
 
     fn with_header(mut self, header_key: &str, header_value: &str) -> Self {
-        let hm = self.headers.get_or_insert_with(Vec::new);
-        hm.push((header_key.to_string(), header_value.to_string()));
+        self.headers
+            .push((header_key.to_string(), header_value.to_string()));
         self
     }
 }
@@ -218,7 +217,7 @@ fn start_session(state: &mut State, ctx: &SystemContext) -> SessionId {
 fn execute_all(
     state: &mut State,
     session_id: SessionId,
-    operations: Vec<BatchOperation>,
+    operations: Vec<Operation>,
     ctx: &SystemContext,
 ) {
     run_computation_until_completion(|progress| {
@@ -259,39 +258,42 @@ fn assemble_create_assets_and_set_contents_operations(
     system_context: &SystemContext,
     assets: Vec<AssetBuilder>,
     session_id: SessionId,
-) -> Vec<BatchOperation> {
+) -> Vec<Operation> {
     let mut operations = vec![];
 
     for asset in assets {
-        if state.get_asset_properties(asset.name.clone()).is_ok() {
-            operations.push(BatchOperation::DeleteAsset(DeleteAssetArguments {
+        if state.assets.contains_key(&asset.name) {
+            operations.push(Operation::DeleteAsset(DeleteAssetArguments {
                 key: asset.name.clone(),
             }));
         }
-        operations.push(BatchOperation::CreateAsset(CreateAssetArguments {
+        operations.push(Operation::CreateAsset(CreateAssetArguments {
             key: asset.name.clone(),
             content_type: asset.content_type,
             headers: asset.headers,
         }));
 
         for (enc, chunks) in asset.encodings {
-            let chunk_ids = state
-                .create_chunks(
-                    CreateChunksArg {
-                        session_id,
-                        content: chunks,
-                    },
-                    system_context,
-                )
+            // Chunk ids are not returned; they're the slot indices the canister
+            // assigns in upload order. Mirror that: ids run from the current
+            // staging length for as many chunks as we upload.
+            let base = state.chunks.len() as u64;
+            let chunk_ids: Vec<u64> = (base..base + chunks.len() as u64).collect();
+            let mut hasher = sha2::Sha256::new();
+            for chunk in &chunks {
+                hasher.update(chunk);
+            }
+            let sha256 = ByteBuf::from(hasher.finalize().to_vec());
+            state
+                .upload_chunks(UploadChunksArguments { session_id, chunks }, system_context)
                 .unwrap();
 
-            operations.push(BatchOperation::SetAssetContent({
+            operations.push(Operation::SetAssetContent({
                 SetAssetContentArguments {
                     key: asset.name.clone(),
                     content_encoding: enc,
                     chunk_ids,
-                    last_chunk: None,
-                    sha256: None,
+                    sha256,
                 }
             }));
         }
@@ -332,10 +334,10 @@ fn can_create_assets_using_batch_api() {
     // The finalizing execute_operations ended the sync, so the session id is no
     // longer valid for further chunk uploads.
     let error_msg = state
-        .create_chunks(
-            CreateChunksArg {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id,
-                content: vec![ByteBuf::new()],
+                chunks: vec![ByteBuf::new()],
             },
             &system_context,
         )
@@ -483,16 +485,14 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
     use crate::types::SetRedirectRulesArguments;
     let system_context = mock_system_context();
     let session_id = start_session(state, &system_context);
-    let ops = vec![BatchOperation::SetRedirectRules(
-        SetRedirectRulesArguments {
-            rules: vec![RedirectRule {
-                from: RulePattern::Subtree("/".into()),
-                to: target.into(),
-                status: 200,
-                headers: None,
-            }],
-        },
-    )];
+    let ops = vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+        rules: vec![RedirectRule {
+            from: RulePattern::Subtree("/".into()),
+            to: target.into(),
+            status: 200,
+            headers: vec![],
+        }],
+    })];
     execute_all(state, session_id, ops, &system_context);
 }
 
@@ -511,12 +511,12 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
             from: RulePattern::Exact((*from).into()),
             to: (*to).into(),
             status: 200,
-            headers: None,
+            headers: vec![],
         })
         .collect();
-    let ops = vec![BatchOperation::SetRedirectRules(
-        SetRedirectRulesArguments { rules },
-    )];
+    let ops = vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+        rules,
+    })];
     execute_all(state, session_id, ops, &system_context);
 }
 
@@ -569,10 +569,10 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     state
-        .create_chunks(
-            CreateChunksArg {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id: id1,
-                content: vec![ByteBuf::from(BODY.to_vec())],
+                chunks: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -592,10 +592,10 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
 
     // The old session id is no longer valid.
     let err = state
-        .create_chunks(
-            CreateChunksArg {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id: id1,
-                content: vec![ByteBuf::from(BODY.to_vec())],
+                chunks: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -614,10 +614,10 @@ fn cancel_sync_releases_the_lock_for_the_owner_only() {
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     state
-        .create_chunks(
-            CreateChunksArg {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id,
-                content: vec![ByteBuf::from(BODY.to_vec())],
+                chunks: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -796,17 +796,17 @@ fn uses_streaming_for_multichunk_assets() {
         .expect("missing streaming strategy");
     assert_eq!(callback, streaming_callback);
 
-    // sha256 is required
+    // A token carrying the wrong hash is rejected.
     assert_eq!(
         state
             .http_request_streaming_callback(StreamingCallbackToken {
                 key: "/index.html".to_string(),
                 content_encoding: "identity".to_string(),
                 index: Nat::from(1_u8),
-                sha256: None,
+                sha256: ByteBuf::from([0u8; 32].as_slice()),
             })
             .unwrap_err(),
-        "sha256 required"
+        "sha256 mismatch"
     );
 
     let streaming_response = state.http_request_streaming_callback(token).unwrap();
@@ -814,53 +814,6 @@ fn uses_streaming_for_multichunk_assets() {
     assert!(
         streaming_response.token.is_none(),
         "Unexpected streaming response: {streaming_response:?}"
-    );
-}
-
-#[test]
-fn get_and_get_chunk_for_multichunk_assets() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const INDEX_BODY_CHUNK_0: &[u8] = b"<!DOCTYPE html>";
-    const INDEX_BODY_CHUNK_1: &[u8] = b"<html>Index</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![INDEX_BODY_CHUNK_0, INDEX_BODY_CHUNK_1])],
-    );
-
-    let chunk_0 = state
-        .get(GetArg {
-            key: "/index.html".to_string(),
-            accept_encodings: vec!["identity".to_string()],
-        })
-        .unwrap();
-    assert_eq!(chunk_0.content.as_ref(), INDEX_BODY_CHUNK_0);
-
-    let chunk_1 = state
-        .get_chunk(GetChunkArg {
-            key: "/index.html".to_string(),
-            content_encoding: "identity".to_string(),
-            index: Nat::from(1_u8),
-            sha256: chunk_0.sha256,
-        })
-        .unwrap();
-    assert_eq!(chunk_1.as_ref(), INDEX_BODY_CHUNK_1);
-
-    // get_chunk fails if we don't pass the sha256
-    assert_eq!(
-        state
-            .get_chunk(GetChunkArg {
-                key: "/index.html".to_string(),
-                content_encoding: "identity".to_string(),
-                index: Nat::from(1_u8),
-                sha256: None,
-            })
-            .unwrap_err(),
-        "sha256 required".to_string()
     );
 }
 
@@ -1000,7 +953,7 @@ fn supports_custom_http_headers() {
 }
 
 #[test]
-fn supports_getting_and_setting_asset_properties() {
+fn supports_getting_and_setting_asset_headers() {
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -1019,58 +972,46 @@ fn supports_getting_and_setting_asset_properties() {
         ],
     );
 
+    // Headers are reported by `list`, so read them back from there rather than
+    // through a dedicated per-asset query.
+    let headers_of = |state: &State, key: &str| {
+        state
+            .get_asset_details(None)
+            .into_iter()
+            .find(|d| d.key == key)
+            .expect("asset should exist")
+            .headers
+    };
+
     assert_eq!(
-        state.get_asset_properties("/contents.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
-        })
+        headers_of(&state, "/contents.html"),
+        vec![("Access-Control-Allow-Origin".to_string(), "*".to_string())],
     );
     assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
-        })
+        headers_of(&state, "/props.html"),
+        vec![("X-Content-Type-Options".to_string(), "nosniff".to_string())],
     );
 
-    // `Some(Some(..))` replaces the headers map.
+    // A non-empty `headers` replaces the headers map.
     assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
+        .set_asset_headers(SetAssetHeadersArguments {
             key: "/props.html".into(),
-            headers: Some(Some(vec![("new-header".into(), "value".into())])),
+            headers: vec![("new-header".into(), "value".into())],
         })
         .is_ok());
     assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("new-header".into(), "value".into())]),
-        })
+        headers_of(&state, "/props.html"),
+        vec![("new-header".to_string(), "value".to_string())],
     );
 
-    // `None` leaves the existing headers untouched.
+    // An empty `headers` clears the headers map.
     assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
+        .set_asset_headers(SetAssetHeadersArguments {
             key: "/props.html".into(),
-            headers: None,
+            headers: vec![],
         })
         .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties {
-            headers: Some(vec![("new-header".into(), "value".into())]),
-        })
-    );
-
-    // `Some(None)` clears the headers map.
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/props.html".into(),
-            headers: Some(None),
-        })
-        .is_ok());
-    assert_eq!(
-        state.get_asset_properties("/props.html".into()),
-        Ok(AssetProperties { headers: None })
-    );
+    assert!(headers_of(&state, "/props.html").is_empty());
 }
 
 #[test]
@@ -1091,7 +1032,7 @@ fn create_asset_fails_if_asset_exists() {
             .create_asset(CreateAssetArguments {
                 key: "/contents.html".to_string(),
                 content_type: "text/html".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap_err()
             == "asset already exists"
@@ -1369,7 +1310,7 @@ mod certificate_expression {
     }
 
     #[test]
-    fn ic_certificate_expression_gets_updated_on_asset_properties_update() {
+    fn ic_certificate_expression_gets_updated_on_asset_headers_update() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1402,9 +1343,9 @@ mod certificate_expression {
         );
 
         state
-            .set_asset_properties(SetAssetPropertiesArguments {
+            .set_asset_headers(SetAssetHeadersArguments {
                 key: "/contents.html".into(),
-                headers: Some(Some(vec![("custom-header".into(), "value".into())])),
+                headers: vec![("custom-header".into(), "value".into())],
             })
             .unwrap();
         let response = certified_http_request(
@@ -1518,121 +1459,11 @@ mod certification {
 }
 
 #[cfg(test)]
-mod last_state_update_timestamp {
+mod get_asset_details {
     use super::*;
 
     #[test]
-    fn timestamp_updates_on_execute_operations() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Initial timestamp should be 0
-        assert_eq!(state.last_state_update_timestamp_ns(), 0);
-
-        // Create and commit a batch with asset operations
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context,
-        );
-
-        // Timestamp should be updated to system context timestamp
-        assert_eq!(
-            state.last_state_update_timestamp_ns(),
-            system_context.current_timestamp_ns
-        );
-    }
-
-    #[test]
-    fn timestamp_updates_on_multiple_operations() {
-        let mut state = State::default();
-        let mut system_context = mock_system_context();
-
-        // Initial timestamp should be 0
-        assert_eq!(state.last_state_update_timestamp_ns(), 0);
-
-        // First operation at time T1: create an asset.
-        let initial_time = system_context.current_timestamp_ns;
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context,
-        );
-        assert_eq!(state.last_state_update_timestamp_ns(), initial_time);
-
-        // Second operation at time T2 (advanced)
-        system_context.current_timestamp_ns += 1_000_000_000;
-        let updated_time = system_context.current_timestamp_ns;
-
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperation::SetAssetProperties(
-                SetAssetPropertiesArguments {
-                    key: "/test.txt".to_string(),
-                    headers: Some(Some(vec![("x-custom".to_string(), "value".to_string())])),
-                },
-            )],
-            &system_context,
-        );
-
-        // Timestamp should be updated to new time
-        assert_eq!(state.last_state_update_timestamp_ns(), updated_time);
-        assert!(state.last_state_update_timestamp_ns() > initial_time);
-    }
-
-    #[test]
-    fn timestamp_persists_in_stable_state() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Commit a batch to update the timestamp.
-        let session_id = start_session(&mut state, &system_context);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context,
-        );
-
-        let expected_timestamp = state.last_state_update_timestamp_ns();
-        assert_eq!(expected_timestamp, system_context.current_timestamp_ns);
-
-        // Convert to stable state and back
-        let stable_state: StableState = state.into();
-        let restored_state: State = stable_state.into();
-
-        // Timestamp should be preserved
-        assert_eq!(
-            restored_state.last_state_update_timestamp_ns(),
-            expected_timestamp
-        );
-    }
-}
-
-#[cfg(test)]
-mod list_assets {
-    use super::*;
-
-    #[test]
-    fn list_pagination_starts_from_beginning_by_default() {
+    fn list_starts_from_beginning_when_no_cursor() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1648,25 +1479,16 @@ mod list_assets {
 
         create_assets(&mut state, &system_context, assets);
 
-        // List with None should start from beginning
-        let list = state.list_assets(ListRequest::default());
+        // `None` lists from the beginning, ordered by key.
+        let list = state.get_asset_details(None);
         assert_eq!(list.len(), 10);
-
-        // List with Some(0) should be the same
-        let list_from_zero = state.list_assets(ListRequest {
-            start: Some(Nat::from(0u8)),
-            length: None,
-        });
-        assert_eq!(list_from_zero.len(), 10);
-
-        // Results should be sorted by key
         for i in 0..9 {
             assert!(list[i].key < list[i + 1].key);
         }
     }
 
     #[test]
-    fn list_pagination_with_start_index() {
+    fn list_start_after_is_exclusive() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1682,26 +1504,18 @@ mod list_assets {
 
         create_assets(&mut state, &system_context, assets);
 
-        // Get first page
-        let first_page = state.list_assets(ListRequest::default());
+        // All 20 fit in a single page.
+        let first_page = state.get_asset_details(None);
         assert_eq!(first_page.len(), 20);
 
-        // Get second page starting at index 10
-        let second_page = state.list_assets(ListRequest {
-            start: Some(Nat::from(10u8)),
-            length: None,
-        });
+        // Resume strictly after the 10th key. The cursor is exclusive, so this
+        // returns the remaining 10 assets and never the cursor key itself.
+        let cursor = first_page[9].key.clone();
+        let second_page = state.get_asset_details(Some(cursor.clone()));
         assert_eq!(second_page.len(), 10);
+        assert!(second_page.iter().all(|a| a.key > cursor));
 
-        // Verify no overlap
-        let first_page_keys: Vec<_> = first_page.iter().take(10).map(|a| &a.key).collect();
-        let second_page_keys: Vec<_> = second_page.iter().map(|a| &a.key).collect();
-
-        for key in &second_page_keys {
-            assert!(!first_page_keys.contains(key));
-        }
-
-        // Concat the two pages and verify ordering
+        // Concatenating the first 10 with the resumed page reproduces the order.
         let mut combined: Vec<_> = first_page.iter().take(10).collect();
         combined.extend(second_page.iter());
 
@@ -1717,7 +1531,7 @@ mod list_assets {
     }
 
     #[test]
-    fn list_pagination_limits_to_100_assets() {
+    fn list_pages_are_capped_at_page_size() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1733,101 +1547,23 @@ mod list_assets {
 
         create_assets(&mut state, &system_context, assets);
 
-        // First page should have exactly 100 assets
-        let first_page = state.list_assets(ListRequest::default());
+        // First page holds exactly PAGE_SIZE (100).
+        let first_page = state.get_asset_details(None);
         assert_eq!(first_page.len(), 100);
 
-        // Second page starting at 100 should have 50 assets
-        let second_page = state.list_assets(ListRequest {
-            start: Some(Nat::from(100u8)),
-            length: None,
-        });
+        // Resuming after the 100th key yields the remaining 50.
+        let second_page = state.get_asset_details(Some(first_page[99].key.clone()));
         assert_eq!(second_page.len(), 50);
 
-        // Third page starting at 150 should be empty
-        let third_page = state.list_assets(ListRequest {
-            start: Some(Nat::from(150u8)),
-            length: None,
-        });
-        assert_eq!(third_page.len(), 0);
+        // Nothing remains after the last key.
+        let third_page = state.get_asset_details(Some(second_page[49].key.clone()));
+        assert!(third_page.is_empty());
     }
 
     #[test]
     fn list_returns_empty_for_no_assets() {
         let state = State::default();
-        let list = state.list_assets(ListRequest::default());
-        assert_eq!(list.len(), 0);
-    }
-
-    #[test]
-    fn list_respects_custom_length_limit() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"content";
-
-        // Create 50 assets
-        let assets: Vec<_> = (0..50)
-            .map(|i| {
-                AssetBuilder::new(format!("/asset{i:02}.txt"), "text/plain")
-                    .with_encoding("identity", vec![BODY])
-            })
-            .collect();
-
-        create_assets(&mut state, &system_context, assets);
-
-        // Request only 5 assets
-        let list = state.list_assets(ListRequest {
-            start: None,
-            length: Some(Nat::from(5u8)),
-        });
-        assert_eq!(list.len(), 5);
-
-        // Request 20 assets starting at index 10
-        let list = state.list_assets(ListRequest {
-            start: Some(Nat::from(10u8)),
-            length: Some(Nat::from(20u8)),
-        });
-        assert_eq!(list.len(), 20);
-
-        // Request more than available (should return all remaining)
-        let list = state.list_assets(ListRequest {
-            start: Some(Nat::from(45u8)),
-            length: Some(Nat::from(20u8)),
-        });
-        assert_eq!(list.len(), 5);
-    }
-
-    #[test]
-    fn list_length_limit_capped_at_page_size() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"content";
-
-        // Create 150 assets
-        let assets: Vec<_> = (0..150)
-            .map(|i| {
-                AssetBuilder::new(format!("/asset{i:03}.txt"), "text/plain")
-                    .with_encoding("identity", vec![BODY])
-            })
-            .collect();
-
-        create_assets(&mut state, &system_context, assets);
-
-        // Request 150 assets, but should be capped at PAGE_SIZE (100)
-        let list = state.list_assets(ListRequest {
-            start: None,
-            length: Some(Nat::from(150u8)),
-        });
-        assert_eq!(list.len(), 100);
-
-        // Request with length smaller than PAGE_SIZE should be respected
-        let list = state.list_assets(ListRequest {
-            start: None,
-            length: Some(Nat::from(50u8)),
-        });
-        assert_eq!(list.len(), 50);
+        assert!(state.get_asset_details(None).is_empty());
     }
 }
 
@@ -1848,33 +1584,28 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
         // Create batch and chunk
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArg {
-                    session_id,
-                    content: vec![ByteBuf::from(CONTENT)],
-                },
+        let chunks = vec![ByteBuf::from(CONTENT)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
 
         // set_asset_content with correct hash should succeed
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: Some(ByteBuf::from(correct_hash.as_slice())),
-            },
-            &system_context,
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            sha256: ByteBuf::from(correct_hash.as_slice()),
+        });
 
         assert!(result.is_ok());
     }
@@ -1892,39 +1623,34 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
         // Create batch and chunk
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArg {
-                    session_id,
-                    content: vec![ByteBuf::from(CONTENT)],
-                },
+        let chunks = vec![ByteBuf::from(CONTENT)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
 
         // set_asset_content with incorrect hash should fail
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
-            },
-            &system_context,
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            sha256: ByteBuf::from(incorrect_hash.as_slice()),
+        });
 
         assert_eq!(result.unwrap_err(), "sha256 mismatch");
     }
 
     #[test]
-    fn computes_sha256_when_not_provided() {
+    fn stores_computed_sha256() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1936,44 +1662,42 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
         // Create batch and chunk
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArg {
-                    session_id,
-                    content: vec![ByteBuf::from(CONTENT)],
-                },
+        let chunks = vec![ByteBuf::from(CONTENT)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
 
-        // set_asset_content without hash should succeed and compute it
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: None,
-            },
-            &system_context,
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            sha256: ByteBuf::from(expected_hash.as_slice()),
+        });
 
         assert!(result.is_ok());
 
-        // Verify the hash was computed correctly by retrieving the asset
-        let retrieved = state
-            .get(GetArg {
-                key: "/test.txt".to_string(),
-                accept_encodings: vec!["identity".to_string()],
+        // Verify the hash was computed correctly by inspecting the listed encoding.
+        let details = state.get_asset_details(None);
+        let encoding = details
+            .iter()
+            .find(|a| a.key == "/test.txt")
+            .and_then(|a| {
+                a.encodings
+                    .iter()
+                    .find(|e| e.content_encoding == "identity")
             })
-            .unwrap();
-        assert_eq!(retrieved.sha256.unwrap().as_ref(), expected_hash.as_slice());
+            .expect("identity encoding should be listed");
+        assert_eq!(encoding.sha256.as_ref(), expected_hash.as_slice());
     }
 
     #[test]
@@ -1993,153 +1717,29 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
         // Create batch and chunks
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArg {
-                    session_id,
-                    content: vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
-                },
+        let chunks = vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
 
         // set_asset_content with correct hash for combined chunks should succeed
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: None,
-                sha256: Some(ByteBuf::from(correct_hash.as_slice())),
-            },
-            &system_context,
-        );
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            content_encoding: "identity".to_string(),
+            chunk_ids,
+            sha256: ByteBuf::from(correct_hash.as_slice()),
+        });
 
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn verifies_sha256_with_last_chunk() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const CHUNK_1: &[u8] = b"Hello, ";
-        const LAST_CHUNK: &[u8] = b"World!";
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(CHUNK_1);
-        hasher.update(LAST_CHUNK);
-        let correct_hash = hasher.finalize();
-
-        // Create asset first
-        state
-            .create_asset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })
-            .unwrap();
-
-        // Create batch and chunk
-        let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArg {
-                    session_id,
-                    content: vec![ByteBuf::from(CHUNK_1)],
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        // set_asset_content with last_chunk and correct hash should succeed
-        let result = state.set_asset_content(
-            SetAssetContentArguments {
-                key: "/test.txt".to_string(),
-                content_encoding: "identity".to_string(),
-                chunk_ids,
-                last_chunk: Some(ByteBuf::from(LAST_CHUNK)),
-                sha256: Some(ByteBuf::from(correct_hash.as_slice())),
-            },
-            &system_context,
-        );
-
-        assert!(result.is_ok());
-    }
-}
-
-#[cfg(test)]
-mod compute_state_hash {
-    use super::*;
-
-    #[test]
-    fn test_compute_state_hash_interruption() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        // Setup state
-        let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArg {
-                    session_id,
-                    content: vec![ByteBuf::from(b"content1")],
-                },
-                &system_context,
-            )
-            .unwrap();
-
-        execute_all(
-            &mut state,
-            session_id,
-            vec![
-                BatchOperation::CreateAsset(CreateAssetArguments {
-                    key: "asset1".to_string(),
-                    content_type: "text/plain".to_string(),
-                    headers: None,
-                }),
-                BatchOperation::SetAssetContent(SetAssetContentArguments {
-                    key: "asset1".to_string(),
-                    content_encoding: "identity".to_string(),
-                    chunk_ids,
-                    last_chunk: None,
-                    sha256: None,
-                }),
-            ],
-            &system_context,
-        );
-
-        // Reset computation
-        run_computation_until_completion(|_progress| state.compute_state_hash()).unwrap(); // Ensure it's done or started
-
-        // Update state using execute_operations to ensure timestamp is updated.
-        // We need a new system context with a later timestamp.
-        let system_context_later = crate::system_context::SystemContext::new_with_options(200);
-
-        let session_id = start_session(&mut state, &system_context_later);
-        execute_all(
-            &mut state,
-            session_id,
-            vec![BatchOperation::CreateAsset(CreateAssetArguments {
-                key: "asset2".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: None,
-            })],
-            &system_context_later,
-        );
-
-        // Since the new API doesn't allow controlling instruction counter per call,
-        // we can't easily test interruption. This test now just verifies completion.
-        let result = run_computation_until_completion(|_progress| state.compute_state_hash());
-        assert!(result.is_ok());
-
-        // Verify we can call it again
-        let result = run_computation_until_completion(|_progress| state.compute_state_hash());
         assert!(result.is_ok());
     }
 }
@@ -2149,7 +1749,7 @@ mod redirect_rules {
     use crate::redirect::{RedirectRule, RulePattern};
     use crate::types::SetRedirectRulesArguments;
 
-    fn commit(state: &mut State, ops: Vec<BatchOperation>) -> Result<(), String> {
+    fn commit(state: &mut State, ops: Vec<Operation>) -> Result<(), String> {
         let system_context = mock_system_context();
         let session_id = start_session(state, &system_context);
         run_computation_until_completion(|progress| {
@@ -2171,13 +1771,13 @@ mod redirect_rules {
                 from: RulePattern::Exact("/old".into()),
                 to: "/new".into(),
                 status: 301,
-                headers: None,
+                headers: vec![],
             },
             RedirectRule {
                 from: RulePattern::Subtree("/legacy/".into()),
                 to: "/home".into(),
                 status: 308,
-                headers: Some(vec![("X-Reason".into(), "moved".into())]),
+                headers: vec![("X-Reason".into(), "moved".into())],
             },
         ]
     }
@@ -2189,15 +1789,64 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: rules.clone(),
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: rules.clone(),
+            })],
         )
         .unwrap();
 
-        assert_eq!(state.get_redirect_rules(), rules);
+        assert_eq!(state.get_redirect_rules(0), rules);
+    }
+
+    #[test]
+    fn get_redirect_rules_paginates_by_index() {
+        // Paging is a pure read over the rule vec, so populate it directly
+        // rather than committing (and certifying) 200+ rules — the write path
+        // and certification are exercised by the round-trip tests. Each rule's
+        // `to` encodes its index so we can assert order and offset.
+        let mut state = State::default();
+        let total = crate::state::PAGE_SIZE * 2 + 37; // two full pages + a partial third
+        state.redirect_rules = (0..total)
+            .map(|i| RedirectRule {
+                from: RulePattern::Exact(format!("/from-{i}")),
+                to: format!("/to-{i}"),
+                status: 301,
+                headers: vec![],
+            })
+            .collect();
+
+        // A page is capped at PAGE_SIZE and begins exactly at the cursor.
+        let first = state.get_redirect_rules(0);
+        assert_eq!(first.len(), crate::state::PAGE_SIZE);
+        assert_eq!(first[0].to, "/to-0");
+
+        // The page at an offset begins at that index.
+        let mid = state.get_redirect_rules(crate::state::PAGE_SIZE as u64);
+        assert_eq!(mid[0].to, format!("/to-{}", crate::state::PAGE_SIZE));
+
+        // The final page is the short remainder; a cursor at or past the end is
+        // empty, terminating a caller's walk.
+        let last = state.get_redirect_rules((crate::state::PAGE_SIZE * 2) as u64);
+        assert_eq!(last.len(), 37);
+        assert!(state.get_redirect_rules(total as u64).is_empty());
+        assert!(state.get_redirect_rules(total as u64 + 1000).is_empty());
+
+        // Walking the cursor reassembles the full list in order.
+        let mut collected = Vec::new();
+        let mut start = 0u64;
+        loop {
+            let page = state.get_redirect_rules(start);
+            if page.is_empty() {
+                break;
+            }
+            start += page.len() as u64;
+            collected.extend(page);
+        }
+        assert_eq!(collected.len(), total);
+        assert!(collected
+            .iter()
+            .enumerate()
+            .all(|(i, r)| r.to == format!("/to-{i}")));
     }
 
     #[test]
@@ -2208,15 +1857,13 @@ mod redirect_rules {
             from: RulePattern::Exact("/seed".into()),
             to: "/dest".into(),
             status: 301,
-            headers: None,
+            headers: vec![],
         }];
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: initial.clone(),
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: initial.clone(),
+            })],
         )
         .unwrap();
 
@@ -2226,26 +1873,26 @@ mod redirect_rules {
                 from: RulePattern::Exact("/a".into()),
                 to: "/b".into(),
                 status: 301,
-                headers: None,
+                headers: vec![],
             },
             RedirectRule {
                 from: RulePattern::Exact("/c".into()),
                 to: "/d".into(),
                 status: 418,
-                headers: None,
+                headers: vec![],
             },
         ];
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments { rules: mixed },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: mixed,
+            })],
         )
         .unwrap_err();
         assert!(err.contains("unsupported status code"), "got: {err}");
 
         assert_eq!(
-            state.get_redirect_rules(),
+            state.get_redirect_rules(0),
             initial,
             "rules must be unchanged after a failed SetRedirectRules"
         );
@@ -2258,18 +1905,16 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: rules.clone(),
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: rules.clone(),
+            })],
         )
         .unwrap();
 
         let stable: StableState = state.into();
         let state: State = stable.into();
 
-        assert_eq!(state.get_redirect_rules(), rules);
+        assert_eq!(state.get_redirect_rules(0), rules);
     }
 
     #[test]
@@ -2278,23 +1923,21 @@ mod redirect_rules {
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: sample_rules(),
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: sample_rules(),
+            })],
         )
         .unwrap();
-        assert!(!state.get_redirect_rules().is_empty());
+        assert!(!state.get_redirect_rules(0).is_empty());
 
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments { rules: vec![] },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![],
+            })],
         )
         .unwrap();
-        assert!(state.get_redirect_rules().is_empty());
+        assert!(state.get_redirect_rules(0).is_empty());
     }
 
     #[test]
@@ -2302,16 +1945,14 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Exact("/old".into()),
-                        to: "/new".into(),
-                        status: 301,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/old".into()),
+                    to: "/new".into(),
+                    status: 301,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
 
@@ -2325,16 +1966,14 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Subtree("/legacy/".into()),
-                        to: "/home".into(),
-                        status: 308,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/legacy/".into()),
+                    to: "/home".into(),
+                    status: 308,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
 
@@ -2349,24 +1988,22 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![
-                        RedirectRule {
-                            from: RulePattern::Exact("/dup".into()),
-                            to: "/first".into(),
-                            status: 301,
-                            headers: None,
-                        },
-                        RedirectRule {
-                            from: RulePattern::Exact("/dup".into()),
-                            to: "/second".into(),
-                            status: 302,
-                            headers: None,
-                        },
-                    ],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![
+                    RedirectRule {
+                        from: RulePattern::Exact("/dup".into()),
+                        to: "/first".into(),
+                        status: 301,
+                        headers: vec![],
+                    },
+                    RedirectRule {
+                        from: RulePattern::Exact("/dup".into()),
+                        to: "/second".into(),
+                        status: 302,
+                        headers: vec![],
+                    },
+                ],
+            })],
         )
         .unwrap();
 
@@ -2380,11 +2017,9 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: sample_rules(),
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: sample_rules(),
+            })],
         )
         .unwrap();
         // Sanity: rules fire pre-upgrade.
@@ -2405,16 +2040,14 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Exact("/foo".into()),
-                        to: "/foo.html".into(),
-                        status: 200,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/foo".into()),
+                    to: "/foo.html".into(),
+                    status: 200,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
         let inert = state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
@@ -2453,7 +2086,7 @@ mod redirect_rules {
     fn delete_asset_via_batch(state: &mut State, key: &str) {
         commit(
             state,
-            vec![BatchOperation::DeleteAsset(DeleteAssetArguments {
+            vec![Operation::DeleteAsset(DeleteAssetArguments {
                 key: key.to_string(),
             })],
         )
@@ -2474,16 +2107,14 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Exact("/foo".into()),
-                        to: "/bar.html".into(),
-                        status: 200,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/foo".into()),
+                    to: "/bar.html".into(),
+                    status: 200,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
 
@@ -2521,16 +2152,14 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Subtree("/legacy/".into()),
-                        to: "/404.html".into(),
-                        status: 404,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/legacy/".into()),
+                    to: "/404.html".into(),
+                    status: 404,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
 
@@ -2556,16 +2185,14 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Exact("/retired".into()),
-                        to: "/410.html".into(),
-                        status: 410,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/retired".into()),
+                    to: "/410.html".into(),
+                    status: 410,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
 
@@ -2581,16 +2208,14 @@ mod redirect_rules {
         let mut state = State::default();
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Exact("/missing".into()),
-                        to: String::new(),
-                        status: 404,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/missing".into()),
+                    to: String::new(),
+                    status: 404,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap_err();
         assert!(err.contains("must be an absolute asset path"), "got: {err}");
@@ -2623,16 +2248,14 @@ mod redirect_rules {
         let mut state = State::default();
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Exact("/missing".into()),
-                        to: "/404.html".into(),
-                        status: 404,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/missing".into()),
+                    to: "/404.html".into(),
+                    status: 404,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
         // Target doesn't exist → rule inert → built-in fall-through 404.
@@ -2670,16 +2293,14 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Subtree("/old/".into()),
-                        to: "/404.html".into(),
-                        status: 404,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/old/".into()),
+                    to: "/404.html".into(),
+                    status: 404,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
         let v1 = certified_http_request(&state, RequestBuilder::get("/old/x").build());
@@ -2702,16 +2323,14 @@ mod redirect_rules {
         let mut state = State::default();
         let err = commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Exact("/missing".into()),
-                        to: "404.html".into(), // missing leading '/'
-                        status: 404,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/missing".into()),
+                    to: "404.html".into(), // missing leading '/'
+                    status: 404,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap_err();
         assert!(err.contains("must be an absolute asset path"), "got: {err}");
@@ -2735,16 +2354,14 @@ mod redirect_rules {
         );
         commit(
             &mut state,
-            vec![BatchOperation::SetRedirectRules(
-                SetRedirectRulesArguments {
-                    rules: vec![RedirectRule {
-                        from: RulePattern::Subtree("/".into()),
-                        to: "/index.html".into(),
-                        status: 200,
-                        headers: None,
-                    }],
-                },
-            )],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/".into()),
+                    to: "/index.html".into(),
+                    status: 200,
+                    headers: vec![],
+                }],
+            })],
         )
         .unwrap();
 

@@ -421,6 +421,7 @@ dependencies = [
  "serde_bytes",
  "serde_cbor",
  "sha2 0.11.0",
+ "wire-types",
 ]
 
 [[package]]
@@ -832,6 +833,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "wire-types",
 ]
 
 [[package]]
@@ -3101,6 +3103,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "url",
+ "wire-types",
 ]
 
 [[package]]
@@ -3859,6 +3862,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wire-types"
+version = "0.0.0"
+dependencies = [
+ "candid",
+ "serde",
+ "serde_bytes",
 ]
 
 [[package]]

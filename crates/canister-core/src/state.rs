@@ -5,10 +5,7 @@
 //! as formal arguments. This approach makes it very easy to test the state machine.
 
 use crate::{
-    asset::{
-        on_asset_change, Asset, AssetDetails, AssetEncoding, AssetEncodingDetails, EncodedAsset,
-    },
-    batch::{Chunk, ComputationStatus, SyncSession},
+    asset::{on_asset_change, Asset, AssetEncoding},
     certification::{AssetKey, CertifiedResponses},
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -16,32 +13,36 @@ use crate::{
     },
     rc_bytes::RcBytes,
     stable::StableState,
-    state_hash::StateHashComputation,
-    system_context::SystemContext,
+    sync::{Chunk, SyncSession},
     types::*,
     url::url_decode,
 };
-use candid::{CandidType, Deserialize, Nat, Principal};
+use candid::Principal;
 use ic_certification::{AsHashTree, Hash};
 use num_traits::ToPrimitive;
-use serde::Serialize;
 use serde_bytes::ByteBuf;
 use sha2::Digest;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryInto;
 
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct CertifiedTree {
-    pub certificate: Vec<u8>,
-    pub tree: Vec<u8>,
-}
+/// Maximum number of items the canister returns from a single paginated query
+/// (`get_asset_details`, `get_redirect_rules`). The caller follows the cursor
+/// until it sees a short or empty page; it never needs to know this value.
+pub(crate) const PAGE_SIZE: usize = 100;
 
 #[derive(Default)]
 pub struct State {
-    pub(crate) assets: HashMap<AssetKey, Asset>,
+    // Ordered by key so `get_asset_details` can page with a key cursor — a
+    // `range` seek — instead of sorting the whole keyspace on every query.
+    pub(crate) assets: BTreeMap<AssetKey, Asset>,
 
-    pub(crate) chunks: HashMap<ChunkId, Chunk>,
-    pub(crate) next_chunk_id: ChunkId,
+    // Chunks staged by `upload_chunks` for the current sync, in upload order:
+    // the slot index is the chunk id (`ChunkId`). `SetAssetContent` `take()`s
+    // each slot as it consumes the bytes, leaving a `None` hole, so memory is
+    // freed incrementally without renumbering the surviving slots. Cleared on
+    // sync start/finish. The plugin reproduces these same indices locally, so
+    // they are never sent over the wire.
+    pub(crate) chunks: Vec<Option<Chunk>>,
 
     /// The single in-progress sync, if any. At most one runs at a time.
     pub(crate) sync_session: Option<SyncSession>,
@@ -60,10 +61,6 @@ pub struct State {
     /// asset shadows an exact rule at the same path, or because an alias rule
     /// (200/4xx) points at a target asset that doesn't exist yet.
     pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
-
-    pub(crate) state_hash_computation: Option<StateHashComputation>,
-    pub(crate) last_state_update_timestamp_ns: u64,
-    pub(crate) last_state_hash_timestamp: u64,
 }
 
 impl State {
@@ -93,10 +90,6 @@ impl State {
         self.asset_hashes.root_hash()
     }
 
-    pub fn last_state_update_timestamp_ns(&self) -> u64 {
-        self.last_state_update_timestamp_ns
-    }
-
     pub fn create_asset(&mut self, arg: CreateAssetArguments) -> Result<(), String> {
         if self.assets.contains_key(&arg.key) {
             return Err("asset already exists".to_string());
@@ -113,13 +106,9 @@ impl State {
         Ok(())
     }
 
-    pub fn set_asset_content(
-        &mut self,
-        arg: SetAssetContentArguments,
-        system_context: &SystemContext,
-    ) -> Result<(), String> {
-        if arg.chunk_ids.is_empty() && arg.last_chunk.is_none() {
-            return Err("encoding must have at least one chunk or contain last_chunk".to_string());
+    pub fn set_asset_content(&mut self, arg: SetAssetContentArguments) -> Result<(), String> {
+        if arg.chunk_ids.is_empty() {
+            return Err("encoding must have at least one chunk".to_string());
         }
 
         let dependent_keys = self.dependent_keys(&arg.key);
@@ -127,15 +116,14 @@ impl State {
             return Err("asset not found".to_string());
         }
 
-        let now = system_context.current_timestamp_ns;
-
         let mut content_chunks = vec![];
-        for chunk_id in arg.chunk_ids.iter() {
-            let chunk = self.chunks.remove(chunk_id).expect("chunk not found");
-            content_chunks.push(chunk.content);
-        }
-        if let Some(encoding_content) = arg.last_chunk.clone() {
-            content_chunks.push(encoding_content.into());
+        for &chunk_id in arg.chunk_ids.iter() {
+            let chunk = self
+                .chunks
+                .get_mut(chunk_id as usize)
+                .and_then(Option::take)
+                .expect("chunk not found");
+            content_chunks.push(chunk);
         }
 
         let mut hasher = sha2::Sha256::new();
@@ -144,7 +132,7 @@ impl State {
         }
         let sha256: [u8; 32] = hasher.finalize().into();
 
-        self.complete_set_asset_content(arg, content_chunks, sha256, now, dependent_keys)
+        self.complete_set_asset_content(arg, content_chunks, sha256, dependent_keys)
     }
 
     pub(crate) fn complete_set_asset_content(
@@ -152,17 +140,15 @@ impl State {
         arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
         sha256: [u8; 32],
-        now: u64,
         dependent_keys: Vec<AssetKey>,
     ) -> Result<(), String> {
-        if let Some(provided_hash) = arg.sha256 {
-            let provided_hash: [u8; 32] = provided_hash
-                .into_vec()
-                .try_into()
-                .map_err(|_| "invalid SHA-256".to_string())?;
-            if sha256 != provided_hash {
-                return Err("sha256 mismatch".to_string());
-            }
+        let provided_hash: [u8; 32] = arg
+            .sha256
+            .into_vec()
+            .try_into()
+            .map_err(|_| "invalid SHA-256".to_string())?;
+        if sha256 != provided_hash {
+            return Err("sha256 mismatch".to_string());
         }
 
         let asset = self
@@ -170,12 +156,9 @@ impl State {
             .get_mut(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
-        let total_length: usize = content_chunks.iter().map(|c| c.len()).sum();
         let enc = AssetEncoding {
-            modified: now,
             content_chunks,
             certified: false,
-            total_length,
             sha256,
             certificate_expression: None, // set by on_asset_change
             response_hashes: None,        // set by on_asset_change
@@ -208,155 +191,37 @@ impl State {
         }
     }
 
-    pub fn retrieve(&self, key: &AssetKey) -> Result<RcBytes, String> {
-        let asset = self.get_asset(key)?;
+    /// Serves the `get_asset_details` endpoint: one page of assets ordered by
+    /// key. `start_after` is exclusive — pass the last key of the previous page
+    /// to get the next one, or `None` to start at the beginning. At most
+    /// `PAGE_SIZE` assets are returned; an empty result means there is nothing
+    /// after `start_after`.
+    pub fn get_asset_details(&self, start_after: Option<AssetKey>) -> Vec<AssetDetails> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let lower = start_after.as_deref().map_or(Unbounded, Excluded);
 
-        let id_enc = asset
-            .encodings
-            .get("identity")
-            .ok_or_else(|| "no identity encoding".to_string())?;
+        self.assets
+            .range::<str, _>((lower, Unbounded))
+            .take(PAGE_SIZE)
+            .map(|(key, asset)| {
+                let mut encodings: Vec<_> = asset
+                    .encodings
+                    .iter()
+                    .map(|(enc_name, enc)| AssetEncodingDetails {
+                        content_encoding: enc_name.clone(),
+                        sha256: ByteBuf::from(enc.sha256),
+                    })
+                    .collect();
+                encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
 
-        if id_enc.content_chunks.len() > 1 {
-            return Err("Asset too large. Use get() and get_chunk() instead.".to_string());
-        }
-
-        Ok(id_enc.content_chunks[0].clone())
-    }
-
-    pub fn compute_state_hash(&mut self) -> ComputationStatus<String, (), ()> {
-        if self.last_state_hash_timestamp != self.last_state_update_timestamp_ns {
-            self.state_hash_computation = None;
-            self.last_state_hash_timestamp = self.last_state_update_timestamp_ns;
-        }
-
-        if let Some(StateHashComputation::Computed(evidence)) = &self.state_hash_computation {
-            return ComputationStatus::Done(hex::encode(evidence.as_slice()));
-        }
-
-        let ec = self
-            .state_hash_computation
-            .take()
-            .unwrap_or_else(|| StateHashComputation::new(self));
-        let ec = ec.advance(self);
-        self.state_hash_computation = Some(ec);
-        ComputationStatus::InProgress(())
-    }
-
-    pub fn get_state_info(&self) -> StateInfo {
-        let state_hash =
-            if let Some(StateHashComputation::Computed(evidence)) = &self.state_hash_computation {
-                Some(hex::encode(evidence.as_slice()))
-            } else {
-                None
-            };
-        StateInfo {
-            last_state_update_timestamp: self.last_state_update_timestamp_ns,
-            state_hash,
-        }
-    }
-
-    pub fn list_assets(&self, request: ListRequest) -> Vec<AssetDetails> {
-        const PAGE_SIZE: usize = 100;
-
-        let start_idx = request
-            .start
-            .and_then(|n| {
-                let n_u64: u64 = n.0.try_into().ok()?;
-                usize::try_from(n_u64).ok()
-            })
-            .unwrap_or(0);
-
-        let page_size = request
-            .length
-            .and_then(|n| {
-                let n_u64: u64 = n.0.try_into().ok()?;
-                let n_usize = usize::try_from(n_u64).ok()?;
-                Some(PAGE_SIZE.min(n_usize))
-            })
-            .unwrap_or(PAGE_SIZE);
-
-        let mut sorted_keys: Vec<_> = self.assets.keys().collect();
-        sorted_keys.sort();
-
-        sorted_keys
-            .into_iter()
-            .skip(start_idx)
-            .take(page_size)
-            .filter_map(|key| {
-                self.assets.get(key).map(|asset| {
-                    let mut encodings: Vec<_> = asset
-                        .encodings
-                        .iter()
-                        .map(|(enc_name, enc)| AssetEncodingDetails {
-                            content_encoding: enc_name.clone(),
-                            sha256: Some(ByteBuf::from(enc.sha256)),
-                            length: Nat::from(enc.total_length),
-                            modified: enc.modified,
-                        })
-                        .collect();
-                    encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
-
-                    AssetDetails {
-                        key: key.clone(),
-                        content_type: asset.content_type.clone(),
-                        encodings,
-                        headers: asset.headers.clone(),
-                    }
-                })
+                AssetDetails {
+                    key: key.clone(),
+                    content_type: asset.content_type.clone(),
+                    encodings,
+                    headers: asset.headers.clone(),
+                }
             })
             .collect()
-    }
-
-    pub fn certified_tree(&self, certificate: &[u8]) -> CertifiedTree {
-        let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
-        serializer.self_describe().unwrap();
-        self.asset_hashes
-            .as_hash_tree()
-            .serialize(&mut serializer)
-            .unwrap();
-
-        CertifiedTree {
-            certificate: certificate.to_vec(),
-            tree: serializer.into_inner(),
-        }
-    }
-
-    pub fn get(&self, arg: GetArg) -> Result<EncodedAsset, String> {
-        let asset = self.get_asset(&arg.key)?;
-
-        for enc in arg.accept_encodings.iter() {
-            if let Some(asset_enc) = asset.encodings.get(enc) {
-                return Ok(EncodedAsset {
-                    content: asset_enc.content_chunks[0].clone(),
-                    content_type: asset.content_type.clone(),
-                    content_encoding: enc.clone(),
-                    total_length: Nat::from(asset_enc.total_length as u64),
-                    sha256: Some(ByteBuf::from(asset_enc.sha256)),
-                });
-            }
-        }
-        Err("no such encoding".to_string())
-    }
-
-    pub fn get_chunk(&self, arg: GetChunkArg) -> Result<RcBytes, String> {
-        let asset = self.get_asset(&arg.key)?;
-
-        let enc = asset
-            .encodings
-            .get(&arg.content_encoding)
-            .ok_or_else(|| "no such encoding".to_string())?;
-
-        let expected_hash = arg.sha256.ok_or("sha256 required")?;
-        if expected_hash != enc.sha256 {
-            return Err("sha256 mismatch".to_string());
-        }
-
-        if arg.index >= enc.content_chunks.len() {
-            return Err("chunk index out of bounds".to_string());
-        }
-        let index: usize = arg.index.0.to_usize().unwrap();
-
-        Ok(enc.content_chunks[index].clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -387,7 +252,7 @@ impl State {
 
         // Scan redirect rules in declaration order; first match wins.
         for (idx, rule) in self.redirect_rules.iter().enumerate() {
-            if !rule.matches(path) {
+            if !crate::redirect::matches(rule, path) {
                 continue;
             }
             let Some(entry) = self
@@ -433,7 +298,7 @@ impl State {
                 // Synthetic entries only cover 3xx redirects — empty body.
                 let cert_expr_header =
                     crate::certification::build_ic_certificate_expression_header(expression);
-                let mut headers = rule.certified_headers();
+                let mut headers = crate::redirect::certified_headers(rule);
                 headers.push((cert_expr_header.0, cert_expr_header.1));
                 headers.push(cert_header);
 
@@ -518,8 +383,7 @@ impl State {
             .get(&content_encoding)
             .ok_or_else(|| "Invalid token on streaming: encoding not found.".to_string())?;
 
-        let expected_hash = sha256.ok_or("sha256 required")?;
-        if expected_hash != enc.sha256 {
+        if sha256 != enc.sha256 {
             return Err("sha256 mismatch".to_string());
         }
 
@@ -538,27 +402,14 @@ impl State {
         })
     }
 
-    pub fn get_asset_properties(&self, key: AssetKey) -> Result<AssetProperties, String> {
-        let asset = self
-            .assets
-            .get(&key)
-            .ok_or_else(|| "asset not found".to_string())?;
-
-        Ok(AssetProperties {
-            headers: asset.headers.clone(),
-        })
-    }
-
-    pub fn set_asset_properties(&mut self, arg: SetAssetPropertiesArguments) -> Result<(), String> {
+    pub fn set_asset_headers(&mut self, arg: SetAssetHeadersArguments) -> Result<(), String> {
         let dependent_keys = self.dependent_keys(&arg.key);
         let asset = self
             .assets
             .get_mut(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
-        if let Some(headers) = arg.headers {
-            asset.headers = headers
-        }
+        asset.headers = arg.headers;
 
         on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
 
@@ -575,8 +426,24 @@ impl State {
         Vec::new()
     }
 
-    pub fn get_redirect_rules(&self) -> Vec<crate::redirect::RedirectRule> {
-        self.redirect_rules.clone()
+    /// Serves the `get_redirect_rules` endpoint: one page of rules in match
+    /// order. Rules live in a `Vec` whose order is semantic (first match wins)
+    /// and where no element has a unique key, so the cursor is a positional
+    /// `start_index` rather than a value cursor like `get_asset_details` uses.
+    /// `start_index` is the number of rules already seen; at most `PAGE_SIZE`
+    /// rules are returned, and an empty result means there is nothing at or
+    /// after `start_index`. The seek is O(1) on a `Vec` — no sort or
+    /// allocation — so positional paging carries none of the cost that ruled it
+    /// out for the (hash-stored) asset list.
+    pub fn get_redirect_rules(&self, start_index: u64) -> Vec<crate::redirect::RedirectRule> {
+        let start = start_index as usize;
+        self.redirect_rules
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .take(PAGE_SIZE)
+            .cloned()
+            .collect()
     }
 
     /// Rebuild the certified-tree entries for `redirect_rules`. Called whenever
@@ -638,7 +505,7 @@ impl State {
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         let target_key = rule.to.clone();
         let target = self.assets.get(&target_key)?;
-        let location = rule.tree_location();
+        let location = crate::redirect::tree_location(rule);
         let mut tree_paths = Vec::new();
         for (enc_name, enc) in &target.encodings {
             let Some(expr) = enc.certificate_expression.as_ref() else {
@@ -685,7 +552,6 @@ impl From<StableState> for State {
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
             next_session_id: stable_state.next_session_id,
-            last_state_update_timestamp_ns: stable_state.last_state_update_timestamp.unwrap_or(0),
             redirect_rules: stable_state.redirect_rules.unwrap_or_default(),
             ..Self::default()
         };

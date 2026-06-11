@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+wire-types = { path = "../wire-types" }
 base64.workspace = true
 candid.workspace = true
 hex.workspace = true

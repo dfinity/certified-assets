@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+wire-types = { path = "../wire-types" }
 brotli.workspace = true
 candid.workspace = true
 flate2.workspace = true

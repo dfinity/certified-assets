@@ -5,7 +5,7 @@
 //! handing it back, so a successful fetch is also proof of certification —
 //! and proof that the headers we set are the same ones the canister certified.
 
-use e2e::{get_asset_properties, http_fetch, icp_cmd, setup_project, LocalNetwork};
+use e2e::{http_fetch, icp_cmd, list_assets, setup_project, LocalNetwork};
 use reqwest::StatusCode;
 use std::fs;
 
@@ -45,18 +45,26 @@ fn header_rules_honoured() {
 }
 
 /// Edit `_headers` and redeploy. Expectation: new headers propagate without
-/// re-uploading content (drift detected via `SetAssetProperties`).
+/// re-uploading content (drift detected via `SetAssetHeaders`).
 #[test]
-fn header_edit_propagates_via_set_asset_properties() {
+fn header_edit_propagates_via_set_asset_headers() {
     let tmp = setup_project("tests/fixture/headers");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
     icp_cmd(project).arg("deploy").assert().success();
 
-    // Sanity-check the initial headers landed on the canister.
-    let before = get_asset_properties(project, "/index.html");
-    let headers_before = before.headers.expect("/index.html should carry headers");
+    // Sanity-check the initial headers landed on the canister. `list` reports
+    // per-asset headers, so read them from there.
+    let before = list_assets(project)
+        .into_iter()
+        .find(|a| a.key == "/index.html")
+        .expect("/index.html should be listed");
+    let headers_before = before.headers;
+    assert!(
+        !headers_before.is_empty(),
+        "/index.html should carry headers"
+    );
     assert!(headers_before
         .iter()
         .any(|(k, v)| k.eq_ignore_ascii_case("x-frame-options") && v == "DENY"));
@@ -76,6 +84,6 @@ fn header_edit_propagates_via_set_asset_properties() {
     assert_eq!(
         header_value(r.headers(), "x-robots-tag"),
         Some("none"),
-        "edited X-Robots-Tag should reach the canister via SetAssetProperties",
+        "edited X-Robots-Tag should reach the canister via SetAssetHeaders",
     );
 }

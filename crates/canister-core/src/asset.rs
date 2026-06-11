@@ -4,8 +4,6 @@
 //! - [`Asset`] / [`AssetEncoding`] hold an asset and its per-encoding response
 //!   metadata, including the per-encoding response hashes used for v2
 //!   certification.
-//! - [`EncodedAsset`], [`AssetDetails`], [`AssetEncodingDetails`] are the
-//!   Candid surface types used by `get` / `list`.
 //! - [`on_asset_change`] is the central re-certification routine: every State
 //!   method that mutates an asset funnels through it.
 //! - [`encoding_certification_order`] is a small encoding utility shared
@@ -20,10 +18,8 @@ use crate::http::{
     CallbackFunc, HeaderField, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
 use crate::rc_bytes::RcBytes;
-use candid::{CandidType, Deserialize, Nat};
 use ic_certification::Hash;
 use ic_representation_independent_hash::Value;
-use serde_bytes::ByteBuf;
 use sha2::Digest;
 use std::collections::HashMap;
 
@@ -49,14 +45,9 @@ pub fn encoding_certification_order<'a>(
 
 const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 
-/// Nanoseconds since the Unix epoch (`ic0.time()`); always non-negative.
-pub(crate) type Timestamp = u64;
-
 #[derive(Default, Clone, Debug)]
 pub struct AssetEncoding {
-    pub modified: Timestamp,
     pub content_chunks: Vec<RcBytes>,
-    pub total_length: usize,
     pub certified: bool,
     pub sha256: [u8; 32],
     pub certificate_expression: Option<CertificateExpression>,
@@ -76,13 +67,13 @@ impl AssetEncoding {
 
     fn compute_response_hashes(
         &self,
-        headers: &Option<Vec<(String, String)>>,
+        headers: &[(String, String)],
         content_type: &str,
         encoding_name: &str,
     ) -> HashMap<u16, [u8; 32]> {
         // Collect all user-defined headers
         let base_headers: Vec<(String, Value)> = build_headers(
-            headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
+            headers.iter().map(|(k, v)| (k, v)),
             content_type,
             encoding_name,
             self.certificate_expression.as_ref(),
@@ -114,32 +105,7 @@ impl AssetEncoding {
 pub struct Asset {
     pub content_type: String,
     pub encodings: HashMap<String, AssetEncoding>,
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct EncodedAsset {
-    pub content: RcBytes,
-    pub content_type: String,
-    pub content_encoding: String,
-    pub total_length: Nat,
-    pub sha256: Option<ByteBuf>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct AssetDetails {
-    pub key: String,
-    pub content_type: String,
-    pub encodings: Vec<AssetEncodingDetails>,
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct AssetEncodingDetails {
-    pub content_encoding: String,
-    pub sha256: Option<ByteBuf>,
-    pub length: Nat,
-    pub modified: Timestamp,
+    pub headers: Vec<(String, String)>,
 }
 
 impl Asset {
@@ -147,10 +113,8 @@ impl Asset {
         // gather all headers
         let mut headers: Vec<(String, Value)> = vec![];
 
-        if let Some(custom_headers) = &self.headers {
-            for (k, v) in custom_headers.iter() {
-                headers.push((k.clone(), Value::String(v.clone())));
-            }
+        for (k, v) in &self.headers {
+            headers.push((k.clone(), Value::String(v.clone())));
         }
 
         // update
@@ -167,7 +131,7 @@ impl Asset {
             .get(encoding_name)
             .and_then(|e| e.certificate_expression.as_ref());
         build_headers(
-            self.headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
+            self.headers.iter().map(|(k, v)| (k, v)),
             &self.content_type,
             encoding_name.to_owned(),
             ce,
@@ -286,7 +250,7 @@ impl Asset {
 }
 
 fn build_headers(
-    custom_headers: Option<impl Iterator<Item = (impl Into<String>, impl Into<String>)>>,
+    custom_headers: impl Iterator<Item = (impl Into<String>, impl Into<String>)>,
     content_type: impl Into<String>,
     encoding_name: impl Into<String>,
     cert_expr: Option<&CertificateExpression>,
@@ -297,10 +261,8 @@ fn build_headers(
     if encoding_name != "identity" {
         headers.push(("content-encoding".to_string(), encoding_name));
     }
-    if let Some(arg_headers) = custom_headers {
-        for (k, v) in arg_headers {
-            headers.push((k.into().to_lowercase(), v.into()));
-        }
+    for (k, v) in custom_headers {
+        headers.push((k.into().to_lowercase(), v.into()));
     }
     if let Some(expr) = cert_expr {
         let (k, v) = build_ic_certificate_expression_header(expr);

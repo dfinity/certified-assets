@@ -1,6 +1,5 @@
 //! This module declares canister methods expected by the assets canister client.
 pub mod asset;
-pub mod batch;
 pub mod certification;
 pub mod http;
 pub mod nested_tree;
@@ -8,7 +7,7 @@ pub mod rc_bytes;
 pub mod redirect;
 pub mod stable;
 pub mod state;
-pub mod state_hash;
+pub mod sync;
 pub mod system_context;
 pub mod types;
 mod url;
@@ -18,15 +17,12 @@ mod tests;
 
 pub use crate::stable::StableState;
 use crate::{
-    asset::{AssetDetails, EncodedAsset},
-    batch::ComputationStatus,
-    certification::AssetKey,
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
     },
-    rc_bytes::RcBytes,
-    state::{CertifiedTree, State},
+    state::State,
+    sync::ComputationStatus,
     system_context::SystemContext,
     types::*,
 };
@@ -40,8 +36,12 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
-pub fn api_version() -> u16 {
-    2
+/// The bundle tag this canister was built with: minutes since the Unix epoch
+/// (UTC), or `None` for an unstamped dev build. The sync plugin checks this
+/// against its own tag and refuses to proceed on a mismatch. See
+/// [`wire_types::BUNDLE_TAG`].
+pub fn bundle_tag() -> Option<u64> {
+    wire_types::BUNDLE_TAG
 }
 
 /// Adds `principal` to the authorized set. Controller-guarded at the endpoint.
@@ -58,13 +58,6 @@ pub fn list_authorized() -> Vec<Principal> {
     with_state(|s| s.list_authorized().iter().cloned().collect())
 }
 
-pub fn retrieve(key: AssetKey) -> RcBytes {
-    with_state(|s| match s.retrieve(&key) {
-        Ok(bytes) => bytes,
-        Err(msg) => trap(&msg),
-    })
-}
-
 pub fn start_sync() -> StartSyncResult {
     let system_context = SystemContext::new();
     let caller = msg_caller();
@@ -72,12 +65,13 @@ pub fn start_sync() -> StartSyncResult {
     with_state_mut(|s| s.start_sync(caller, &system_context))
 }
 
-pub fn create_chunks(arg: CreateChunksArg) -> CreateChunksResponse {
+pub fn upload_chunks(arg: UploadChunksArguments) {
     let system_context = SystemContext::new();
 
-    with_state_mut(|s| match s.create_chunks(arg, &system_context) {
-        Ok(chunk_ids) => CreateChunksResponse { chunk_ids },
-        Err(msg) => trap(&msg),
+    with_state_mut(|s| {
+        if let Err(msg) = s.upload_chunks(arg, &system_context) {
+            trap(&msg);
+        }
     })
 }
 
@@ -95,18 +89,6 @@ pub async fn execute_operations(arg: ExecuteOperationsArguments) {
     with_state_mut(|s| certified_data_set(s.root_hash()));
 }
 
-pub async fn compute_state_hash() -> Option<String> {
-    loop_with_message_extension_until_completion(|_progress| {
-        with_state_mut(|s| s.compute_state_hash())
-    })
-    .await
-    .ok()
-}
-
-pub fn get_state_info() -> StateInfo {
-    with_state(|s| s.get_state_info())
-}
-
 pub fn cancel_sync(arg: CancelSyncArguments) {
     let caller = msg_caller();
     if let Err(msg) = with_state_mut(|s| s.cancel_sync(arg, caller)) {
@@ -114,32 +96,12 @@ pub fn cancel_sync(arg: CancelSyncArguments) {
     }
 }
 
-pub fn get(arg: GetArg) -> EncodedAsset {
-    with_state(|s| match s.get(arg) {
-        Ok(asset) => asset,
-        Err(msg) => trap(&msg),
-    })
+pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
+    with_state(|s| s.get_asset_details(start_after))
 }
 
-pub fn get_chunk(arg: GetChunkArg) -> GetChunkResponse {
-    with_state(|s| match s.get_chunk(arg) {
-        Ok(content) => GetChunkResponse { content },
-        Err(msg) => trap(&msg),
-    })
-}
-
-pub fn list(request: ListRequest) -> Vec<AssetDetails> {
-    with_state(|s| s.list_assets(request))
-}
-
-pub fn get_redirect_rules() -> Vec<crate::redirect::RedirectRule> {
-    with_state(|s| s.get_redirect_rules())
-}
-
-pub fn certified_tree() -> CertifiedTree {
-    let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
-
-    with_state(|s| s.certified_tree(&certificate))
+pub fn get_redirect_rules(start_index: u64) -> Vec<crate::redirect::RedirectRule> {
+    with_state(|s| s.get_redirect_rules(start_index))
 }
 
 pub fn http_request(req: HttpRequest) -> HttpResponse {
@@ -169,10 +131,6 @@ pub fn http_request_streaming_callback(
                 .unwrap_or_else(|msg| trap(&msg)),
         )
     })
-}
-
-pub fn get_asset_properties(key: AssetKey) -> AssetProperties {
-    with_state(|s| s.get_asset_properties(key).unwrap_or_else(|msg| trap(&msg)))
 }
 
 /// Whether the current caller may sync assets: either in the authorized set, or

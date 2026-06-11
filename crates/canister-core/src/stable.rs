@@ -11,7 +11,6 @@ pub struct StableState {
     pub(crate) stable_assets: HashMap<String, StableAsset>,
 
     pub(crate) next_session_id: u64,
-    pub(crate) last_state_update_timestamp: Option<u64>,
 
     /// Optional so a `StableState` serialized before this field existed still
     /// deserializes cleanly (yields `None`, which we treat as "no rules").
@@ -29,7 +28,6 @@ impl From<crate::state::State> for StableState {
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
             next_session_id: state.next_session_id,
-            last_state_update_timestamp: Some(state.last_state_update_timestamp_ns),
             redirect_rules: Some(state.redirect_rules),
         }
     }
@@ -40,7 +38,7 @@ impl From<crate::state::State> for StableState {
 pub struct StableAsset {
     pub content_type: String,
     pub encodings: HashMap<String, StableAssetEncoding>,
-    pub headers: Option<Vec<(String, String)>>,
+    pub headers: Vec<(String, String)>,
 }
 
 impl From<crate::asset::Asset> for StableAsset {
@@ -74,9 +72,7 @@ impl From<StableAsset> for crate::asset::Asset {
 /// Same as [crate::asset::AssetEncoding] but serde-serializable
 #[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct StableAssetEncoding {
-    pub modified: u64,
     pub content_chunks: Vec<RcBytes>,
-    pub total_length: usize,
     pub certified: bool,
     pub sha256: [u8; 32],
     pub certificate_expression: Option<CertificateExpression>,
@@ -86,9 +82,7 @@ pub struct StableAssetEncoding {
 impl From<crate::asset::AssetEncoding> for StableAssetEncoding {
     fn from(asset_encoding: crate::asset::AssetEncoding) -> Self {
         Self {
-            modified: asset_encoding.modified,
             content_chunks: asset_encoding.content_chunks,
-            total_length: asset_encoding.total_length,
             certified: asset_encoding.certified,
             sha256: asset_encoding.sha256,
             certificate_expression: asset_encoding.certificate_expression,
@@ -100,9 +94,7 @@ impl From<crate::asset::AssetEncoding> for StableAssetEncoding {
 impl From<StableAssetEncoding> for crate::asset::AssetEncoding {
     fn from(stable_asset_encoding: StableAssetEncoding) -> Self {
         Self {
-            modified: stable_asset_encoding.modified,
             content_chunks: stable_asset_encoding.content_chunks,
-            total_length: stable_asset_encoding.total_length,
             certified: stable_asset_encoding.certified,
             sha256: stable_asset_encoding.sha256,
             certificate_expression: stable_asset_encoding.certificate_expression,

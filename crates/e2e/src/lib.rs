@@ -1,24 +1,12 @@
 use assert_cmd::Command as AssertCmd;
-use candid::CandidType;
-use serde::Deserialize;
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
-pub struct AssetEncodingDetails {
-    pub content_encoding: String,
-    pub sha256: Option<Vec<u8>>,
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
-pub struct AssetDetails {
-    pub key: String,
-    pub encodings: Vec<AssetEncodingDetails>,
-    pub content_type: String,
-}
+// Wire types shared with the canister and sync plugin.
+pub use wire_types::{AssetDetails, AssetEncodingDetails};
 
 /// Build an `icp` subprocess command rooted at `project_dir`.
 ///
@@ -103,36 +91,6 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
         .expect("failed to copy plugin.wasm");
 
     tmp
-}
-
-#[derive(CandidType, Clone, Debug, Deserialize, PartialEq)]
-pub struct AssetProperties {
-    pub headers: Option<Vec<(String, String)>>,
-}
-
-/// Call `get_asset_properties` on the `frontend` canister for `key`.
-pub fn get_asset_properties(project: &Path, key: &str) -> AssetProperties {
-    let stdout = icp_cmd(project)
-        .args([
-            "canister",
-            "call",
-            "frontend",
-            "get_asset_properties",
-            &format!("(\"{key}\")"),
-            "-o",
-            "hex",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let hex_str = String::from_utf8_lossy(&stdout);
-    let bytes = hex::decode(hex_str.trim()).expect("failed to decode hex response");
-    let (properties,) = candid::decode_args::<(AssetProperties,)>(&bytes)
-        .expect("failed to decode candid response");
-    properties
 }
 
 /// Return the canister ID of `frontend` as printed by `icp canister status --id-only`.
@@ -226,15 +184,15 @@ pub fn http_fetch_subdomain(project: &Path, path: &str) -> reqwest::blocking::Re
         .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
 }
 
-/// Call `list` on the `frontend` canister and return all asset details.
+/// Call `get_asset_details` on the `frontend` canister and return all asset details.
 pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
     let stdout = icp_cmd(project)
         .args([
             "canister",
             "call",
             "frontend",
-            "list",
-            "(record {})",
+            "get_asset_details",
+            "(null)",
             "-o",
             "hex",
         ])

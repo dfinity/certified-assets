@@ -1,0 +1,209 @@
+// Reuse the HTTP Gateway types (HeaderField, HttpRequest, HttpResponse,
+// StreamingToken, StreamingStrategy, StreamingCallbackHttpResponse) instead of
+// repeating them here. `import` (without `service`) pulls in only the type
+// definitions, not the gateway's own service.
+import "http-gateway.did";
+
+// ───────── Shared aliases ─────────
+
+// Identifies an in-progress sync. Sequential and monotonic across the canister's
+// whole lifetime, so a session id is never reused — calls carrying a superseded
+// id are cleanly rejected.
+type SessionId = nat64;
+// Index of a content chunk staged within a sync (0, 1, 2, … in arrival order).
+type ChunkId = nat64;
+// An asset's path, e.g. `/index.html` or `/assets/app.css`.
+type Key = text;
+
+// ───────── Asset & redirect-rule types ─────────
+
+// One encoding of an asset, as the `get_asset_details` query reports it.
+type AssetEncodingDetails = record {
+  content_encoding: text;
+  sha256: blob; // sha256 of the entire encoded asset
+};
+
+// An asset as the `get_asset_details` query reports it. `headers` carries the
+// asset's per-asset response headers.
+type AssetDetails = record {
+  key: Key;
+  content_type: text;
+  encodings: vec AssetEncodingDetails;
+  headers: vec HeaderField;
+};
+
+type RulePattern = variant {
+  // Matches a single absolute path, e.g. `/old-page`.
+  Exact: text;
+  // Matches any URL whose path starts with this prefix. The prefix must end with
+  // `/` so the subtree boundary is unambiguous.
+  Subtree: text;
+};
+
+// A single redirect/rewrite/error rule, mirroring one line of a Netlify-style
+// `_redirects` file. Rules are matched in declaration order; first match wins.
+type RedirectRule = record {
+  // Request-side pattern.
+  from: RulePattern;
+  // Target. Interpretation depends on `status`:
+  // - 200: absolute asset path (rewrite — serve the target's body)
+  // - 3xx: absolute URL or absolute path (sent as `Location`)
+  // - 4xx: absolute asset path to serve as the custom error page (e.g.
+  //   `/404.html`); if the asset doesn't exist the rule stays inert and
+  //   unmatched paths fall through to the canister's built-in 404
+  to: text;
+  // One of 200, 301, 302, 307, 308, 404, 410.
+  status: nat16;
+  // Extra response headers on top of the status-intrinsic ones.
+  headers: vec HeaderField;
+};
+
+// ───────── Sync: operations ─────────
+//
+// The mutations a sync applies, batched into `execute_operations` calls.
+
+// Create a new asset. Sets metadata only; content is added separately via
+// SetAssetContent. `headers` are the asset's per-asset response headers.
+type CreateAssetArguments = record {
+  key: Key;
+  content_type: text;
+  headers: vec HeaderField;
+};
+
+// Add or change content for an asset, by content encoding. `chunk_ids`
+// reference chunks previously staged with `upload_chunks`, in order; `sha256`
+// must match the hash of those chunks concatenated.
+type SetAssetContentArguments = record {
+  key: Key;
+  content_encoding: text;
+  chunk_ids: vec ChunkId;
+  sha256: blob;
+};
+
+// Remove one content encoding from an asset. The asset itself remains as long as
+// other encodings exist.
+type UnsetAssetContentArguments = record {
+  key: Key;
+  content_encoding: text;
+};
+
+// Replace an asset's per-asset response headers. The whole list is overwritten,
+// not merged.
+type SetAssetHeadersArguments = record {
+  key: Key;
+  headers: vec HeaderField;
+};
+
+// Delete an asset and all of its encodings.
+type DeleteAssetArguments = record {
+  key: Key;
+};
+
+// Replace the entire redirect ruleset in one operation.
+type SetRedirectRulesArguments = record {
+  rules: vec RedirectRule;
+};
+
+// A single mutation applied during a sync.
+type Operation = variant {
+  CreateAsset: CreateAssetArguments;
+  SetAssetContent: SetAssetContentArguments;
+  UnsetAssetContent: UnsetAssetContentArguments;
+  DeleteAsset: DeleteAssetArguments;
+  SetAssetHeaders: SetAssetHeadersArguments;
+  SetRedirectRules: SetRedirectRulesArguments;
+};
+
+// ───────── Sync: session ─────────
+
+// Result of start_sync. `Busy` is a normal outcome (not an error): a sync is
+// already in progress and the caller may not take it over yet.
+type StartSyncResult = variant {
+  Started: record { session_id: SessionId };
+  // `owner` holds the active sync; `idle_for_secs` is the time since its last
+  // call. Another caller may reclaim the sync only once it has gone stale.
+  Busy: record { owner: principal; idle_for_secs: nat64 };
+};
+
+// Content chunks to stage under a sync; see `upload_chunks`.
+type UploadChunksArguments = record {
+  session_id: SessionId;
+  chunks: vec blob;
+};
+
+// One batch of operations to apply under a sync; see `execute_operations`.
+type ExecuteOperationsArguments = record {
+  session_id: SessionId;
+  operations: vec Operation;
+  // Set on the last call of a sync: once all operations are applied, the
+  // canister finalizes the sync and returns to "no ongoing sync".
+  is_final: bool;
+};
+
+type CancelSyncArguments = record {
+  session_id: SessionId;
+};
+
+service: {
+  // ───────── Canister metadata ─────────
+
+  // Release identity shared by the canister and its paired sync plugin; the
+  // plugin refuses to sync unless this matches its own tag. Minutes since the
+  // Unix epoch (UTC) at build time, or null for an unstamped dev build.
+  bundle_tag: () -> (opt nat64) query;
+
+  // ───────── HTTP gateway ─────────
+  // Standard canister HTTP interface; see
+  // https://docs.internetcomputer.org/references/http-gateway-protocol-spec/
+
+  http_request: (request: HttpRequest) -> (HttpResponse) query;
+  http_request_streaming_callback: (token: StreamingToken) -> (opt StreamingCallbackHttpResponse) query;
+
+  // ───────── Asset queries ─────────
+
+  // A page of asset details, ordered by key. Pass the last key from the
+  // previous page as `start_after` to fetch the next page (`null` starts at the
+  // beginning); each page holds at most the canister's page size. An empty
+  // result means there are no assets after `start_after`.
+  get_asset_details : (start_after: opt Key) -> (vec AssetDetails) query;
+
+  // A page of redirect rules, in match order (first match wins). Pass the
+  // number of rules already seen as `start_index` to fetch the next page (0
+  // starts at the beginning); each page holds at most the canister's page size.
+  // An empty result means there are no rules at or after `start_index`.
+  get_redirect_rules: (start_index: nat64) -> (vec RedirectRule) query;
+
+  // ───────── Sync ─────────
+  //
+  // Assets are only ever mutated through a sync. At most one sync runs at a
+  // time. `start_sync` returns a session id that all subsequent calls of the
+  // sync must carry; the canister rejects calls bearing a superseded id.
+  // Operations (create, set/unset content, set headers, delete) are applied
+  // by `execute_operations`; the sync finalizes on the call flagged `is_final`.
+
+  // Begin a sync. Returns a session id, or `Busy` if another non-stale sync is
+  // already in progress (the owner can always reclaim their own sync).
+  start_sync : () -> (StartSyncResult);
+  // Stage content chunks under the sync. Returns nothing: the canister numbers
+  // staged chunks 0, 1, 2, … per sync in arrival order, and the caller — which
+  // uploads sequentially — reproduces the same ids locally to reference them in
+  // SetAssetContent operations.
+  upload_chunks: (UploadChunksArguments) -> ();
+
+  // Apply a group of operations. Perform all successfully, or reject.
+  execute_operations: (ExecuteOperationsArguments) -> ();
+  // Abandon the active sync, releasing the lock without waiting for it to go
+  // stale. Only the sync's owner may cancel it.
+  cancel_sync: (CancelSyncArguments) -> ();
+
+  // ───────── Authorization ─────────
+  // A set of extra principals authorized to sync assets. Canister controllers
+  // are always authorized (without being listed) and are the only callers that
+  // can change this set.
+
+  authorize: (principal) -> ();
+  deauthorize: (principal) -> ();
+  list_authorized: () -> (vec principal);
+  // Whether the calling identity may sync assets (authorized or a controller).
+  can_sync: () -> (bool) query;
+}

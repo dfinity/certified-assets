@@ -82,7 +82,7 @@ fn parse_line(body: &str) -> Result<RedirectRule, String> {
         from,
         to: to_tok.to_string(),
         status: status.as_u16(),
-        headers: None,
+        headers: vec![],
     })
 }
 
