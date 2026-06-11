@@ -6,7 +6,7 @@ use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::system_context::SystemContext;
 use crate::types::{
-    CancelSyncArguments, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
+    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
     Operation, SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
@@ -601,42 +601,6 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
         )
         .unwrap_err();
     assert!(err.contains("no active sync"), "got: {err}");
-}
-
-#[test]
-fn cancel_sync_releases_the_lock_for_the_owner_only() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-    let owner = some_principal();
-    let other = Principal::from_text("aaaaa-aa").unwrap();
-
-    let session_id = start_session(&mut state, &system_context);
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    state
-        .upload_chunks(
-            UploadChunksArguments {
-                session_id,
-                chunks: vec![ByteBuf::from(BODY.to_vec())],
-            },
-            &system_context,
-        )
-        .unwrap();
-
-    // A non-owner cannot cancel someone else's sync.
-    assert!(state
-        .cancel_sync(CancelSyncArguments { session_id }, other)
-        .is_err());
-
-    // The owner can, which clears staged chunks; a second cancel then errors.
-    assert_eq!(
-        Ok(()),
-        state.cancel_sync(CancelSyncArguments { session_id }, owner)
-    );
-    assert!(state.chunks.is_empty());
-    assert!(state
-        .cancel_sync(CancelSyncArguments { session_id }, owner)
-        .is_err());
 }
 
 #[test]

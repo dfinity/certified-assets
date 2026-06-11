@@ -117,13 +117,14 @@ pub struct ExecuteOperationsArguments {
     pub is_final: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
-pub struct CancelSyncArguments {
-    pub session_id: SessionId,
-}
-
-/// Result of `start_sync`. `Busy` is a normal, expected outcome — not an error
-/// — so the caller can surface who holds the lock and decide whether to wait.
+/// Result of `start_sync`. `Busy` is a normal, expected outcome — not an error.
+///
+/// `Busy` is returned only when a *different* caller holds an active (not yet
+/// stale) sync: a caller always reclaims their own sync immediately, and any
+/// caller reclaims one that has gone stale, so neither path ever yields `Busy`.
+/// The only recourse is therefore to wait — until the holder finishes, or its
+/// sync goes stale and a retry reclaims it. `owner` and `idle_for_secs` report
+/// who holds the lock and for how long.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub enum StartSyncResult {
     Started {
