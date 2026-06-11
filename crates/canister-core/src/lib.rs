@@ -1,6 +1,5 @@
 //! This module declares canister methods expected by the assets canister client.
 pub mod asset;
-pub mod batch;
 pub mod certification;
 pub mod http;
 pub mod nested_tree;
@@ -8,6 +7,7 @@ pub mod rc_bytes;
 pub mod redirect;
 pub mod stable;
 pub mod state;
+pub mod sync;
 pub mod system_context;
 pub mod types;
 mod url;
@@ -17,12 +17,12 @@ mod tests;
 
 pub use crate::stable::StableState;
 use crate::{
-    batch::ComputationStatus,
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
     },
     state::State,
+    sync::ComputationStatus,
     system_context::SystemContext,
     types::*,
 };

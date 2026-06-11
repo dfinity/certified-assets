@@ -6,8 +6,8 @@
 
 // Shared wire types (defined once in `wire-types`, used by both sides).
 pub use wire_types::{
-    AssetDetails, AssetEncodingDetails, BatchOperationKind, CancelSyncArguments, ChunkId,
-    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, SessionId,
+    AssetDetails, AssetEncodingDetails, CancelSyncArguments, ChunkId, CreateAssetArguments,
+    DeleteAssetArguments, ExecuteOperationsArguments, Operation, SessionId,
     SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
     UnsetAssetContentArguments, UploadChunksArguments,
 };

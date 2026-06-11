@@ -105,7 +105,7 @@ type SetRedirectRulesArguments = record {
 };
 
 // A single mutation applied during a sync.
-type BatchOperationKind = variant {
+type Operation = variant {
   CreateAsset: CreateAssetArguments;
   SetAssetContent: SetAssetContentArguments;
   UnsetAssetContent: UnsetAssetContentArguments;
@@ -134,7 +134,7 @@ type UploadChunksArguments = record {
 // One batch of operations to apply under a sync; see `execute_operations`.
 type ExecuteOperationsArguments = record {
   session_id: SessionId;
-  operations: vec BatchOperationKind;
+  operations: vec Operation;
   // Set on the last call of a sync: once all operations are applied, the
   // canister finalizes the sync and returns to "no ongoing sync".
   is_final: bool;

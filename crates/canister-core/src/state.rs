@@ -6,7 +6,6 @@
 
 use crate::{
     asset::{on_asset_change, Asset, AssetEncoding},
-    batch::{Chunk, SyncSession},
     certification::{AssetKey, CertifiedResponses},
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -14,6 +13,7 @@ use crate::{
     },
     rc_bytes::RcBytes,
     stable::StableState,
+    sync::{Chunk, SyncSession},
     types::*,
     url::url_decode,
 };

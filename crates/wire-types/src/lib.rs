@@ -98,7 +98,7 @@ pub struct SetRedirectRulesArguments {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
-pub enum BatchOperationKind {
+pub enum Operation {
     CreateAsset(CreateAssetArguments),
     SetAssetContent(SetAssetContentArguments),
     UnsetAssetContent(UnsetAssetContentArguments),
@@ -110,7 +110,7 @@ pub enum BatchOperationKind {
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct ExecuteOperationsArguments {
     pub session_id: SessionId,
-    pub operations: Vec<BatchOperationKind>,
+    pub operations: Vec<Operation>,
     /// Set on the last call of a sync. When all operations have been applied,
     /// the canister finalizes the sync and returns to the "no ongoing sync"
     /// state. Non-final calls keep the session open for further operations.

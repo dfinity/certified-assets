@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use crate::canister::{
     authorize_via_proxy, bundle_tag, can_sync, execute_operations, list_all_assets,
-    list_all_redirect_rules, start_sync, upload_chunks, AssetDetails, BatchOperationKind,
-    CanisterCall, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
+    list_all_redirect_rules, start_sync, upload_chunks, AssetDetails, CanisterCall,
+    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, Operation,
     RedirectRule, SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments,
     UnsetAssetContentArguments,
 };
@@ -458,7 +458,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
 fn execute_in_stages<C: CanisterCall>(
     canister: &C,
     session_id: u64,
-    operations: Vec<BatchOperationKind>,
+    operations: Vec<Operation>,
 ) -> Result<(), String> {
     let groups = split_operation_groups(operations);
     // The caller only reaches this with a non-empty diff, so there is always at
@@ -516,12 +516,12 @@ fn execute_in_stages<C: CanisterCall>(
 ///
 /// An operation whose own header size exceeds the budget gets a group
 /// to itself — better to ship it alone than to drop it on the floor.
-fn split_operation_groups(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchOperationKind>> {
+fn split_operation_groups(operations: Vec<Operation>) -> Vec<Vec<Operation>> {
     const MAX_OPERATIONS_PER_GROUP: usize = 500;
     const MAX_HEADER_BYTES_PER_GROUP: usize = 1_500_000;
 
-    let mut groups: Vec<Vec<BatchOperationKind>> = Vec::new();
-    let mut current: Vec<BatchOperationKind> = Vec::new();
+    let mut groups: Vec<Vec<Operation>> = Vec::new();
+    let mut current: Vec<Operation> = Vec::new();
     let mut header_bytes: usize = 0;
 
     for op in operations {
@@ -550,17 +550,17 @@ fn split_operation_groups(operations: Vec<BatchOperationKind>) -> Vec<Vec<BatchO
 /// - `SetRedirectRules` — each 3xx rule inlines its resolved headers
 ///   (3xx rules synthesise their own response, so there's no target
 ///   asset to inherit headers from). Summed across all rules.
-fn header_bytes_of(op: &BatchOperationKind) -> usize {
+fn header_bytes_of(op: &Operation) -> usize {
     fn sum(headers: &[(String, String)]) -> usize {
         headers.iter().map(|(k, v)| k.len() + v.len()).sum()
     }
     match op {
-        BatchOperationKind::CreateAsset(a) => sum(&a.headers),
-        BatchOperationKind::SetAssetHeaders(a) => sum(&a.headers),
-        BatchOperationKind::SetRedirectRules(a) => a.rules.iter().map(|r| sum(&r.headers)).sum(),
-        BatchOperationKind::DeleteAsset(_)
-        | BatchOperationKind::UnsetAssetContent(_)
-        | BatchOperationKind::SetAssetContent(_) => 0,
+        Operation::CreateAsset(a) => sum(&a.headers),
+        Operation::SetAssetHeaders(a) => sum(&a.headers),
+        Operation::SetRedirectRules(a) => a.rules.iter().map(|r| sum(&r.headers)).sum(),
+        Operation::DeleteAsset(_)
+        | Operation::UnsetAssetContent(_)
+        | Operation::SetAssetContent(_) => 0,
     }
 }
 
@@ -570,7 +570,7 @@ fn build_operations(
     project_rules: &[RedirectRule],
     canister_rules: &[RedirectRule],
     project_header_rules: &[HeaderRule],
-) -> Vec<BatchOperationKind> {
+) -> Vec<Operation> {
     let mut ops = Vec::new();
     let mut canister_assets = canister_assets.clone();
 
@@ -583,7 +583,7 @@ fn build_operations(
             Some(pa) => pa.media_type.to_string() != ca.content_type,
         };
         if should_delete {
-            ops.push(BatchOperationKind::DeleteAsset(DeleteAssetArguments {
+            ops.push(Operation::DeleteAsset(DeleteAssetArguments {
                 key: key.clone(),
             }));
             to_remove.push(key.clone());
@@ -598,7 +598,7 @@ fn build_operations(
     //    each new key.
     for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
-            ops.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
+            ops.push(Operation::CreateAsset(CreateAssetArguments {
                 key: key.clone(),
                 content_type: pa.media_type.to_string(),
                 headers: headers::resolve(key, project_header_rules),
@@ -611,12 +611,10 @@ fn build_operations(
         if let Some(pa) = project_assets.get(key) {
             for enc in &ca.encodings {
                 if !pa.encodings.contains_key(&enc.content_encoding) {
-                    ops.push(BatchOperationKind::UnsetAssetContent(
-                        UnsetAssetContentArguments {
-                            key: key.clone(),
-                            content_encoding: enc.content_encoding.clone(),
-                        },
-                    ));
+                    ops.push(Operation::UnsetAssetContent(UnsetAssetContentArguments {
+                        key: key.clone(),
+                        content_encoding: enc.content_encoding.clone(),
+                    }));
                 }
             }
         }
@@ -628,14 +626,12 @@ fn build_operations(
             if enc.already_in_place {
                 continue;
             }
-            ops.push(BatchOperationKind::SetAssetContent(
-                SetAssetContentArguments {
-                    key: key.clone(),
-                    content_encoding: encoding.clone(),
-                    chunk_ids: enc.chunk_ids.clone(),
-                    sha256: ByteBuf::from(enc.sha256.clone()),
-                },
-            ));
+            ops.push(Operation::SetAssetContent(SetAssetContentArguments {
+                key: key.clone(),
+                content_encoding: encoding.clone(),
+                chunk_ids: enc.chunk_ids.clone(),
+                sha256: ByteBuf::from(enc.sha256.clone()),
+            }));
         }
     }
 
@@ -669,11 +665,9 @@ fn build_operations(
         })
         .collect();
     if project_rules_with_headers != canister_rules {
-        ops.push(BatchOperationKind::SetRedirectRules(
-            SetRedirectRulesArguments {
-                rules: project_rules_with_headers,
-            },
-        ));
+        ops.push(Operation::SetRedirectRules(SetRedirectRulesArguments {
+            rules: project_rules_with_headers,
+        }));
     }
 
     ops
@@ -722,7 +716,7 @@ fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
 // `SetAssetHeaders` op for an asset whose headers are already being set
 // by `CreateAssetArguments` in this same batch.
 fn update_headers(
-    ops: &mut Vec<BatchOperationKind>,
+    ops: &mut Vec<Operation>,
     project_assets: &HashMap<String, ProjectAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
     project_header_rules: &[HeaderRule],
@@ -738,12 +732,10 @@ fn update_headers(
         let resolved = headers::resolve(key, project_header_rules);
 
         if canister_asset.headers != resolved {
-            ops.push(BatchOperationKind::SetAssetHeaders(
-                SetAssetHeadersArguments {
-                    key: key.clone(),
-                    headers: resolved,
-                },
-            ));
+            ops.push(Operation::SetAssetHeaders(SetAssetHeadersArguments {
+                key: key.clone(),
+                headers: resolved,
+            }));
         }
     }
 }
@@ -764,9 +756,7 @@ fn load_header_rules(dir: &str) -> Result<Vec<HeaderRule>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canister::{
-        AssetDetails, AssetEncodingDetails, BatchOperationKind, CallType, CanisterCall,
-    };
+    use crate::canister::{AssetDetails, AssetEncodingDetails, CallType, CanisterCall, Operation};
     use candid::{CandidType, Principal};
     use serde::de::DeserializeOwned;
     use std::cell::RefCell;
@@ -950,19 +940,19 @@ mod tests {
 
     // ── execute_operations splitting ──────────────────────────────────────────────
 
-    fn create_asset_with_headers(key: &str, hdr_bytes: usize) -> BatchOperationKind {
+    fn create_asset_with_headers(key: &str, hdr_bytes: usize) -> Operation {
         // One header whose name+value bytes sum to `hdr_bytes`.
         let name = "X-Pad".to_string();
         let value = "a".repeat(hdr_bytes.saturating_sub(name.len()));
-        BatchOperationKind::CreateAsset(CreateAssetArguments {
+        Operation::CreateAsset(CreateAssetArguments {
             key: key.to_string(),
             content_type: "text/plain".to_string(),
             headers: vec![(name, value)],
         })
     }
 
-    fn set_content_op(key: &str) -> BatchOperationKind {
-        BatchOperationKind::SetAssetContent(SetAssetContentArguments {
+    fn set_content_op(key: &str) -> Operation {
+        Operation::SetAssetContent(SetAssetContentArguments {
             key: key.to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids: vec![0u64],
@@ -980,18 +970,16 @@ mod tests {
     fn header_bytes_of_returns_zero_for_headerless_kinds() {
         assert_eq!(header_bytes_of(&set_content_op("/k")), 0);
         assert_eq!(
-            header_bytes_of(&BatchOperationKind::DeleteAsset(DeleteAssetArguments {
+            header_bytes_of(&Operation::DeleteAsset(DeleteAssetArguments {
                 key: "/k".to_string(),
             })),
             0
         );
         assert_eq!(
-            header_bytes_of(&BatchOperationKind::UnsetAssetContent(
-                UnsetAssetContentArguments {
-                    key: "/k".to_string(),
-                    content_encoding: "identity".to_string(),
-                }
-            )),
+            header_bytes_of(&Operation::UnsetAssetContent(UnsetAssetContentArguments {
+                key: "/k".to_string(),
+                content_encoding: "identity".to_string(),
+            })),
             0
         );
     }
@@ -1019,7 +1007,7 @@ mod tests {
                 headers: vec![("X-B".into(), "22".into())], // 5 bytes
             },
         ];
-        let op = BatchOperationKind::SetRedirectRules(SetRedirectRulesArguments { rules });
+        let op = Operation::SetRedirectRules(SetRedirectRulesArguments { rules });
         assert_eq!(header_bytes_of(&op), 9);
     }
 
@@ -1031,7 +1019,7 @@ mod tests {
     #[test]
     fn split_operation_groups_small_input_stays_single_group() {
         // 100 small ops with tiny headers → fits both budgets in one group.
-        let ops: Vec<BatchOperationKind> = (0..100)
+        let ops: Vec<Operation> = (0..100)
             .map(|i| create_asset_with_headers(&format!("/f{i}"), 10))
             .collect();
         let groups = split_operation_groups(ops);
@@ -1043,7 +1031,7 @@ mod tests {
     fn split_operation_groups_splits_at_500_ops() {
         // 1200 headerless ops should split into 500/500/200 — three groups
         // driven purely by the operation-count cap.
-        let ops: Vec<BatchOperationKind> = (0..1200)
+        let ops: Vec<Operation> = (0..1200)
             .map(|i| set_content_op(&format!("/f{i}")))
             .collect();
         let groups = split_operation_groups(ops);
@@ -1057,7 +1045,7 @@ mod tests {
     fn split_operation_groups_splits_at_header_budget() {
         // 4 ops × 500 KB headers = 2 MB > 1.5 MB cap. Split happens before
         // the 500-op cap could kick in.
-        let ops: Vec<BatchOperationKind> = (0..4)
+        let ops: Vec<Operation> = (0..4)
             .map(|i| create_asset_with_headers(&format!("/f{i}"), 500_000))
             .collect();
         let groups = split_operation_groups(ops);
@@ -1130,8 +1118,7 @@ mod tests {
     fn execute_in_stages_single_group_is_final() {
         // Small enough to fit in one group → one execute_operations call
         // carrying the real session id and flagged final.
-        let ops: Vec<BatchOperationKind> =
-            (0..10).map(|i| set_content_op(&format!("/f{i}"))).collect();
+        let ops: Vec<Operation> = (0..10).map(|i| set_content_op(&format!("/f{i}"))).collect();
         let mock = CommitRecorder::new();
         execute_in_stages(&mock, 42, ops).unwrap();
         let calls = mock.calls.borrow();
@@ -1143,7 +1130,7 @@ mod tests {
     fn execute_in_stages_multi_group_flags_only_last_final() {
         // 1200 ops → three 500/500/200 groups, all carrying the real session
         // id; only the last is flagged final (which finalizes the sync).
-        let ops: Vec<BatchOperationKind> = (0..1200)
+        let ops: Vec<Operation> = (0..1200)
             .map(|i| set_content_op(&format!("/f{i}")))
             .collect();
         let mock = CommitRecorder::new();
@@ -1230,18 +1217,15 @@ mod tests {
         (k, details)
     }
 
-    fn count_op(ops: &[BatchOperationKind], kind: &str) -> usize {
+    fn count_op(ops: &[Operation], kind: &str) -> usize {
         ops.iter()
             .filter(|op| {
                 matches!(
                     (op, kind),
-                    (BatchOperationKind::DeleteAsset(_), "DeleteAsset")
-                        | (BatchOperationKind::CreateAsset(_), "CreateAsset")
-                        | (BatchOperationKind::SetAssetContent(_), "SetAssetContent")
-                        | (
-                            BatchOperationKind::UnsetAssetContent(_),
-                            "UnsetAssetContent"
-                        )
+                    (Operation::DeleteAsset(_), "DeleteAsset")
+                        | (Operation::CreateAsset(_), "CreateAsset")
+                        | (Operation::SetAssetContent(_), "SetAssetContent")
+                        | (Operation::UnsetAssetContent(_), "UnsetAssetContent")
                 )
             })
             .count()
@@ -1392,9 +1376,9 @@ mod tests {
         }
     }
 
-    fn set_rules_op(ops: &[BatchOperationKind]) -> Option<&[RedirectRule]> {
+    fn set_rules_op(ops: &[Operation]) -> Option<&[RedirectRule]> {
         ops.iter().find_map(|op| match op {
-            BatchOperationKind::SetRedirectRules(args) => Some(args.rules.as_slice()),
+            Operation::SetRedirectRules(args) => Some(args.rules.as_slice()),
             _ => None,
         })
     }
@@ -1628,7 +1612,7 @@ mod tests {
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
         assert!(!ops.iter().any(|op| matches!(
             op,
-            BatchOperationKind::SetAssetContent(a) if a.content_encoding == "gzip"
+            Operation::SetAssetContent(a) if a.content_encoding == "gzip"
         )));
     }
 
@@ -1643,7 +1627,7 @@ mod tests {
         let create_op = ops
             .iter()
             .find_map(|op| {
-                if let BatchOperationKind::CreateAsset(a) = op {
+                if let Operation::CreateAsset(a) = op {
                     Some(a)
                 } else {
                     None
@@ -1655,11 +1639,11 @@ mod tests {
     }
 
     fn set_header_ops(
-        ops: &[BatchOperationKind],
+        ops: &[Operation],
     ) -> std::collections::BTreeMap<&str, &SetAssetHeadersArguments> {
         ops.iter()
             .filter_map(|op| match op {
-                BatchOperationKind::SetAssetHeaders(a) => Some((a.key.as_str(), a)),
+                Operation::SetAssetHeaders(a) => Some((a.key.as_str(), a)),
                 _ => None,
             })
             .collect()
@@ -1768,7 +1752,7 @@ mod tests {
         let create_op = ops
             .iter()
             .find_map(|op| match op {
-                BatchOperationKind::CreateAsset(a) => Some(a),
+                Operation::CreateAsset(a) => Some(a),
                 _ => None,
             })
             .expect("CreateAsset op");
@@ -1790,7 +1774,7 @@ mod tests {
         let create_op = ops
             .iter()
             .find_map(|op| match op {
-                BatchOperationKind::CreateAsset(a) => Some(a),
+                Operation::CreateAsset(a) => Some(a),
                 _ => None,
             })
             .expect("CreateAsset op");

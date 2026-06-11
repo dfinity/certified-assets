@@ -13,10 +13,10 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 pub use wire_types::{
-    AssetDetails, AssetEncodingDetails, BatchOperationKind, CancelSyncArguments,
-    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, RedirectRule,
-    RulePattern, SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments,
-    StartSyncResult, UnsetAssetContentArguments, UploadChunksArguments,
+    AssetDetails, AssetEncodingDetails, CancelSyncArguments, CreateAssetArguments,
+    DeleteAssetArguments, ExecuteOperationsArguments, Operation, RedirectRule, RulePattern,
+    SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
+    UnsetAssetContentArguments, UploadChunksArguments,
 };
 
 #[derive(Debug, Clone, Copy)]

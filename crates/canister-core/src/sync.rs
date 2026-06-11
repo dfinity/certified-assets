@@ -17,7 +17,7 @@ use crate::redirect;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    BatchOperationKind, CancelSyncArguments, ExecuteOperationsArguments, SessionId,
+    CancelSyncArguments, ExecuteOperationsArguments, Operation, SessionId,
     SetAssetContentArguments, StartSyncResult, UploadChunksArguments,
 };
 use candid::Principal;
@@ -195,10 +195,10 @@ impl State {
                         self.chunks.clear();
                     }
                     self.certify_404_if_required();
-                    // Asset ops in this batch may have clobbered tree entries
+                    // Asset ops in this call may have clobbered tree entries
                     // that redirect rules own (any rule whose source path
                     // collides with an asset's `<$>` slot). Re-cert them so
-                    // the batch ends with a consistent rule tree.
+                    // the call ends with a consistent rule tree.
                     self.on_redirect_rules_change();
 
                     return ComputationStatus::Done(());
@@ -206,8 +206,8 @@ impl State {
 
                 let op = &arg.operations[operation_index];
                 let result = match op {
-                    BatchOperationKind::CreateAsset(arg) => self.create_asset(arg.clone()),
-                    BatchOperationKind::SetAssetContent(arg) => {
+                    Operation::CreateAsset(arg) => self.create_asset(arg.clone()),
+                    Operation::SetAssetContent(arg) => {
                         if !self.assets.contains_key(&arg.key) {
                             return ComputationStatus::Error("asset not found".to_string());
                         }
@@ -248,15 +248,13 @@ impl State {
                         };
                         return ComputationStatus::InProgress(progress);
                     }
-                    BatchOperationKind::UnsetAssetContent(arg) => {
-                        self.unset_asset_content(arg.clone())
-                    }
-                    BatchOperationKind::DeleteAsset(arg) => {
+                    Operation::UnsetAssetContent(arg) => self.unset_asset_content(arg.clone()),
+                    Operation::DeleteAsset(arg) => {
                         self.delete_asset(arg.clone());
                         Ok(())
                     }
-                    BatchOperationKind::SetAssetHeaders(arg) => self.set_asset_headers(arg.clone()),
-                    BatchOperationKind::SetRedirectRules(arg) => {
+                    Operation::SetAssetHeaders(arg) => self.set_asset_headers(arg.clone()),
+                    Operation::SetRedirectRules(arg) => {
                         // Validate every rule before mutating state so a single
                         // bad rule fails the whole op with no partial update.
                         let mut validation: Result<(), String> = Ok(());
