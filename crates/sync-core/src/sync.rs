@@ -1574,7 +1574,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
 
-        let mut canister_rules = crate::html_handling::synthesize(&[not_found::ROOT_404_KEY.into()]);
+        let mut canister_rules =
+            crate::html_handling::synthesize(&[not_found::ROOT_404_KEY.into()]);
         canister_rules.push(mk_rule(
             crate::canister::RulePattern::Exact("/old".into()),
             "/new",
@@ -2228,7 +2229,8 @@ mod tests {
         // /404.html (which the `/*` _headers rule also covers) plus its
         // html-handling rules and the `/*` catch-all; the canister must already
         // hold all of it for the short-circuit to fire.
-        let header_rules = crate::headers::parse(std::str::from_utf8(headers_file).unwrap()).unwrap();
+        let header_rules =
+            crate::headers::parse(std::str::from_utf8(headers_file).unwrap()).unwrap();
         let mut synth = crate::html_handling::synthesize(&[not_found::ROOT_404_KEY.into()]);
         synth.push(not_found::catchall_rule());
         // The canister stores rules with `_headers` resolved into 3xx rules, so

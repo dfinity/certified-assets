@@ -2346,7 +2346,9 @@ mod redirect_rules {
         // Remove all rules → the certified built-in 404 returns.
         commit(
             &mut state,
-            vec![Operation::SetRedirectRules(SetRedirectRulesArguments { rules: vec![] })],
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![],
+            })],
         )
         .unwrap();
         let after = certified_http_request(&state, RequestBuilder::get("/missing").build());
