@@ -138,18 +138,20 @@ pub enum StartSyncResult {
 }
 
 /// Stage content chunks under a sync. The plugin moves chunk bytes into
-/// `content` (owned `ByteBuf`); the canister receives the same shape. Candid
+/// `chunks` (owned `ByteBuf`); the canister receives the same shape. Candid
 /// copies the bytes into the message buffer on encode either way, so owning
 /// here costs nothing over a borrow.
+///
+/// The call returns nothing: chunk ids are not sent over the wire. Within a
+/// sync the canister numbers staged chunks 0, 1, 2, … in arrival order, and
+/// because uploads are issued one call at a time the plugin reproduces the same
+/// numbering locally (see `pack_and_upload_chunks` in `sync-core`). Both ends
+/// must keep that numbering in lockstep; if uploads are ever parallelized this
+/// implicit agreement breaks and the ids must be exchanged explicitly again.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
-pub struct CreateChunksArguments {
+pub struct UploadChunksArguments {
     pub session_id: SessionId,
-    pub content: Vec<ByteBuf>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
-pub struct CreateChunksResponse {
-    pub chunk_ids: Vec<ChunkId>,
+    pub chunks: Vec<ByteBuf>,
 }
 
 /// One encoding of an asset, as the `get_asset_details` query reports it.

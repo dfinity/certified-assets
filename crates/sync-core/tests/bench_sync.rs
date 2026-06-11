@@ -16,8 +16,7 @@
 //! Tests are `#[ignore]`'d so they don't slow down the regular suite.
 
 use candid::{CandidType, Decode, Encode, Principal};
-use serde::Deserialize;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 use sync_core::canister::{AssetDetails, CallType, CanisterCall, RedirectRule};
@@ -36,20 +35,6 @@ enum StartSyncOk {
         idle_for_secs: u64,
     },
 }
-#[derive(CandidType)]
-struct CreateChunksOk {
-    chunk_ids: Vec<u64>,
-}
-
-// Wire-compatible mirror of CreateChunksRequest so the mock can count chunks
-// submitted per call and return one id per chunk — works whether the plugin
-// sends a single chunk per call (today) or batches many (after optimisation).
-#[derive(CandidType, Deserialize)]
-struct CreateChunksReqMirror {
-    #[allow(dead_code)]
-    session_id: u64,
-    content: Vec<serde_bytes::ByteBuf>,
-}
 
 /// Records every canister call (method, Candid arg bytes) and auto-responds
 /// with empty/default values — i.e. a first-time deploy against a fresh
@@ -58,14 +43,12 @@ struct BenchMock {
     /// Per-method `(call_count, total_arg_bytes)`. BTreeMap so the printed
     /// report is stable across runs.
     stats: RefCell<BTreeMap<String, (u64, u64)>>,
-    next_chunk_id: Cell<u64>,
 }
 
 impl BenchMock {
     fn new() -> Self {
         Self {
             stats: RefCell::new(BTreeMap::new()),
-            next_chunk_id: Cell::new(0),
         }
     }
 
@@ -104,15 +87,7 @@ impl CanisterCall for BenchMock {
             "get_asset_details" => Encode!(&Vec::<AssetDetails>::new()),
             "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
             "start_sync" => Encode!(&StartSyncOk::Started { session_id: 1 }),
-            "create_chunks" => {
-                let req = Decode!(&arg_bytes, CreateChunksReqMirror)
-                    .map_err(|e| format!("decode create_chunks req: {e}"))?;
-                let n = req.content.len() as u64;
-                let start = self.next_chunk_id.get();
-                self.next_chunk_id.set(start + n);
-                let ids: Vec<u64> = (0..n).map(|i| start + i).collect();
-                Encode!(&CreateChunksOk { chunk_ids: ids })
-            }
+            "upload_chunks" => Encode!(&()),
             "execute_operations" => Encode!(&()),
             // The bench drives sync() in direct mode, which checks can_sync up
             // front; report the identity as allowed so it proceeds.
@@ -161,7 +136,7 @@ fn run_bench(label: &str, count: usize, size_bytes: usize) {
 // ── Fixtures ────────────────────────────────────────────────────────────────
 //
 // Sized to exercise the three regimes the optimisations target:
-//  - many small files  → most calls today are `create_chunks` for sub-MAX
+//  - many small files  → most calls today are `upload_chunks` for sub-MAX
 //    chunks; chunk-batching should collapse the count
 //  - few medium files  → mix of multi-chunk uploads + single trailing chunk;
 //    last_chunk inlining should remove the trailing-chunk call

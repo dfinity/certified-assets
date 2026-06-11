@@ -11,7 +11,7 @@ use crate::types::{
     StartSyncResult,
 };
 use crate::url::{url_decode, UrlDecodeError};
-use crate::CreateChunksArguments;
+use crate::UploadChunksArguments;
 use candid::{Nat, Principal};
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
@@ -275,14 +275,13 @@ fn assemble_create_assets_and_set_contents_operations(
         }));
 
         for (enc, chunks) in asset.encodings {
-            let chunk_ids = state
-                .create_chunks(
-                    CreateChunksArguments {
-                        session_id,
-                        content: chunks,
-                    },
-                    system_context,
-                )
+            // Chunk ids are not returned; they're the slot indices the canister
+            // assigns in upload order. Mirror that: ids run from the current
+            // staging length for as many chunks as we upload.
+            let base = state.chunks.len() as u64;
+            let chunk_ids: Vec<u64> = (base..base + chunks.len() as u64).collect();
+            state
+                .upload_chunks(UploadChunksArguments { session_id, chunks }, system_context)
                 .unwrap();
 
             operations.push(BatchOperationKind::SetAssetContent({
@@ -332,10 +331,10 @@ fn can_create_assets_using_batch_api() {
     // The finalizing execute_operations ended the sync, so the session id is no
     // longer valid for further chunk uploads.
     let error_msg = state
-        .create_chunks(
-            CreateChunksArguments {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id,
-                content: vec![ByteBuf::new()],
+                chunks: vec![ByteBuf::new()],
             },
             &system_context,
         )
@@ -569,10 +568,10 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     state
-        .create_chunks(
-            CreateChunksArguments {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id: id1,
-                content: vec![ByteBuf::from(BODY.to_vec())],
+                chunks: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -592,10 +591,10 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
 
     // The old session id is no longer valid.
     let err = state
-        .create_chunks(
-            CreateChunksArguments {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id: id1,
-                content: vec![ByteBuf::from(BODY.to_vec())],
+                chunks: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -614,10 +613,10 @@ fn cancel_sync_releases_the_lock_for_the_owner_only() {
 
     const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
     state
-        .create_chunks(
-            CreateChunksArguments {
+        .upload_chunks(
+            UploadChunksArguments {
                 session_id,
-                content: vec![ByteBuf::from(BODY.to_vec())],
+                chunks: vec![ByteBuf::from(BODY.to_vec())],
             },
             &system_context,
         )
@@ -1602,12 +1601,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArguments {
-                    session_id,
-                    content: vec![ByteBuf::from(CONTENT)],
-                },
+        let chunks = vec![ByteBuf::from(CONTENT)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
@@ -1643,12 +1641,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArguments {
-                    session_id,
-                    content: vec![ByteBuf::from(CONTENT)],
-                },
+        let chunks = vec![ByteBuf::from(CONTENT)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
@@ -1684,12 +1681,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArguments {
-                    session_id,
-                    content: vec![ByteBuf::from(CONTENT)],
-                },
+        let chunks = vec![ByteBuf::from(CONTENT)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
@@ -1745,12 +1741,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunks
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArguments {
-                    session_id,
-                    content: vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
-                },
+        let chunks = vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();
@@ -1790,12 +1785,11 @@ mod set_asset_content_sha256_verification {
 
         // Create batch and chunk
         let session_id = start_session(&mut state, &system_context);
-        let chunk_ids = state
-            .create_chunks(
-                CreateChunksArguments {
-                    session_id,
-                    content: vec![ByteBuf::from(CHUNK_1)],
-                },
+        let chunks = vec![ByteBuf::from(CHUNK_1)];
+        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
+        state
+            .upload_chunks(
+                UploadChunksArguments { session_id, chunks },
                 &system_context,
             )
             .unwrap();

@@ -36,8 +36,13 @@ pub struct State {
     // `range` seek — instead of sorting the whole keyspace on every query.
     pub(crate) assets: BTreeMap<AssetKey, Asset>,
 
-    pub(crate) chunks: HashMap<ChunkId, Chunk>,
-    pub(crate) next_chunk_id: ChunkId,
+    // Chunks staged by `upload_chunks` for the current sync, in upload order:
+    // the slot index is the chunk id (`ChunkId`). `SetAssetContent` `take()`s
+    // each slot as it consumes the bytes, leaving a `None` hole, so memory is
+    // freed incrementally without renumbering the surviving slots. Cleared on
+    // sync start/finish. The plugin reproduces these same indices locally, so
+    // they are never sent over the wire.
+    pub(crate) chunks: Vec<Option<Chunk>>,
 
     /// The single in-progress sync, if any. At most one runs at a time.
     pub(crate) sync_session: Option<SyncSession>,
@@ -112,9 +117,13 @@ impl State {
         }
 
         let mut content_chunks = vec![];
-        for chunk_id in arg.chunk_ids.iter() {
-            let chunk = self.chunks.remove(chunk_id).expect("chunk not found");
-            content_chunks.push(chunk.content);
+        for &chunk_id in arg.chunk_ids.iter() {
+            let chunk = self
+                .chunks
+                .get_mut(chunk_id as usize)
+                .and_then(Option::take)
+                .expect("chunk not found");
+            content_chunks.push(chunk);
         }
         if let Some(encoding_content) = arg.last_chunk.clone() {
             content_chunks.push(encoding_content.into());

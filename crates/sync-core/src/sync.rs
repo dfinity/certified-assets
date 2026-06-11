@@ -10,10 +10,10 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use crate::canister::{
-    authorize_via_proxy, bundle_tag, can_sync, create_chunks, execute_operations, list_all_assets,
-    list_all_redirect_rules, start_sync, AssetDetails, BatchOperationKind, CanisterCall,
-    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, RedirectRule,
-    SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
+    authorize_via_proxy, bundle_tag, can_sync, execute_operations, list_all_assets,
+    list_all_redirect_rules, start_sync, upload_chunks, AssetDetails, BatchOperationKind,
+    CanisterCall, CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments,
+    RedirectRule, SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
     UnsetAssetContentArguments,
 };
 use crate::content::{encoders_for, Content, Encoder};
@@ -321,16 +321,21 @@ fn encoding_suffix(encoding: &str) -> String {
 }
 
 /// Pack-and-upload pass: collect every chunk from every not-yet-uploaded
-/// encoding across all assets, then ship them in `create_chunks` calls of up
+/// encoding across all assets, then ship them in `upload_chunks` calls of up
 /// to `MAX_CHUNK_SIZE` total bytes each.
 ///
 /// This is where the wall-clock win lives versus the old "one chunk per call"
 /// pattern: a project of 100 small files used to make 100 round-trips; now
 /// they ride in a single call (≈1.9 MB budget).
 ///
+/// Chunk ids are not returned over the wire. The canister numbers staged chunks
+/// 0, 1, 2, … per sync in the order it receives them, so we assign the same ids
+/// here as we hand each chunk off. This only holds because uploads are issued
+/// one call at a time, in order — if this loop is ever parallelized, the
+/// canister must echo the ids back again (see `upload_chunks` / `UploadChunksArguments`).
+///
 /// Routing is by `(asset_key, encoding, chunk_index)`: each `PendingChunk`
-/// remembers where its eventual canister id should land in
-/// `enc.chunk_ids[chunk_index]`.
+/// remembers where its inferred id should land in `enc.chunk_ids[chunk_index]`.
 fn pack_and_upload_chunks<C: CanisterCall>(
     canister: &C,
     session_id: u64,
@@ -382,6 +387,11 @@ fn pack_and_upload_chunks<C: CanisterCall>(
     let total_chunks = pending.len();
     let mut total_calls = 0usize;
     let mut total_bytes = 0u64;
+    // The canister assigns ids 0, 1, 2, … across the whole sync in the order it
+    // receives chunks. We send batches sequentially and, within each batch, in
+    // `content` order — so mirroring that running counter here yields the same
+    // ids the canister will, without a wire round-trip.
+    let mut next_id: u64 = 0;
 
     while !pending.is_empty() {
         let mut batch: Vec<PendingChunk> = Vec::new();
@@ -405,18 +415,13 @@ fn pack_and_upload_chunks<C: CanisterCall>(
             .iter_mut()
             .map(|p| ByteBuf::from(std::mem::take(&mut p.data)))
             .collect();
-        let ids = create_chunks(canister, session_id, content)?;
-        if ids.len() != batch.len() {
-            return Err(format!(
-                "create_chunks returned {} ids for {} chunks",
-                ids.len(),
-                batch.len()
-            ));
-        }
+        upload_chunks(canister, session_id, content)?;
         total_calls += 1;
         total_bytes += batch_size as u64;
 
-        for (p, id) in batch.into_iter().zip(ids) {
+        // Assign ids in the same order the bytes were placed in `content`, so
+        // they match the canister's arrival-order numbering.
+        for p in &batch {
             let asset = project_assets
                 .get_mut(&p.asset_key)
                 .expect("asset present (collected above)");
@@ -424,7 +429,8 @@ fn pack_and_upload_chunks<C: CanisterCall>(
                 .encodings
                 .get_mut(&p.encoding)
                 .expect("encoding present (collected above)");
-            enc.chunk_ids[p.chunk_index] = id;
+            enc.chunk_ids[p.chunk_index] = next_id;
+            next_id += 1;
         }
     }
 
@@ -776,40 +782,32 @@ mod tests {
     };
     use candid::{CandidType, Principal};
     use serde::de::DeserializeOwned;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
 
-    // Mirrors the private CreateChunksResponse — same field name produces the same Candid encoding.
-    #[derive(CandidType)]
-    struct MockChunksResponse {
-        chunk_ids: Vec<u64>,
-    }
-
-    // Counts each `create_chunks` call, returns one fresh id per chunk in the
-    // request, and records the batch sizes the packer produced. Used to verify
-    // that `pack_and_upload_chunks` collapses many small chunks into single
-    // calls and assigns canister ids to the right encoding slots.
+    // Records the batch sizes the packer produced (chunks per `upload_chunks`
+    // call). Used to verify that `pack_and_upload_chunks` collapses many small
+    // chunks into single calls and assigns ids to the right encoding slots. The
+    // call returns unit; the plugin infers ids locally, so the mock doesn't.
     struct ChunkBatchRecorder {
-        next_id: Cell<u64>,
         batches: RefCell<Vec<usize>>, // chunks-per-batch
     }
 
     impl ChunkBatchRecorder {
         fn new() -> Self {
             Self {
-                next_id: Cell::new(0),
                 batches: RefCell::new(Vec::new()),
             }
         }
     }
 
-    // Mirror of CreateChunksArguments so the mock can introspect arg.content.len().
+    // Mirror of UploadChunksArguments so the mock can introspect arg.chunks.len().
     #[derive(CandidType, serde::Deserialize)]
     struct ChunksReqMirror {
         #[allow(dead_code)]
         session_id: u64,
-        content: Vec<serde_bytes::ByteBuf>,
+        chunks: Vec<serde_bytes::ByteBuf>,
     }
 
     impl CanisterCall for ChunkBatchRecorder {
@@ -818,16 +816,11 @@ mod tests {
             A: CandidType,
             R: CandidType + DeserializeOwned,
         {
-            assert_eq!(method, "create_chunks");
+            assert_eq!(method, "upload_chunks");
             let bytes = candid::encode_one(&arg).map_err(|e| e.to_string())?;
             let req: ChunksReqMirror = candid::decode_one(&bytes).map_err(|e| e.to_string())?;
-            let n = req.content.len();
-            self.batches.borrow_mut().push(n);
-            let start = self.next_id.get();
-            self.next_id.set(start + n as u64);
-            let ids: Vec<u64> = (0..n as u64).map(|i| start + i).collect();
-            let reply = candid::encode_one(MockChunksResponse { chunk_ids: ids })
-                .map_err(|e| e.to_string())?;
+            self.batches.borrow_mut().push(req.chunks.len());
+            let reply = candid::encode_one(()).map_err(|e| e.to_string())?;
             candid::decode_one(&reply).map_err(|e| e.to_string())
         }
     }
@@ -2205,12 +2198,7 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
-        mock.push_ok(
-            "create_chunks",
-            MockChunksResponse {
-                chunk_ids: vec![0u64],
-            },
-        );
+        mock.push_ok("upload_chunks", ());
         mock.push_ok("execute_operations", ());
 
         let result = sync(

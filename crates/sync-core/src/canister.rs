@@ -14,10 +14,9 @@ use std::collections::HashMap;
 
 pub use wire_types::{
     AssetDetails, AssetEncodingDetails, BatchOperationKind, CancelSyncArguments,
-    CreateAssetArguments, CreateChunksArguments, CreateChunksResponse, DeleteAssetArguments,
-    ExecuteOperationsArguments, RedirectRule, RulePattern, SetAssetContentArguments,
-    SetAssetPropertiesArguments, SetRedirectRulesArguments, StartSyncResult,
-    UnsetAssetContentArguments,
+    CreateAssetArguments, DeleteAssetArguments, ExecuteOperationsArguments, RedirectRule,
+    RulePattern, SetAssetContentArguments, SetAssetPropertiesArguments, SetRedirectRulesArguments,
+    StartSyncResult, UnsetAssetContentArguments, UploadChunksArguments,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -100,17 +99,17 @@ pub fn start_sync(c: &impl CanisterCall) -> Result<u64, String> {
 /// Candid copies them into the request buffer on encode regardless, so moving
 /// them in (rather than borrowing) costs nothing and lets the caller hand off
 /// its buffers directly.
-pub fn create_chunks(
+///
+/// Returns nothing: the canister numbers staged chunks 0, 1, 2, … per sync in
+/// arrival order, and the caller reproduces the same ids locally rather than
+/// receiving them over the wire (see `pack_and_upload_chunks`).
+pub fn upload_chunks(
     c: &impl CanisterCall,
     session_id: u64,
-    content: Vec<ByteBuf>,
-) -> Result<Vec<u64>, String> {
-    let req = CreateChunksArguments {
-        session_id,
-        content,
-    };
-    let resp: CreateChunksResponse = c.call("create_chunks", req, CallType::Update, true)?;
-    Ok(resp.chunk_ids)
+    chunks: Vec<ByteBuf>,
+) -> Result<(), String> {
+    let req = UploadChunksArguments { session_id, chunks };
+    c.call("upload_chunks", req, CallType::Update, true)
 }
 
 pub fn execute_operations(

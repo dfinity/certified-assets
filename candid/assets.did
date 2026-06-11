@@ -74,6 +74,11 @@ type CancelSyncArguments = record {
   session_id: SessionId;
 };
 
+type UploadChunksArguments = record {
+  session_id: SessionId;
+  chunks: vec blob;
+};
+
 // Result of start_sync. `Busy` is a normal outcome (not an error): a sync is
 // already in progress and the caller may not take it over yet.
 type StartSyncResult = variant {
@@ -140,9 +145,11 @@ service: {
   // Begin a sync. Returns a session id, or `Busy` if another non-stale sync is
   // already in progress (the owner can always reclaim their own sync).
   start_sync : () -> (StartSyncResult);
-  // Stage content chunks under the sync. Returns ids referenced by
+  // Stage content chunks under the sync. Returns nothing: the canister numbers
+  // staged chunks 0, 1, 2, … per sync in arrival order, and the caller — which
+  // uploads sequentially — reproduces the same ids locally to reference them in
   // SetAssetContent operations.
-  create_chunks: (record { session_id: SessionId; content: vec blob }) -> (record { chunk_ids: vec ChunkId });
+  upload_chunks: (UploadChunksArguments) -> ();
 
   // Apply a group of operations. Perform all successfully, or reject.
   execute_operations: (ExecuteOperationsArguments) -> ();

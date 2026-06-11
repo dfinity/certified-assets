@@ -6,8 +6,8 @@ use canister_core::{
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
     redirect::RedirectRule,
     types::{
-        AssetDetails, CancelSyncArguments, CreateChunksArguments, CreateChunksResponse,
-        ExecuteOperationsArguments, StartSyncResult,
+        AssetDetails, CancelSyncArguments, ExecuteOperationsArguments, StartSyncResult,
+        UploadChunksArguments,
     },
 };
 use ic_cdk::{post_upgrade, pre_upgrade, query, update};
@@ -90,8 +90,8 @@ fn start_sync() -> StartSyncResult {
 }
 
 #[update(guard = "guard_can_sync")]
-fn create_chunks(arg: CreateChunksArguments) -> CreateChunksResponse {
-    canister_core::create_chunks(arg)
+fn upload_chunks(arg: UploadChunksArguments) {
+    canister_core::upload_chunks(arg)
 }
 
 #[update(guard = "guard_can_sync")]

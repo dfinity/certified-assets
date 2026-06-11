@@ -65,12 +65,13 @@ pub fn start_sync() -> StartSyncResult {
     with_state_mut(|s| s.start_sync(caller, &system_context))
 }
 
-pub fn create_chunks(arg: CreateChunksArguments) -> CreateChunksResponse {
+pub fn upload_chunks(arg: UploadChunksArguments) {
     let system_context = SystemContext::new();
 
-    with_state_mut(|s| match s.create_chunks(arg, &system_context) {
-        Ok(chunk_ids) => CreateChunksResponse { chunk_ids },
-        Err(msg) => trap(&msg),
+    with_state_mut(|s| {
+        if let Err(msg) = s.upload_chunks(arg, &system_context) {
+            trap(&msg);
+        }
     })
 }
 

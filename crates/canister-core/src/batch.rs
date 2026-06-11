@@ -5,7 +5,7 @@
 //! `execute_operations` to spread expensive work across multiple canister
 //! calls ([`ComputationStatus`], [`ExecuteOperationsProgress`]).
 //!
-//! The State methods that drive a sync — `start_sync`, `create_chunks`,
+//! The State methods that drive a sync — `start_sync`, `upload_chunks`,
 //! `execute_operations`, `cancel_sync` — live here too, alongside the small
 //! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
@@ -17,8 +17,8 @@ use crate::redirect;
 use crate::state::State;
 use crate::system_context::SystemContext;
 use crate::types::{
-    BatchOperationKind, CancelSyncArguments, ChunkId, CreateChunksArguments,
-    ExecuteOperationsArguments, SessionId, SetAssetContentArguments, StartSyncResult,
+    BatchOperationKind, CancelSyncArguments, ExecuteOperationsArguments, SessionId,
+    SetAssetContentArguments, StartSyncResult, UploadChunksArguments,
 };
 use candid::Principal;
 use ic_representation_independent_hash::Value;
@@ -30,9 +30,10 @@ use sha2::Digest;
 /// immediately regardless of this.
 pub const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 
-pub struct Chunk {
-    pub content: RcBytes,
-}
+/// A single chunk of content staged under a sync, before it is stitched into an
+/// asset encoding. Just the bytes: a chunk's id is its slot index in
+/// [`State::chunks`](crate::state::State), not anything stored here.
+pub(crate) type Chunk = RcBytes;
 
 /// The single in-progress sync. The canister holds at most one at a time;
 /// `start_sync` rejects a second caller while this is present and non-stale.
@@ -144,33 +145,23 @@ impl State {
         }
     }
 
-    pub fn create_chunks(
+    /// Stages chunks for the active sync. Chunks are appended in arrival order;
+    /// each chunk's id is its index in `self.chunks`. The numbering restarts at
+    /// 0 every sync (the staging area is cleared on sync start), so the plugin
+    /// — which uploads sequentially — reproduces the same ids without the
+    /// canister echoing them back. Returns nothing for that reason.
+    pub fn upload_chunks(
         &mut self,
-        CreateChunksArguments {
-            session_id,
-            content: chunks,
-        }: CreateChunksArguments,
+        UploadChunksArguments { session_id, chunks }: UploadChunksArguments,
         system_context: &SystemContext,
-    ) -> Result<Vec<ChunkId>, String> {
+    ) -> Result<(), String> {
         self.touch_session(session_id, system_context.current_timestamp_ns)?;
 
-        let chunks_len = chunks.len();
-
-        let mut chunk_ids = Vec::with_capacity(chunks.len());
         for chunk in chunks {
-            let chunk_id = self.next_chunk_id;
-            self.next_chunk_id += 1;
-            self.chunks.insert(
-                chunk_id,
-                Chunk {
-                    content: RcBytes::from(chunk),
-                },
-            );
-            chunk_ids.push(chunk_id);
+            self.chunks.push(Some(Chunk::from(chunk)));
         }
 
-        debug_assert!(chunks_len == chunk_ids.len());
-        Ok(chunk_ids)
+        Ok(())
     }
 
     pub fn execute_operations(
@@ -229,16 +220,22 @@ impl State {
 
                         let dependent_keys = self.dependent_keys(&arg.key);
 
-                        // Collect all chunks (removing them from self.chunks)
+                        // Collect all chunks, taking each out of self.chunks so
+                        // its bytes are freed as soon as it's consumed (the slot
+                        // is left as a `None` hole, preserving later indices).
                         let mut content_chunks = vec![];
-                        for chunk_id in arg.chunk_ids.iter() {
-                            let chunk = match self.chunks.remove(chunk_id) {
+                        for &chunk_id in arg.chunk_ids.iter() {
+                            let chunk = match self
+                                .chunks
+                                .get_mut(chunk_id as usize)
+                                .and_then(Option::take)
+                            {
                                 Some(c) => c,
                                 None => {
                                     return ComputationStatus::Error("chunk not found".to_string());
                                 }
                             };
-                            content_chunks.push(chunk.content);
+                            content_chunks.push(chunk);
                         }
                         if let Some(encoding_content) = arg.last_chunk.clone() {
                             content_chunks.push(encoding_content.into());
