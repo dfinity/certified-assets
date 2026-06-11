@@ -4,17 +4,75 @@
 // definitions, not the gateway's own service.
 import "http-gateway.did";
 
+// ───────── Shared aliases ─────────
+
+// Identifies an in-progress sync. Sequential and monotonic across the canister's
+// whole lifetime, so a session id is never reused — calls carrying a superseded
+// id are cleanly rejected.
 type SessionId = nat64;
+// Index of a content chunk staged within a sync (0, 1, 2, … in arrival order).
 type ChunkId = nat64;
+// An asset's path, e.g. `/index.html` or `/assets/app.css`.
 type Key = text;
 
+// ───────── Asset & redirect-rule types ─────────
+
+// One encoding of an asset, as the `get_asset_details` query reports it.
+type AssetEncodingDetails = record {
+  content_encoding: text;
+  sha256: blob; // sha256 of the entire encoded asset
+};
+
+// An asset as the `get_asset_details` query reports it. `headers` carries the
+// asset's per-asset response headers.
+type AssetDetails = record {
+  key: Key;
+  content_type: text;
+  encodings: vec AssetEncodingDetails;
+  headers: vec HeaderField;
+};
+
+type RulePattern = variant {
+  // Matches a single absolute path, e.g. `/old-page`.
+  Exact: text;
+  // Matches any URL whose path starts with this prefix. The prefix must end with
+  // `/` so the subtree boundary is unambiguous.
+  Subtree: text;
+};
+
+// A single redirect/rewrite/error rule, mirroring one line of a Netlify-style
+// `_redirects` file. Rules are matched in declaration order; first match wins.
+type RedirectRule = record {
+  // Request-side pattern.
+  from: RulePattern;
+  // Target. Interpretation depends on `status`:
+  // - 200: absolute asset path (rewrite — serve the target's body)
+  // - 3xx: absolute URL or absolute path (sent as `Location`)
+  // - 4xx: absolute asset path to serve as the custom error page (e.g.
+  //   `/404.html`); if the asset doesn't exist the rule stays inert and
+  //   unmatched paths fall through to the canister's built-in 404
+  to: text;
+  // One of 200, 301, 302, 307, 308, 404, 410.
+  status: nat16;
+  // Extra response headers on top of the status-intrinsic ones.
+  headers: vec HeaderField;
+};
+
+// ───────── Sync: operations ─────────
+//
+// The mutations a sync applies, batched into `execute_operations` calls.
+
+// Create a new asset. Sets metadata only; content is added separately via
+// SetAssetContent. `headers` are the asset's per-asset response headers.
 type CreateAssetArguments = record {
   key: Key;
   content_type: text;
   headers: vec HeaderField;
 };
 
-// Add or change content for an asset, by content encoding
+// Add or change content for an asset, by content encoding. `chunk_ids`
+// reference chunks previously staged with `upload_chunks`, in order; `sha256`
+// must match the hash of those chunks concatenated.
 type SetAssetContentArguments = record {
   key: Key;
   content_encoding: text;
@@ -22,43 +80,58 @@ type SetAssetContentArguments = record {
   sha256: blob;
 };
 
-// Remove content for an asset, by content encoding
+// Remove one content encoding from an asset. The asset itself remains as long as
+// other encodings exist.
 type UnsetAssetContentArguments = record {
   key: Key;
   content_encoding: text;
 };
 
-// Delete an asset
+// Replace an asset's per-asset response headers. The whole list is overwritten,
+// not merged.
+type SetAssetHeadersArguments = record {
+  key: Key;
+  headers: vec HeaderField;
+};
+
+// Delete an asset and all of its encodings.
 type DeleteAssetArguments = record {
   key: Key;
 };
 
-type BatchOperationKind = variant {
-  CreateAsset: CreateAssetArguments;
-  SetAssetContent: SetAssetContentArguments;
-  UnsetAssetContent: UnsetAssetContentArguments;
-  SetAssetHeaders: SetAssetHeadersArguments;
-  DeleteAsset: DeleteAssetArguments;
-
-  SetRedirectRules: SetRedirectRulesArguments;
-};
-
+// Replace the entire redirect ruleset in one operation.
 type SetRedirectRulesArguments = record {
   rules: vec RedirectRule;
 };
 
-type RulePattern = variant {
-  Exact: text;
-  Subtree: text;
+// A single mutation applied during a sync.
+type BatchOperationKind = variant {
+  CreateAsset: CreateAssetArguments;
+  SetAssetContent: SetAssetContentArguments;
+  UnsetAssetContent: UnsetAssetContentArguments;
+  DeleteAsset: DeleteAssetArguments;
+  SetAssetHeaders: SetAssetHeadersArguments;
+  SetRedirectRules: SetRedirectRulesArguments;
 };
 
-type RedirectRule = record {
-  from: RulePattern;
-  to: text;
-  status: nat16;
-  headers: vec HeaderField;
+// ───────── Sync: session ─────────
+
+// Result of start_sync. `Busy` is a normal outcome (not an error): a sync is
+// already in progress and the caller may not take it over yet.
+type StartSyncResult = variant {
+  Started: record { session_id: SessionId };
+  // `owner` holds the active sync; `idle_for_secs` is the time since its last
+  // call. Another caller may reclaim the sync only once it has gone stale.
+  Busy: record { owner: principal; idle_for_secs: nat64 };
 };
 
+// Content chunks to stage under a sync; see `upload_chunks`.
+type UploadChunksArguments = record {
+  session_id: SessionId;
+  chunks: vec blob;
+};
+
+// One batch of operations to apply under a sync; see `execute_operations`.
 type ExecuteOperationsArguments = record {
   session_id: SessionId;
   operations: vec BatchOperationKind;
@@ -69,37 +142,6 @@ type ExecuteOperationsArguments = record {
 
 type CancelSyncArguments = record {
   session_id: SessionId;
-};
-
-type UploadChunksArguments = record {
-  session_id: SessionId;
-  chunks: vec blob;
-};
-
-// Result of start_sync. `Busy` is a normal outcome (not an error): a sync is
-// already in progress and the caller may not take it over yet.
-type StartSyncResult = variant {
-  Started: record { session_id: SessionId };
-  Busy: record { owner: principal; idle_for_secs: nat64 };
-};
-
-type SetAssetHeadersArguments = record {
-  key: Key;
-  headers: vec HeaderField;
-};
-
-// ───────── Asset query types ─────────
-
-type AssetEncodingDetails = record {
-  content_encoding: text;
-  sha256: blob; // sha256 of the entire encoded asset
-};
-
-type AssetDetails = record {
-  key: Key;
-  content_type: text;
-  encodings: vec AssetEncodingDetails;
-  headers: vec HeaderField;
 };
 
 service: {
