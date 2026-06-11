@@ -19,9 +19,10 @@ use crate::canister::{
 use crate::content::{encoders_for, Content, Encoder};
 use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
 use crate::html_handling;
+use crate::not_found;
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // Stay safely under the canister's ingress message limit (~2 MB).
 const MAX_CHUNK_SIZE: usize = 1_900_000;
@@ -151,7 +152,21 @@ pub fn sync<C: CanisterCall>(
         user_rules.len()
     );
 
-    let asset_keys: Vec<String> = sources.iter().map(|s| s.key.clone()).collect();
+    let mut asset_keys: Vec<String> = sources.iter().map(|s| s.key.clone()).collect();
+
+    // 404 fallback convention (root-only). The canister has no built-in 404, so
+    // guarantee the root `<*>` slot is always backed by a real rule: append a
+    // `/* /404.html 404` catch-all, injecting a branded default `/404.html`
+    // asset when the project ships none. Skipped entirely when the user already
+    // declares a root `/*` rule (their rule — e.g. a SPA `/* … 200` — covers
+    // the whole path space and must win). See `not_found`.
+    let not_found_plan = not_found::plan(&asset_keys, &user_rules);
+    if not_found_plan.inject_branded_asset {
+        // Add the key before html-handling synthesis so the branded page picks
+        // up the same `/404` clean-URL rules a user-supplied `404.html` would.
+        asset_keys.push(not_found::ROOT_404_KEY.to_string());
+    }
+
     let synthesised = html_handling::synthesize(&asset_keys);
     if !synthesised.is_empty() {
         println!(
@@ -162,6 +177,16 @@ pub fn sync<C: CanisterCall>(
     }
     let mut project_rules = synthesised;
     project_rules.extend(user_rules);
+    if not_found_plan.append_catchall {
+        if not_found_plan.inject_branded_asset {
+            println!(
+                "no root {} found — injecting a default certified 404 page",
+                not_found::ROOT_404_KEY
+            );
+        }
+        // Lowest priority: only fires for paths no asset or earlier rule claims.
+        project_rules.push(not_found::catchall_rule());
+    }
 
     let project_header_rules = load_header_rules(dir)?;
     println!(
@@ -182,6 +207,10 @@ pub fn sync<C: CanisterCall>(
     let mut project_assets: HashMap<String, ProjectAsset> = HashMap::new();
     for source in sources {
         let asset = prepare_asset(source, &project_header_rules, &canister_assets)?;
+        project_assets.insert(asset.source.key.clone(), asset);
+    }
+    if not_found_plan.inject_branded_asset {
+        let asset = prepare_branded_404(&canister_assets)?;
         project_assets.insert(asset.source.key.clone(), asset);
     }
 
@@ -238,6 +267,39 @@ fn prepare_asset(
     if let Some(override_mime) = headers::content_type_for(&source.key, header_rules) {
         content.media_type = override_mime;
     }
+    prepare_content_asset(source, content, canister_assets)
+}
+
+/// Builds the in-memory branded `/404.html` asset injected when a project ships
+/// no root `404.html` (see `not_found`). Treated like any other HTML asset —
+/// it gets the same encoders and html-handling rules — but its bytes come from
+/// a constant instead of disk, and `_headers` content-type overrides are not
+/// applied (the default page is always `text/html`).
+fn prepare_branded_404(
+    canister_assets: &HashMap<String, AssetDetails>,
+) -> Result<ProjectAsset, String> {
+    let source = AssetSource {
+        // Never read from disk — content is supplied inline below. Kept only so
+        // the key flows through the normal asset path; not used for I/O.
+        path: PathBuf::from(not_found::ROOT_404_KEY),
+        key: not_found::ROOT_404_KEY.to_string(),
+    };
+    let content = Content {
+        data: not_found::DEFAULT_404_HTML.as_bytes().to_vec(),
+        media_type: mime_guess::from_path(not_found::ROOT_404_KEY)
+            .first()
+            .unwrap_or(mime::TEXT_HTML),
+    };
+    prepare_content_asset(source, content, canister_assets)
+}
+
+/// Shared tail of `prepare_asset`: pick encoders for `content`, encode each,
+/// and record which encodings the canister already holds.
+fn prepare_content_asset(
+    source: AssetSource,
+    content: Content,
+    canister_assets: &HashMap<String, AssetDetails>,
+) -> Result<ProjectAsset, String> {
     // gzip for text/* and js/html, identity for everything else.
     let encoders: Vec<Encoder> = encoders_for(&content.media_type);
 
@@ -653,17 +715,7 @@ fn build_operations(
     //    canister has no headers to inherit from. Populate `RedirectRule.headers`
     //    by resolving `_headers` against the rule's `from` pattern. 200/4xx
     //    rules borrow headers from their target asset, so no plumbing here.
-    let project_rules_with_headers: Vec<RedirectRule> = project_rules
-        .iter()
-        .map(|rule| {
-            let mut rule = rule.clone();
-            if is_3xx(rule.status) {
-                let key = redirect_pattern_to_key(&rule.from);
-                rule.headers = headers::resolve(&key, project_header_rules);
-            }
-            rule
-        })
-        .collect();
+    let project_rules_with_headers = resolve_3xx_rule_headers(project_rules, project_header_rules);
     if project_rules_with_headers != canister_rules {
         ops.push(Operation::SetRedirectRules(SetRedirectRulesArguments {
             rules: project_rules_with_headers,
@@ -675,6 +727,28 @@ fn build_operations(
 
 fn is_3xx(status: u16) -> bool {
     (300..400).contains(&status)
+}
+
+/// Inlines `_headers` into the `headers` of every 3xx rule by resolving them
+/// against the rule's `from` pattern — 3xx rules synthesize their own response
+/// and have no target asset to inherit headers from. 200/4xx rules borrow
+/// headers from their target asset, so they pass through untouched. This is the
+/// canonical form the canister stores, so a re-sync diffs cleanly against it.
+fn resolve_3xx_rule_headers(
+    rules: &[RedirectRule],
+    header_rules: &[HeaderRule],
+) -> Vec<RedirectRule> {
+    rules
+        .iter()
+        .map(|rule| {
+            let mut rule = rule.clone();
+            if is_3xx(rule.status) {
+                let key = redirect_pattern_to_key(&rule.from);
+                rule.headers = headers::resolve(&key, header_rules);
+            }
+            rule
+        })
+        .collect()
 }
 
 /// Returns a path-like key suitable for running the header resolver against a
@@ -762,6 +836,31 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
+
+    /// The canister-side state a finished sync leaves for the injected branded
+    /// `/404.html`: its `AssetDetails` (content_type + per-encoding shas) derived
+    /// from the same `prepare_branded_404` the sync path runs, with headers
+    /// resolved from `header_rules` exactly as `build_operations` would. Lets the
+    /// short-circuit tests assert "a second sync of a 404-augmented project is a
+    /// no-op" without hard-coding the branded page's bytes.
+    fn branded_404_canister_asset(header_rules: &[HeaderRule]) -> AssetDetails {
+        let asset = prepare_branded_404(&HashMap::new()).expect("prepare branded 404");
+        let mut encodings: Vec<AssetEncodingDetails> = asset
+            .encodings
+            .iter()
+            .map(|(name, enc)| AssetEncodingDetails {
+                content_encoding: name.clone(),
+                sha256: serde_bytes::ByteBuf::from(enc.sha256.clone()),
+            })
+            .collect();
+        encodings.sort_by(|a, b| a.content_encoding.cmp(&b.content_encoding));
+        AssetDetails {
+            key: not_found::ROOT_404_KEY.to_string(),
+            content_type: asset.media_type.to_string(),
+            encodings,
+            headers: headers::resolve(not_found::ROOT_404_KEY, header_rules),
+        }
+    }
 
     // Records the batch sizes the packer produced (chunks per `upload_chunks`
     // call). Used to verify that `pack_and_upload_chunks` collapses many small
@@ -1467,21 +1566,29 @@ mod tests {
         // Drive sync() end-to-end with a _redirects file that matches what
         // the canister already has. The "nothing to commit" short-circuit
         // must trigger, with no start_sync / execute_operations calls.
+        //
+        // The project ships no root 404.html and no `/*` rule, so the sync
+        // path injects a branded /404.html asset, synthesises its html-handling
+        // rules, and appends the `/*` catch-all — all of which the canister
+        // must already hold for the diff to be empty.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
+
+        let mut canister_rules = crate::html_handling::synthesize(&[not_found::ROOT_404_KEY.into()]);
+        canister_rules.push(mk_rule(
+            crate::canister::RulePattern::Exact("/old".into()),
+            "/new",
+            301,
+        ));
+        canister_rules.push(not_found::catchall_rule());
 
         let mock = SyncMock::new();
         mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
         mock.push_ok("can_sync", true);
+        mock.push_ok("get_asset_details", vec![branded_404_canister_asset(&[])]);
+        // Trailing empty page terminates list_all_assets' cursor walk.
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
-        mock.push_ok(
-            "get_redirect_rules",
-            vec![mk_rule(
-                crate::canister::RulePattern::Exact("/old".into()),
-                "/new",
-                301,
-            )],
-        );
+        mock.push_ok("get_redirect_rules", canister_rules);
         // Trailing empty page terminates list_all_redirect_rules' cursor walk.
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
 
@@ -1512,9 +1619,12 @@ mod tests {
 
     #[test]
     fn sync_emits_rules_op_when_redirects_file_only_changed() {
-        // _redirects has a rule; canister has none. The asset list is also
-        // empty so no asset ops are produced — the only operation must be
-        // SetRedirectRules, exercising the early "nothing to commit" check.
+        // _redirects has a rule; canister is empty. The project ships no root
+        // 404.html and no `/*` rule, so the sync path also injects a branded
+        // /404.html asset and appends the `/*` catch-all — meaning the diff
+        // carries both the asset upload and the SetRedirectRules op. We only
+        // assert the run succeeds end-to-end (the per-op shape is covered by
+        // build_operations unit tests).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
 
@@ -1524,6 +1634,8 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        // Injected /404.html bytes are uploaded before operations execute.
+        mock.push_ok("upload_chunks", ());
         mock.push_ok("execute_operations", ());
 
         let result = sync(
@@ -2106,32 +2218,44 @@ mod tests {
         // html-handling rules don't get in the way of the comparison.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
-        std::fs::write(
-            dir.path().join("_headers"),
-            b"/*\n  X-Frame-Options: DENY\n",
-        )
-        .unwrap();
+        let headers_file = b"/*\n  X-Frame-Options: DENY\n";
+        std::fs::write(dir.path().join("_headers"), headers_file).unwrap();
 
         use sha2::Digest;
         let identity_sha = sha2::Sha256::digest(b"hello").to_vec();
+
+        // No root 404.html and no `/*` rule, so the sync path injects a branded
+        // /404.html (which the `/*` _headers rule also covers) plus its
+        // html-handling rules and the `/*` catch-all; the canister must already
+        // hold all of it for the short-circuit to fire.
+        let header_rules = crate::headers::parse(std::str::from_utf8(headers_file).unwrap()).unwrap();
+        let mut synth = crate::html_handling::synthesize(&[not_found::ROOT_404_KEY.into()]);
+        synth.push(not_found::catchall_rule());
+        // The canister stores rules with `_headers` resolved into 3xx rules, so
+        // mirror that here or the comparison would spuriously differ.
+        let canister_rules = resolve_3xx_rule_headers(&synth, &header_rules);
 
         let mock = SyncMock::new();
         mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
         mock.push_ok("can_sync", true);
         mock.push_ok(
             "get_asset_details",
-            vec![AssetDetails {
-                key: "/notes.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                encodings: vec![AssetEncodingDetails {
-                    content_encoding: "identity".to_string(),
-                    sha256: serde_bytes::ByteBuf::from(identity_sha),
-                }],
-                // Matches what `_headers` resolves to, so no SetAssetHeaders.
-                headers: vec![("X-Frame-Options".into(), "DENY".into())],
-            }],
+            vec![
+                AssetDetails {
+                    key: "/notes.txt".to_string(),
+                    content_type: "text/plain".to_string(),
+                    encodings: vec![AssetEncodingDetails {
+                        content_encoding: "identity".to_string(),
+                        sha256: serde_bytes::ByteBuf::from(identity_sha),
+                    }],
+                    // Matches what `_headers` resolves to, so no SetAssetHeaders.
+                    headers: vec![("X-Frame-Options".into(), "DENY".into())],
+                },
+                branded_404_canister_asset(&header_rules),
+            ],
         );
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", canister_rules);
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
 
         let result = sync(
@@ -2245,22 +2369,33 @@ mod tests {
         use sha2::Digest;
         let identity_sha = sha2::Sha256::digest(b"<html></html>").to_vec();
 
-        let canister_rules = crate::html_handling::synthesize(&["/index.html".to_string()]);
+        // The project ships no root 404.html and no `/*` rule, so the injected
+        // branded /404.html joins /index.html in html-handling synthesis, and
+        // the `/*` catch-all is appended. The canister already holds the full
+        // set, so nothing is committed.
+        let mut canister_rules = crate::html_handling::synthesize(&[
+            "/index.html".to_string(),
+            not_found::ROOT_404_KEY.to_string(),
+        ]);
+        canister_rules.push(not_found::catchall_rule());
 
         let mock = SyncMock::new();
         mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
         mock.push_ok("can_sync", true);
         mock.push_ok(
             "get_asset_details",
-            vec![AssetDetails {
-                key: "/index.html".to_string(),
-                content_type: "text/html".to_string(),
-                encodings: vec![AssetEncodingDetails {
-                    content_encoding: "identity".to_string(),
-                    sha256: serde_bytes::ByteBuf::from(identity_sha),
-                }],
-                headers: vec![],
-            }],
+            vec![
+                AssetDetails {
+                    key: "/index.html".to_string(),
+                    content_type: "text/html".to_string(),
+                    encodings: vec![AssetEncodingDetails {
+                        content_encoding: "identity".to_string(),
+                        sha256: serde_bytes::ByteBuf::from(identity_sha),
+                    }],
+                    headers: vec![],
+                },
+                branded_404_canister_asset(&[]),
+            ],
         );
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", canister_rules);

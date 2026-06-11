@@ -404,16 +404,19 @@ fn serve_correct_encoding() {
     assert_eq!(gzip_response.body.as_ref(), GZIP_BODY);
     assert!(lookup_header(&gzip_response, "IC-Certificate").is_some());
 
-    let no_encoding_response = certified_http_request(
-        &state,
+    // An asset with no encodings has nothing to serve → plain 404. With no
+    // catch-all rule covering the path this 404 is uncertified, so request it
+    // directly rather than through the certifying helper.
+    let no_encoding_response = state.http_request(
         RequestBuilder::get("/no-encoding.html")
             .with_header("Accept-Encoding", "identity")
             .with_certificate_version(2)
             .build(),
+        &[],
+        unused_callback(),
     );
     assert_eq!(no_encoding_response.status_code, 404);
     assert_eq!(no_encoding_response.body.as_ref(), "not found".as_bytes());
-    assert!(lookup_header(&no_encoding_response, "IC-Certificate").is_some());
 }
 
 #[test]
@@ -2291,9 +2294,11 @@ mod redirect_rules {
     }
 
     #[test]
-    fn no_rules_falls_through_to_builtin_404() {
-        // No `_redirects` rules at all: missing paths return the canister's
-        // built-in certified 404 ("not found" body).
+    fn no_rules_returns_uncertified_404() {
+        // No `_redirects` rules at all: missing paths return a plain 404
+        // ("not found" body). The canister no longer certifies a built-in
+        // fallback, so to get a *certified* 404 a user adds a catch-all rule
+        // (`/* /404.html 404`); without one the 404 is served uncertified.
         let mut state = State::default();
         let system_context = mock_system_context();
         const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
@@ -2305,9 +2310,17 @@ mod redirect_rules {
             ],
         );
 
-        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        let response =
+            state.http_request(RequestBuilder::get("/missing").build(), &[], unused_callback());
         assert_eq!(response.status_code, 404);
         assert_eq!(response.body.as_ref(), b"not found");
+        // The response advertises the `<*>` fallback expr_path, but nothing is
+        // certified there anymore, so the verifier rejects it: an uncertified
+        // 404 cannot pass verification.
+        assert!(
+            verify_response(&state, &RequestBuilder::get("/missing").build(), &response).is_err(),
+            "404 with no catch-all rule must not be certifiable"
+        );
     }
 
     #[test]

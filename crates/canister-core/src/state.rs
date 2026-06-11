@@ -811,9 +811,9 @@ impl State {
     // ---- upgrade ----
 
     /// Rebuilds all derived heap state from the durable stable-memory state
-    /// after an upgrade: the certified-response tree for every asset, the
-    /// redirect-rule certified entries, and the built-in 404 fallback. The
-    /// caller publishes `certified_data` afterwards.
+    /// after an upgrade: the certified-response tree for every asset and the
+    /// redirect-rule certified entries. The caller publishes `certified_data`
+    /// afterwards.
     pub fn post_upgrade_rebuild(&mut self) {
         let keys: Vec<AssetKey> = self.metadata.keys().collect();
         for key in keys {
@@ -822,6 +822,5 @@ impl State {
             }
         }
         self.on_redirect_rules_change();
-        self.certify_404_if_required();
     }
 }
