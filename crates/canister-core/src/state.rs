@@ -26,7 +26,7 @@ use crate::http::{
     StreamingCallbackToken, StreamingStrategy,
 };
 use crate::rc_bytes::RcBytes;
-use crate::stable_store::{AssetMeta, ContentChunkKey, EncodingMeta, Settings};
+use crate::stable_store::{AssetMeta, AuthorizedSet, ContentChunkKey, EncodingMeta, RedirectRules};
 use crate::sync::{Chunk, SyncSession};
 use crate::types::*;
 use crate::url::url_decode;
@@ -48,14 +48,24 @@ pub(crate) const PAGE_SIZE: usize = 100;
 
 type Mem = VirtualMemory<DefaultMemoryImpl>;
 
-const SETTINGS_MEMORY: MemoryId = MemoryId::new(0);
-const METADATA_MEMORY: MemoryId = MemoryId::new(1);
-const CONTENT_MEMORY: MemoryId = MemoryId::new(2);
+const AUTHORIZED_MEMORY: MemoryId = MemoryId::new(0);
+const REDIRECT_RULES_MEMORY: MemoryId = MemoryId::new(1);
+const NEXT_SESSION_ID_MEMORY: MemoryId = MemoryId::new(2);
+const NEXT_CONTENT_ID_MEMORY: MemoryId = MemoryId::new(3);
+const METADATA_MEMORY: MemoryId = MemoryId::new(4);
+const CONTENT_MEMORY: MemoryId = MemoryId::new(5);
 
 pub struct State {
     // ---- durable (stable memory) ----
-    /// Small scalar/collection state read & written as one unit.
-    settings: StableCell<Settings, Mem>,
+    /// Principals authorized to sync (controllers are always allowed, unstored).
+    authorized: StableCell<AuthorizedSet, Mem>,
+    /// Ordered redirect-rule list. Its own cell so a counter bump doesn't
+    /// reserialize it (it can be large; the counters are bumped frequently).
+    redirect_rules: StableCell<RedirectRules, Mem>,
+    /// Monotonic, never-reused sync session id allocator.
+    next_session_id: StableCell<u64, Mem>,
+    /// Monotonic, never-reused chunk-group id allocator.
+    next_content_id: StableCell<u64, Mem>,
     /// Per-asset metadata, ordered by key so `get_asset_details` can page with a
     /// key cursor (a `range` seek) instead of sorting the keyspace per query.
     metadata: StableBTreeMap<AssetKey, AssetMeta, Mem>,
@@ -100,7 +110,13 @@ impl State {
     pub fn new(memory: DefaultMemoryImpl) -> Self {
         let mm = MemoryManager::init(memory);
         Self {
-            settings: StableCell::init(mm.get(SETTINGS_MEMORY), Settings::default()),
+            authorized: StableCell::init(mm.get(AUTHORIZED_MEMORY), AuthorizedSet::default()),
+            redirect_rules: StableCell::init(
+                mm.get(REDIRECT_RULES_MEMORY),
+                RedirectRules::default(),
+            ),
+            next_session_id: StableCell::init(mm.get(NEXT_SESSION_ID_MEMORY), 0),
+            next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
             metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
             content: StableBTreeMap::init(mm.get(CONTENT_MEMORY)),
             chunks: Vec::new(),
@@ -112,23 +128,18 @@ impl State {
 
     // ---- settings accessors ----
 
-    fn update_settings(&mut self, f: impl FnOnce(&mut Settings)) {
-        let mut settings = self.settings.get().clone();
-        f(&mut settings);
-        self.settings.set(settings);
-    }
-
-    /// Allocates a fresh, never-reused content group id.
+    /// Allocates a fresh, never-reused content group id. Bumps only the
+    /// counter's own cell — no other state is reserialized.
     fn alloc_content_id(&mut self) -> u64 {
-        let id = self.settings.get().next_content_id;
-        self.update_settings(|s| s.next_content_id = id + 1);
+        let id = *self.next_content_id.get();
+        self.next_content_id.set(id + 1);
         id
     }
 
     /// Allocates a fresh, never-reused sync session id.
     pub(crate) fn alloc_session_id(&mut self) -> SessionId {
-        let id = self.settings.get().next_session_id;
-        self.update_settings(|s| s.next_session_id = id + 1);
+        let id = *self.next_session_id.get();
+        self.next_session_id.set(id + 1);
         id
     }
 
@@ -138,23 +149,23 @@ impl State {
     }
 
     pub fn authorize(&mut self, principal: Principal) {
-        self.update_settings(|s| {
-            s.authorized.insert(principal);
-        });
+        let mut authorized = self.authorized.get().clone();
+        authorized.0.insert(principal);
+        self.authorized.set(authorized);
     }
 
     pub fn deauthorize(&mut self, principal: &Principal) {
-        self.update_settings(|s| {
-            s.authorized.remove(principal);
-        });
+        let mut authorized = self.authorized.get().clone();
+        authorized.0.remove(principal);
+        self.authorized.set(authorized);
     }
 
     pub fn list_authorized(&self) -> Vec<Principal> {
-        self.settings.get().authorized.iter().copied().collect()
+        self.authorized.get().0.iter().copied().collect()
     }
 
     pub fn is_authorized(&self, principal: &Principal) -> bool {
-        self.settings.get().authorized.contains(principal)
+        self.authorized.get().0.contains(principal)
     }
 
     pub fn root_hash(&self) -> Hash {
@@ -398,9 +409,9 @@ impl State {
     /// at or after `start_index`.
     pub fn get_redirect_rules(&self, start_index: u64) -> Vec<crate::redirect::RedirectRule> {
         let start = start_index as usize;
-        self.settings
+        self.redirect_rules
             .get()
-            .redirect_rules
+            .0
             .get(start..)
             .unwrap_or_default()
             .iter()
@@ -439,8 +450,8 @@ impl State {
         }
 
         // Scan redirect rules in declaration order; first match wins.
-        let settings = self.settings.get();
-        for (idx, rule) in settings.redirect_rules.iter().enumerate() {
+        let redirect_rules = self.redirect_rules.get();
+        for (idx, rule) in redirect_rules.0.iter().enumerate() {
             if !crate::redirect::matches(rule, path) {
                 continue;
             }
@@ -710,7 +721,7 @@ impl State {
             }
         }
 
-        let rules = self.settings.get().redirect_rules.clone();
+        let rules = self.redirect_rules.get().0.clone();
         let mut new_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>> =
             Vec::with_capacity(rules.len());
         for rule in &rules {
@@ -721,7 +732,7 @@ impl State {
 
     /// Replaces the redirect rules and rebuilds their certified entries.
     pub(crate) fn set_redirect_rules(&mut self, rules: Vec<crate::redirect::RedirectRule>) {
-        self.update_settings(|s| s.redirect_rules = rules);
+        self.redirect_rules.set(RedirectRules(rules));
         self.on_redirect_rules_change();
     }
 
