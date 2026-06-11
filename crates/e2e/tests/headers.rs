@@ -60,7 +60,11 @@ fn header_edit_propagates_via_set_asset_properties() {
         .into_iter()
         .find(|a| a.key == "/index.html")
         .expect("/index.html should be listed");
-    let headers_before = before.headers.expect("/index.html should carry headers");
+    let headers_before = before.headers;
+    assert!(
+        !headers_before.is_empty(),
+        "/index.html should carry headers"
+    );
     assert!(headers_before
         .iter()
         .any(|(k, v)| k.eq_ignore_ascii_case("x-frame-options") && v == "DENY"));

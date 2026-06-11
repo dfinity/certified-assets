@@ -32,7 +32,7 @@ pub type ChunkId = u64;
 pub struct CreateAssetArguments {
     pub key: String,
     pub content_type: String,
-    pub headers: Option<Vec<(String, String)>>,
+    pub headers: Vec<(String, String)>,
 }
 
 /// Add or change content for an asset, by content encoding.
@@ -62,7 +62,7 @@ pub struct DeleteAssetArguments {
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct SetAssetPropertiesArguments {
     pub key: String,
-    pub headers: Option<Option<Vec<(String, String)>>>,
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ pub struct RedirectRule {
     /// One of 200, 301, 302, 307, 308, 404, 410.
     pub status: u16,
     /// Extra response headers on top of status-intrinsic ones.
-    pub headers: Option<Vec<(String, String)>>,
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
@@ -169,5 +169,5 @@ pub struct AssetDetails {
     pub key: String,
     pub encodings: Vec<AssetEncodingDetails>,
     pub content_type: String,
-    pub headers: Option<Vec<(String, String)>>,
+    pub headers: Vec<(String, String)>,
 }

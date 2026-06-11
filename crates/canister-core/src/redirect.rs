@@ -76,44 +76,42 @@ pub fn validate(rule: &RedirectRule) -> Result<(), String> {
         ));
     }
 
-    if let Some(headers) = &rule.headers {
-        for (k, v) in headers {
-            if k.is_empty() {
-                return Err("header name must not be empty".to_string());
-            }
-            if v.is_empty() {
-                return Err(format!("header '{k}' has empty value"));
-            }
-            let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|_| format!("header name '{k}' contains invalid characters"))?;
-            // `HeaderValue` rejects CR/LF, so a rule can't smuggle header
-            // injection through the canister.
-            HeaderValue::from_str(v)
-                .map_err(|_| format!("header '{k}' value contains invalid characters"))?;
-            if name == http::header::LOCATION {
-                return Err(if status.is_redirection() {
-                    "'Location' header must not be set on a 3xx rule; \
-                     the canister derives it from the rule's 'to' field"
-                        .to_string()
-                } else {
-                    format!(
-                        "'Location' header is only valid on 3xx rules (status {})",
-                        rule.status
-                    )
-                });
-            }
-            // For rules that borrow a body from a target asset (200 rewrites
-            // and 4xx custom error pages), the content-type comes from the
-            // target — overriding it would split it from the certified
-            // headers the verifier checks.
-            let borrows_from_target = status == StatusCode::OK || status.is_client_error();
-            if borrows_from_target && name == http::header::CONTENT_TYPE {
-                return Err(
-                    "'content-type' header must not be overridden when the rule serves an \
-                     asset body; the canister takes 'content-type' from the target asset"
-                        .to_string(),
-                );
-            }
+    for (k, v) in &rule.headers {
+        if k.is_empty() {
+            return Err("header name must not be empty".to_string());
+        }
+        if v.is_empty() {
+            return Err(format!("header '{k}' has empty value"));
+        }
+        let name = HeaderName::from_bytes(k.as_bytes())
+            .map_err(|_| format!("header name '{k}' contains invalid characters"))?;
+        // `HeaderValue` rejects CR/LF, so a rule can't smuggle header
+        // injection through the canister.
+        HeaderValue::from_str(v)
+            .map_err(|_| format!("header '{k}' value contains invalid characters"))?;
+        if name == http::header::LOCATION {
+            return Err(if status.is_redirection() {
+                "'Location' header must not be set on a 3xx rule; \
+                 the canister derives it from the rule's 'to' field"
+                    .to_string()
+            } else {
+                format!(
+                    "'Location' header is only valid on 3xx rules (status {})",
+                    rule.status
+                )
+            });
+        }
+        // For rules that borrow a body from a target asset (200 rewrites
+        // and 4xx custom error pages), the content-type comes from the
+        // target — overriding it would split it from the certified
+        // headers the verifier checks.
+        let borrows_from_target = status == StatusCode::OK || status.is_client_error();
+        if borrows_from_target && name == http::header::CONTENT_TYPE {
+            return Err(
+                "'content-type' header must not be overridden when the rule serves an \
+                 asset body; the canister takes 'content-type' from the target asset"
+                    .to_string(),
+            );
         }
     }
 
@@ -161,10 +159,8 @@ pub fn certified_headers(rule: &RedirectRule) -> Vec<(String, String)> {
     if StatusCode::from_u16(rule.status).is_ok_and(|s| s.is_redirection()) {
         headers.push(("location".to_string(), rule.to.clone()));
     }
-    if let Some(extras) = &rule.headers {
-        for (k, v) in extras {
-            headers.push((k.to_lowercase(), v.clone()));
-        }
+    for (k, v) in &rule.headers {
+        headers.push((k.to_lowercase(), v.clone()));
     }
     headers
 }
@@ -259,7 +255,7 @@ mod tests {
             from,
             to: to.to_string(),
             status,
-            headers: None,
+            headers: vec![],
         }
     }
 
@@ -310,7 +306,7 @@ mod tests {
     #[test]
     fn validate_rejects_empty_header_name() {
         let mut r = rule(RulePattern::Exact("/a".into()), "/b", 301);
-        r.headers = Some(vec![("".into(), "v".into())]);
+        r.headers = vec![("".into(), "v".into())];
         let err = validate(&r).unwrap_err();
         assert!(err.contains("header name must not be empty"), "got: {err}");
     }
@@ -318,7 +314,7 @@ mod tests {
     #[test]
     fn validate_rejects_empty_header_value() {
         let mut r = rule(RulePattern::Exact("/a".into()), "/b", 301);
-        r.headers = Some(vec![("X-Foo".into(), "".into())]);
+        r.headers = vec![("X-Foo".into(), "".into())];
         let err = validate(&r).unwrap_err();
         assert!(err.contains("empty value"), "got: {err}");
     }
@@ -326,7 +322,7 @@ mod tests {
     #[test]
     fn validate_rejects_crlf_in_header_value() {
         let mut r = rule(RulePattern::Exact("/a".into()), "/b", 301);
-        r.headers = Some(vec![("X-Foo".into(), "bar\r\nX-Evil: 1".into())]);
+        r.headers = vec![("X-Foo".into(), "bar\r\nX-Evil: 1".into())];
         let err = validate(&r).unwrap_err();
         assert!(err.contains("invalid characters"), "got: {err}");
     }
@@ -334,7 +330,7 @@ mod tests {
     #[test]
     fn validate_rejects_location_header_on_3xx() {
         let mut r = rule(RulePattern::Exact("/a".into()), "/b", 301);
-        r.headers = Some(vec![("Location".into(), "/other".into())]);
+        r.headers = vec![("Location".into(), "/other".into())];
         let err = validate(&r).unwrap_err();
         assert!(
             err.contains("derives it from the rule's 'to' field"),
@@ -345,7 +341,7 @@ mod tests {
     #[test]
     fn validate_rejects_location_header_on_4xx() {
         let mut r = rule(RulePattern::Exact("/a".into()), "/b", 404);
-        r.headers = Some(vec![("Location".into(), "/other".into())]);
+        r.headers = vec![("Location".into(), "/other".into())];
         let err = validate(&r).unwrap_err();
         assert!(err.contains("only valid on 3xx rules"), "got: {err}");
     }
@@ -454,7 +450,7 @@ mod tests {
     #[test]
     fn validate_rejects_content_type_override_on_200() {
         let mut r = rule(RulePattern::Exact("/foo".into()), "/target.html", 200);
-        r.headers = Some(vec![("Content-Type".into(), "text/plain".into())]);
+        r.headers = vec![("Content-Type".into(), "text/plain".into())];
         let err = validate(&r).unwrap_err();
         assert!(err.contains("content-type"), "got: {err}");
     }
@@ -462,7 +458,7 @@ mod tests {
     #[test]
     fn validate_rejects_non_token_header_name() {
         let mut r = rule(RulePattern::Exact("/a".into()), "/b", 301);
-        r.headers = Some(vec![("X Foo".into(), "bar".into())]);
+        r.headers = vec![("X Foo".into(), "bar".into())];
         let err = validate(&r).unwrap_err();
         assert!(err.contains("invalid characters"), "got: {err}");
     }
@@ -473,7 +469,7 @@ mod tests {
             from: RulePattern::Subtree("/blog/".into()),
             to: "/home".into(),
             status: 308,
-            headers: Some(vec![("X-Trace".into(), "1".into())]),
+            headers: vec![("X-Trace".into(), "1".into())],
         };
         let bytes = encode_one(&r).unwrap();
         let back: RedirectRule = decode_one(&bytes).unwrap();
@@ -487,7 +483,7 @@ mod tests {
             from: RulePattern::Exact("/old".into()),
             to: "/new".into(),
             status: 301,
-            headers: None,
+            headers: vec![],
         };
         let bytes = serde_cbor::to_vec(&r).unwrap();
         let back: RedirectRule = serde_cbor::from_slice(&bytes).unwrap();

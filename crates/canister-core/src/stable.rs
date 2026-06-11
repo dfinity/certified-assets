@@ -38,7 +38,7 @@ impl From<crate::state::State> for StableState {
 pub struct StableAsset {
     pub content_type: String,
     pub encodings: HashMap<String, StableAssetEncoding>,
-    pub headers: Option<Vec<(String, String)>>,
+    pub headers: Vec<(String, String)>,
 }
 
 impl From<crate::asset::Asset> for StableAsset {

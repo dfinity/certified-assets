@@ -119,7 +119,7 @@ fn rewrite(from: &str, target: &str) -> RedirectRule {
         from: RulePattern::Exact(from.to_string()),
         to: target.to_string(),
         status: 200,
-        headers: None,
+        headers: vec![],
     }
 }
 
@@ -128,7 +128,7 @@ fn redirect_307(from: &str, target: &str) -> RedirectRule {
         from: RulePattern::Exact(from.to_string()),
         to: target.to_string(),
         status: 307,
-        headers: None,
+        headers: vec![],
     }
 }
 
@@ -281,7 +281,7 @@ mod tests {
         ]);
         for r in rules {
             assert!(
-                r.headers.is_none(),
+                r.headers.is_empty(),
                 "synthesised rule should not carry headers; the sync layer \
                  resolves _headers against the rule's `from` for 3xx rules"
             );

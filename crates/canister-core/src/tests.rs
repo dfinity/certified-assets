@@ -132,7 +132,7 @@ struct AssetBuilder {
     name: String,
     content_type: String,
     encodings: Vec<(String, Vec<ByteBuf>)>,
-    headers: Option<Vec<(String, String)>>,
+    headers: Vec<(String, String)>,
 }
 
 impl AssetBuilder {
@@ -141,7 +141,7 @@ impl AssetBuilder {
             name: name.as_ref().to_string(),
             content_type: content_type.as_ref().to_string(),
             encodings: vec![],
-            headers: None,
+            headers: vec![],
         }
     }
 
@@ -157,8 +157,8 @@ impl AssetBuilder {
     }
 
     fn with_header(mut self, header_key: &str, header_value: &str) -> Self {
-        let hm = self.headers.get_or_insert_with(Vec::new);
-        hm.push((header_key.to_string(), header_value.to_string()));
+        self.headers
+            .push((header_key.to_string(), header_value.to_string()));
         self
     }
 }
@@ -488,7 +488,7 @@ fn set_root_spa_rule(state: &mut State, target: &str) {
                 from: RulePattern::Subtree("/".into()),
                 to: target.into(),
                 status: 200,
-                headers: None,
+                headers: vec![],
             }],
         },
     )];
@@ -510,7 +510,7 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
             from: RulePattern::Exact((*from).into()),
             to: (*to).into(),
             status: 200,
-            headers: None,
+            headers: vec![],
         })
         .collect();
     let ops = vec![BatchOperationKind::SetRedirectRules(
@@ -984,45 +984,33 @@ fn supports_getting_and_setting_asset_properties() {
 
     assert_eq!(
         headers_of(&state, "/contents.html"),
-        Some(vec![("Access-Control-Allow-Origin".into(), "*".into())]),
+        vec![("Access-Control-Allow-Origin".to_string(), "*".to_string())],
     );
     assert_eq!(
         headers_of(&state, "/props.html"),
-        Some(vec![("X-Content-Type-Options".into(), "nosniff".into())]),
+        vec![("X-Content-Type-Options".to_string(), "nosniff".to_string())],
     );
 
-    // `Some(Some(..))` replaces the headers map.
+    // A non-empty `headers` replaces the headers map.
     assert!(state
         .set_asset_properties(SetAssetPropertiesArguments {
             key: "/props.html".into(),
-            headers: Some(Some(vec![("new-header".into(), "value".into())])),
+            headers: vec![("new-header".into(), "value".into())],
         })
         .is_ok());
     assert_eq!(
         headers_of(&state, "/props.html"),
-        Some(vec![("new-header".into(), "value".into())]),
+        vec![("new-header".to_string(), "value".to_string())],
     );
 
-    // `None` leaves the existing headers untouched.
+    // An empty `headers` clears the headers map.
     assert!(state
         .set_asset_properties(SetAssetPropertiesArguments {
             key: "/props.html".into(),
-            headers: None,
+            headers: vec![],
         })
         .is_ok());
-    assert_eq!(
-        headers_of(&state, "/props.html"),
-        Some(vec![("new-header".into(), "value".into())]),
-    );
-
-    // `Some(None)` clears the headers map.
-    assert!(state
-        .set_asset_properties(SetAssetPropertiesArguments {
-            key: "/props.html".into(),
-            headers: Some(None),
-        })
-        .is_ok());
-    assert_eq!(headers_of(&state, "/props.html"), None);
+    assert!(headers_of(&state, "/props.html").is_empty());
 }
 
 #[test]
@@ -1043,7 +1031,7 @@ fn create_asset_fails_if_asset_exists() {
             .create_asset(CreateAssetArguments {
                 key: "/contents.html".to_string(),
                 content_type: "text/html".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap_err()
             == "asset already exists"
@@ -1356,7 +1344,7 @@ mod certificate_expression {
         state
             .set_asset_properties(SetAssetPropertiesArguments {
                 key: "/contents.html".into(),
-                headers: Some(Some(vec![("custom-header".into(), "value".into())])),
+                headers: vec![("custom-header".into(), "value".into())],
             })
             .unwrap();
         let response = certified_http_request(
@@ -1595,7 +1583,7 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
@@ -1635,7 +1623,7 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
@@ -1675,7 +1663,7 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
@@ -1735,7 +1723,7 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
@@ -1779,7 +1767,7 @@ mod set_asset_content_sha256_verification {
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .unwrap();
 
@@ -1834,13 +1822,13 @@ mod redirect_rules {
                 from: RulePattern::Exact("/old".into()),
                 to: "/new".into(),
                 status: 301,
-                headers: None,
+                headers: vec![],
             },
             RedirectRule {
                 from: RulePattern::Subtree("/legacy/".into()),
                 to: "/home".into(),
                 status: 308,
-                headers: Some(vec![("X-Reason".into(), "moved".into())]),
+                headers: vec![("X-Reason".into(), "moved".into())],
             },
         ]
     }
@@ -1876,7 +1864,7 @@ mod redirect_rules {
                 from: RulePattern::Exact(format!("/from-{i}")),
                 to: format!("/to-{i}"),
                 status: 301,
-                headers: None,
+                headers: vec![],
             })
             .collect();
 
@@ -1922,7 +1910,7 @@ mod redirect_rules {
             from: RulePattern::Exact("/seed".into()),
             to: "/dest".into(),
             status: 301,
-            headers: None,
+            headers: vec![],
         }];
         commit(
             &mut state,
@@ -1940,13 +1928,13 @@ mod redirect_rules {
                 from: RulePattern::Exact("/a".into()),
                 to: "/b".into(),
                 status: 301,
-                headers: None,
+                headers: vec![],
             },
             RedirectRule {
                 from: RulePattern::Exact("/c".into()),
                 to: "/d".into(),
                 status: 418,
-                headers: None,
+                headers: vec![],
             },
         ];
         let err = commit(
@@ -2022,7 +2010,7 @@ mod redirect_rules {
                         from: RulePattern::Exact("/old".into()),
                         to: "/new".into(),
                         status: 301,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2045,7 +2033,7 @@ mod redirect_rules {
                         from: RulePattern::Subtree("/legacy/".into()),
                         to: "/home".into(),
                         status: 308,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2070,13 +2058,13 @@ mod redirect_rules {
                             from: RulePattern::Exact("/dup".into()),
                             to: "/first".into(),
                             status: 301,
-                            headers: None,
+                            headers: vec![],
                         },
                         RedirectRule {
                             from: RulePattern::Exact("/dup".into()),
                             to: "/second".into(),
                             status: 302,
-                            headers: None,
+                            headers: vec![],
                         },
                     ],
                 },
@@ -2125,7 +2113,7 @@ mod redirect_rules {
                         from: RulePattern::Exact("/foo".into()),
                         to: "/foo.html".into(),
                         status: 200,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2194,7 +2182,7 @@ mod redirect_rules {
                         from: RulePattern::Exact("/foo".into()),
                         to: "/bar.html".into(),
                         status: 200,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2241,7 +2229,7 @@ mod redirect_rules {
                         from: RulePattern::Subtree("/legacy/".into()),
                         to: "/404.html".into(),
                         status: 404,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2276,7 +2264,7 @@ mod redirect_rules {
                         from: RulePattern::Exact("/retired".into()),
                         to: "/410.html".into(),
                         status: 410,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2301,7 +2289,7 @@ mod redirect_rules {
                         from: RulePattern::Exact("/missing".into()),
                         to: String::new(),
                         status: 404,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2343,7 +2331,7 @@ mod redirect_rules {
                         from: RulePattern::Exact("/missing".into()),
                         to: "/404.html".into(),
                         status: 404,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2390,7 +2378,7 @@ mod redirect_rules {
                         from: RulePattern::Subtree("/old/".into()),
                         to: "/404.html".into(),
                         status: 404,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2422,7 +2410,7 @@ mod redirect_rules {
                         from: RulePattern::Exact("/missing".into()),
                         to: "404.html".into(), // missing leading '/'
                         status: 404,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],
@@ -2455,7 +2443,7 @@ mod redirect_rules {
                         from: RulePattern::Subtree("/".into()),
                         to: "/index.html".into(),
                         status: 200,
-                        headers: None,
+                        headers: vec![],
                     }],
                 },
             )],

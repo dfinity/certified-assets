@@ -556,15 +556,9 @@ fn header_bytes_of(op: &BatchOperationKind) -> usize {
         headers.iter().map(|(k, v)| k.len() + v.len()).sum()
     }
     match op {
-        BatchOperationKind::CreateAsset(a) => a.headers.as_deref().map_or(0, sum),
-        BatchOperationKind::SetAssetProperties(a) => {
-            a.headers.as_ref().and_then(|h| h.as_deref()).map_or(0, sum)
-        }
-        BatchOperationKind::SetRedirectRules(a) => a
-            .rules
-            .iter()
-            .map(|r| r.headers.as_deref().map_or(0, sum))
-            .sum(),
+        BatchOperationKind::CreateAsset(a) => sum(&a.headers),
+        BatchOperationKind::SetAssetProperties(a) => sum(&a.headers),
+        BatchOperationKind::SetRedirectRules(a) => a.rules.iter().map(|r| sum(&r.headers)).sum(),
         BatchOperationKind::DeleteAsset(_)
         | BatchOperationKind::UnsetAssetContent(_)
         | BatchOperationKind::SetAssetContent(_) => 0,
@@ -605,11 +599,10 @@ fn build_operations(
     //    each new key.
     for (key, pa) in project_assets {
         if !canister_assets.contains_key(key) {
-            let resolved = headers::resolve(key, project_header_rules);
             ops.push(BatchOperationKind::CreateAsset(CreateAssetArguments {
                 key: key.clone(),
                 content_type: pa.media_type.to_string(),
-                headers: (!resolved.is_empty()).then_some(resolved),
+                headers: headers::resolve(key, project_header_rules),
             }));
         }
     }
@@ -672,10 +665,7 @@ fn build_operations(
             let mut rule = rule.clone();
             if is_3xx(rule.status) {
                 let key = redirect_pattern_to_key(&rule.from);
-                let resolved = headers::resolve(&key, project_header_rules);
-                if !resolved.is_empty() {
-                    rule.headers = Some(resolved);
-                }
+                rule.headers = headers::resolve(&key, project_header_rules);
             }
             rule
         })
@@ -748,13 +738,12 @@ fn update_properties(
         };
 
         let resolved = headers::resolve(key, project_header_rules);
-        let expected_headers = (!resolved.is_empty()).then_some(resolved);
 
-        if canister_asset.headers != expected_headers {
+        if canister_asset.headers != resolved {
             ops.push(BatchOperationKind::SetAssetProperties(
                 SetAssetPropertiesArguments {
                     key: key.clone(),
-                    headers: Some(expected_headers),
+                    headers: resolved,
                 },
             ));
         }
@@ -970,7 +959,7 @@ mod tests {
         BatchOperationKind::CreateAsset(CreateAssetArguments {
             key: key.to_string(),
             content_type: "text/plain".to_string(),
-            headers: Some(vec![(name, value)]),
+            headers: vec![(name, value)],
         })
     }
 
@@ -1018,19 +1007,19 @@ mod tests {
                 from: crate::canister::RulePattern::Exact("/a".into()),
                 to: "/b".into(),
                 status: 301,
-                headers: Some(vec![("X-A".into(), "1".into())]), // 4 bytes
+                headers: vec![("X-A".into(), "1".into())], // 4 bytes
             },
             RedirectRule {
                 from: crate::canister::RulePattern::Exact("/c".into()),
                 to: "/d".into(),
                 status: 200,
-                headers: None,
+                headers: vec![],
             },
             RedirectRule {
                 from: crate::canister::RulePattern::Exact("/e".into()),
                 to: "/f".into(),
                 status: 307,
-                headers: Some(vec![("X-B".into(), "22".into())]), // 5 bytes
+                headers: vec![("X-B".into(), "22".into())], // 5 bytes
             },
         ];
         let op = BatchOperationKind::SetRedirectRules(SetRedirectRulesArguments { rules });
@@ -1223,7 +1212,7 @@ mod tests {
                 key: key.to_string(),
                 encodings: encs,
                 content_type: content_type.to_string(),
-                headers: None,
+                headers: vec![],
             },
         )
     }
@@ -1237,12 +1226,10 @@ mod tests {
         headers: &[(&str, &str)],
     ) -> (String, AssetDetails) {
         let (k, mut details) = mk_canister_asset(key, content_type, encodings);
-        details.headers = Some(
-            headers
-                .iter()
-                .map(|(name, value)| (name.to_string(), value.to_string()))
-                .collect(),
-        );
+        details.headers = headers
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
         (k, details)
     }
 
@@ -1408,7 +1395,7 @@ mod tests {
             from,
             to: to.to_string(),
             status,
-            headers: None,
+            headers: vec![],
         }
     }
 
@@ -1671,7 +1658,7 @@ mod tests {
             })
             .expect("CreateAsset op");
 
-        assert!(create_op.headers.is_none());
+        assert!(create_op.headers.is_empty());
     }
 
     fn set_props_ops(
@@ -1720,8 +1707,8 @@ mod tests {
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
-        // The inner None clears the headers map on the canister.
-        assert_eq!(by_key["/index.html"].headers, Some(None));
+        // An empty headers vec clears the headers map on the canister.
+        assert!(by_key["/index.html"].headers.is_empty());
     }
 
     #[test]
@@ -1794,7 +1781,7 @@ mod tests {
             .expect("CreateAsset op");
         assert_eq!(
             create_op.headers,
-            Some(vec![("X-Frame-Options".into(), "DENY".into())])
+            vec![("X-Frame-Options".to_string(), "DENY".to_string())]
         );
     }
 
@@ -1814,7 +1801,7 @@ mod tests {
                 _ => None,
             })
             .expect("CreateAsset op");
-        assert!(create_op.headers.is_none());
+        assert!(create_op.headers.is_empty());
     }
 
     #[test]
@@ -1835,7 +1822,7 @@ mod tests {
         assert_eq!(by_key.len(), 1);
         assert_eq!(
             by_key["/index.html"].headers,
-            Some(Some(vec![("X-Frame-Options".into(), "DENY".into())]))
+            vec![("X-Frame-Options".to_string(), "DENY".to_string())]
         );
     }
 
@@ -1856,7 +1843,7 @@ mod tests {
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         let by_key = set_props_ops(&ops);
         assert_eq!(by_key.len(), 1);
-        assert_eq!(by_key["/index.html"].headers, Some(None));
+        assert!(by_key["/index.html"].headers.is_empty());
     }
 
     #[test]
@@ -1880,14 +1867,14 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert_eq!(
             rules[0].headers,
-            Some(vec![("X-Robots-Tag".into(), "noindex".into())])
+            vec![("X-Robots-Tag".to_string(), "noindex".to_string())]
         );
     }
 
     #[test]
     fn non_3xx_redirect_rule_does_not_carry_resolved_headers() {
         // 200 / 4xx rules inherit headers from their target asset, so the
-        // plugin must leave `RedirectRule.headers` as `None` even when a
+        // plugin must leave `RedirectRule.headers` empty even when a
         // matching `_headers` rule exists.
         let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
         for status in [200u16, 404, 410] {
@@ -1906,7 +1893,7 @@ mod tests {
             let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
             assert_eq!(rules.len(), 1);
             assert!(
-                rules[0].headers.is_none(),
+                rules[0].headers.is_empty(),
                 "status {status}: expected no headers on non-3xx rule"
             );
         }
@@ -1928,7 +1915,7 @@ mod tests {
             &header_rules,
         );
         let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
-        assert!(rules[0].headers.is_none());
+        assert!(rules[0].headers.is_empty());
     }
 
     #[test]
@@ -1945,7 +1932,7 @@ mod tests {
             from: crate::canister::RulePattern::Exact("/old".into()),
             to: "/new".to_string(),
             status: 301,
-            headers: Some(vec![("X-Robots-Tag".into(), "noindex".into())]),
+            headers: vec![("X-Robots-Tag".into(), "noindex".into())],
         }];
         let ops = build_operations(
             &HashMap::new(),
@@ -2164,7 +2151,7 @@ mod tests {
                     sha256: Some(serde_bytes::ByteBuf::from(identity_sha)),
                 }],
                 // Matches what `_headers` resolves to, so no SetAssetProperties.
-                headers: Some(vec![("X-Frame-Options".into(), "DENY".into())]),
+                headers: vec![("X-Frame-Options".into(), "DENY".into())],
             }],
         );
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
@@ -2295,7 +2282,7 @@ mod tests {
                     content_encoding: "identity".to_string(),
                     sha256: Some(serde_bytes::ByteBuf::from(identity_sha)),
                 }],
-                headers: None,
+                headers: vec![],
             }],
         );
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());

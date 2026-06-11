@@ -67,13 +67,13 @@ impl AssetEncoding {
 
     fn compute_response_hashes(
         &self,
-        headers: &Option<Vec<(String, String)>>,
+        headers: &[(String, String)],
         content_type: &str,
         encoding_name: &str,
     ) -> HashMap<u16, [u8; 32]> {
         // Collect all user-defined headers
         let base_headers: Vec<(String, Value)> = build_headers(
-            headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
+            headers.iter().map(|(k, v)| (k, v)),
             content_type,
             encoding_name,
             self.certificate_expression.as_ref(),
@@ -105,7 +105,7 @@ impl AssetEncoding {
 pub struct Asset {
     pub content_type: String,
     pub encodings: HashMap<String, AssetEncoding>,
-    pub headers: Option<Vec<(String, String)>>,
+    pub headers: Vec<(String, String)>,
 }
 
 impl Asset {
@@ -113,10 +113,8 @@ impl Asset {
         // gather all headers
         let mut headers: Vec<(String, Value)> = vec![];
 
-        if let Some(custom_headers) = &self.headers {
-            for (k, v) in custom_headers.iter() {
-                headers.push((k.clone(), Value::String(v.clone())));
-            }
+        for (k, v) in &self.headers {
+            headers.push((k.clone(), Value::String(v.clone())));
         }
 
         // update
@@ -133,7 +131,7 @@ impl Asset {
             .get(encoding_name)
             .and_then(|e| e.certificate_expression.as_ref());
         build_headers(
-            self.headers.as_ref().map(|h| h.iter().map(|(k, v)| (k, v))),
+            self.headers.iter().map(|(k, v)| (k, v)),
             &self.content_type,
             encoding_name.to_owned(),
             ce,
@@ -252,7 +250,7 @@ impl Asset {
 }
 
 fn build_headers(
-    custom_headers: Option<impl Iterator<Item = (impl Into<String>, impl Into<String>)>>,
+    custom_headers: impl Iterator<Item = (impl Into<String>, impl Into<String>)>,
     content_type: impl Into<String>,
     encoding_name: impl Into<String>,
     cert_expr: Option<&CertificateExpression>,
@@ -263,10 +261,8 @@ fn build_headers(
     if encoding_name != "identity" {
         headers.push(("content-encoding".to_string(), encoding_name));
     }
-    if let Some(arg_headers) = custom_headers {
-        for (k, v) in arg_headers {
-            headers.push((k.into().to_lowercase(), v.into()));
-        }
+    for (k, v) in custom_headers {
+        headers.push((k.into().to_lowercase(), v.into()));
     }
     if let Some(expr) = cert_expr {
         let (k, v) = build_ic_certificate_expression_header(expr);

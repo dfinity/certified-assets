@@ -11,7 +11,7 @@ type Key = text;
 type CreateAssetArguments = record {
   key: Key;
   content_type: text;
-  headers: opt vec HeaderField;
+  headers: vec HeaderField;
 };
 
 // Add or change content for an asset, by content encoding
@@ -59,7 +59,7 @@ type RedirectRule = record {
   from: RulePattern;
   to: text;
   status: nat16;
-  headers: opt vec HeaderField;
+  headers: vec HeaderField;
 };
 
 type ExecuteOperationsArguments = record {
@@ -88,7 +88,7 @@ type StartSyncResult = variant {
 
 type SetAssetPropertiesArguments = record {
   key: Key;
-  headers: opt opt vec HeaderField;
+  headers: vec HeaderField;
 };
 
 // ───────── Asset query types ─────────
@@ -102,7 +102,7 @@ type AssetDetails = record {
   key: Key;
   content_type: text;
   encodings: vec AssetEncodingDetails;
-  headers: opt vec HeaderField;
+  headers: vec HeaderField;
 };
 
 service: {

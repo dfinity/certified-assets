@@ -414,9 +414,7 @@ impl State {
             .get_mut(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
-        if let Some(headers) = arg.headers {
-            asset.headers = headers
-        }
+        asset.headers = arg.headers;
 
         on_asset_change(&mut self.asset_hashes, &arg.key, asset, dependent_keys);
 

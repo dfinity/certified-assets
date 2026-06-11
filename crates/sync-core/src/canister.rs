@@ -216,7 +216,7 @@ mod tests {
                 key: format!("/asset-{i}"),
                 encodings: vec![],
                 content_type: "text/plain".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .collect()
     }
@@ -304,7 +304,7 @@ mod tests {
                 from: RulePattern::Exact(format!("/from-{i}")),
                 to: format!("/to-{i}"),
                 status: 301,
-                headers: None,
+                headers: vec![],
             })
             .collect()
     }
