@@ -15,8 +15,6 @@ crate-type = ["cdylib", "rlib"]
 canister-core = { path = "../canister-core" }
 ic-cdk.workspace = true
 candid.workspace = true
-serde.workspace = true
-serde_cbor.workspace = true
 
 [dev-dependencies]
 candid_parser.workspace = true

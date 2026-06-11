@@ -5,7 +5,7 @@ pub mod http;
 pub mod nested_tree;
 pub mod rc_bytes;
 pub mod redirect;
-pub mod stable;
+pub mod stable_store;
 pub mod state;
 pub mod sync;
 pub mod system_context;
@@ -15,7 +15,6 @@ mod url;
 #[cfg(test)]
 mod tests;
 
-pub use crate::stable::StableState;
 use crate::{
     http::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -55,7 +54,7 @@ pub fn deauthorize(principal: Principal) {
 }
 
 pub fn list_authorized() -> Vec<Principal> {
-    with_state(|s| s.list_authorized().iter().cloned().collect())
+    with_state(|s| s.list_authorized())
 }
 
 pub fn start_sync() -> StartSyncResult {
@@ -153,15 +152,15 @@ pub fn guard_is_controller() -> Result<(), String> {
     }
 }
 
-pub fn pre_upgrade() -> StableState {
-    STATE.with(|s| s.take().into())
-}
-
-pub fn post_upgrade(stable_state: StableState) {
-    // The restored authorized set is left untouched; change it after upgrade
-    // through the `authorize`/`deauthorize` endpoints.
+/// Rebuilds derived heap state (the certified-response tree) from the durable
+/// state already present in stable memory, then re-publishes `certified_data`.
+///
+/// There is no `pre_upgrade`: settings, asset metadata, and content live in
+/// stable memory and survive the upgrade untouched. The authorized set is left
+/// as-is; change it after upgrade via `authorize`/`deauthorize`.
+pub fn post_upgrade() {
     with_state_mut(|s| {
-        *s = State::from(stable_state);
+        s.post_upgrade_rebuild();
         certified_data_set(s.root_hash());
     });
 }

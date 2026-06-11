@@ -1,5 +1,3 @@
-mod state;
-
 use candid::Principal;
 use canister_core::{
     guard_can_sync, guard_is_controller,
@@ -7,20 +5,11 @@ use canister_core::{
     redirect::RedirectRule,
     types::{AssetDetails, ExecuteOperationsArguments, StartSyncResult, UploadChunksArguments},
 };
-use ic_cdk::{post_upgrade, pre_upgrade, query, update};
-
-use crate::state::{load_stable_state, save_stable_state};
-
-#[pre_upgrade]
-fn pre_upgrade() {
-    let stable_state = canister_core::pre_upgrade();
-    save_stable_state(&stable_state).expect("failed to serialize stable state");
-}
+use ic_cdk::{post_upgrade, query, update};
 
 #[post_upgrade]
 fn post_upgrade() {
-    let stable_state = load_stable_state().expect("failed to deserialize stable state");
-    canister_core::post_upgrade(stable_state);
+    canister_core::post_upgrade();
 }
 
 #[cfg(target_family = "wasm")]
