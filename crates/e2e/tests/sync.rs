@@ -130,7 +130,7 @@ fn identity_sha(assets: &[AssetDetails], key: &str) -> Option<Vec<u8>> {
                 .iter()
                 .find(|e| e.content_encoding == "identity")
         })
-        .and_then(|e| e.sha256.as_ref().map(|b| b.to_vec()))
+        .map(|e| e.sha256.to_vec())
 }
 
 /// Modify one file's content and re-sync.

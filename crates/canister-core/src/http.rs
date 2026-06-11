@@ -30,8 +30,7 @@ pub struct StreamingCallbackToken {
     pub key: String,
     pub content_encoding: String,
     pub index: Nat,
-    // We don't care about the sha, we just want to be backward compatible.
-    pub sha256: Option<ByteBuf>,
+    pub sha256: ByteBuf,
 }
 
 define_function!(pub CallbackFunc : (StreamingCallbackToken) -> (Option<StreamingCallbackHttpResponse>) query);
@@ -64,7 +63,7 @@ impl StreamingCallbackToken {
                 key: key.to_string(),
                 content_encoding: enc_name.to_string(),
                 index: Nat::from(chunk_index + 1),
-                sha256: Some(ByteBuf::from(content_sha256)),
+                sha256: ByteBuf::from(content_sha256),
             })
         }
     }

@@ -31,7 +31,7 @@ type StreamingToken = record {
   key: text;
   content_encoding: text;
   index: nat;
-  sha256: opt blob;
+  sha256: blob;
 };
 
 type StreamingCallbackHttpResponse = record {

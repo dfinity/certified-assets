@@ -142,14 +142,13 @@ impl State {
         sha256: [u8; 32],
         dependent_keys: Vec<AssetKey>,
     ) -> Result<(), String> {
-        if let Some(provided_hash) = arg.sha256 {
-            let provided_hash: [u8; 32] = provided_hash
-                .into_vec()
-                .try_into()
-                .map_err(|_| "invalid SHA-256".to_string())?;
-            if sha256 != provided_hash {
-                return Err("sha256 mismatch".to_string());
-            }
+        let provided_hash: [u8; 32] = arg
+            .sha256
+            .into_vec()
+            .try_into()
+            .map_err(|_| "invalid SHA-256".to_string())?;
+        if sha256 != provided_hash {
+            return Err("sha256 mismatch".to_string());
         }
 
         let asset = self
@@ -210,7 +209,7 @@ impl State {
                     .iter()
                     .map(|(enc_name, enc)| AssetEncodingDetails {
                         content_encoding: enc_name.clone(),
-                        sha256: Some(ByteBuf::from(enc.sha256)),
+                        sha256: ByteBuf::from(enc.sha256),
                     })
                     .collect();
                 encodings.sort_by(|l, r| l.content_encoding.cmp(&r.content_encoding));
@@ -384,8 +383,7 @@ impl State {
             .get(&content_encoding)
             .ok_or_else(|| "Invalid token on streaming: encoding not found.".to_string())?;
 
-        let expected_hash = sha256.ok_or("sha256 required")?;
-        if expected_hash != enc.sha256 {
+        if sha256 != enc.sha256 {
             return Err("sha256 mismatch".to_string());
         }
 

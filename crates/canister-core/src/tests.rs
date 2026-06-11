@@ -280,6 +280,11 @@ fn assemble_create_assets_and_set_contents_operations(
             // staging length for as many chunks as we upload.
             let base = state.chunks.len() as u64;
             let chunk_ids: Vec<u64> = (base..base + chunks.len() as u64).collect();
+            let mut hasher = sha2::Sha256::new();
+            for chunk in &chunks {
+                hasher.update(chunk);
+            }
+            let sha256 = ByteBuf::from(hasher.finalize().to_vec());
             state
                 .upload_chunks(UploadChunksArguments { session_id, chunks }, system_context)
                 .unwrap();
@@ -289,7 +294,7 @@ fn assemble_create_assets_and_set_contents_operations(
                     key: asset.name.clone(),
                     content_encoding: enc,
                     chunk_ids,
-                    sha256: None,
+                    sha256,
                 }
             }));
         }
@@ -794,17 +799,17 @@ fn uses_streaming_for_multichunk_assets() {
         .expect("missing streaming strategy");
     assert_eq!(callback, streaming_callback);
 
-    // sha256 is required
+    // A token carrying the wrong hash is rejected.
     assert_eq!(
         state
             .http_request_streaming_callback(StreamingCallbackToken {
                 key: "/index.html".to_string(),
                 content_encoding: "identity".to_string(),
                 index: Nat::from(1_u8),
-                sha256: None,
+                sha256: ByteBuf::from([0u8; 32].as_slice()),
             })
             .unwrap_err(),
-        "sha256 required"
+        "sha256 mismatch"
     );
 
     let streaming_response = state.http_request_streaming_callback(token).unwrap();
@@ -1602,7 +1607,7 @@ mod set_asset_content_sha256_verification {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            sha256: Some(ByteBuf::from(correct_hash.as_slice())),
+            sha256: ByteBuf::from(correct_hash.as_slice()),
         });
 
         assert!(result.is_ok());
@@ -1641,14 +1646,14 @@ mod set_asset_content_sha256_verification {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
+            sha256: ByteBuf::from(incorrect_hash.as_slice()),
         });
 
         assert_eq!(result.unwrap_err(), "sha256 mismatch");
     }
 
     #[test]
-    fn computes_sha256_when_not_provided() {
+    fn stores_computed_sha256() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
@@ -1675,12 +1680,11 @@ mod set_asset_content_sha256_verification {
             )
             .unwrap();
 
-        // set_asset_content without hash should succeed and compute it
         let result = state.set_asset_content(SetAssetContentArguments {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            sha256: None,
+            sha256: ByteBuf::from(expected_hash.as_slice()),
         });
 
         assert!(result.is_ok());
@@ -1696,10 +1700,7 @@ mod set_asset_content_sha256_verification {
                     .find(|e| e.content_encoding == "identity")
             })
             .expect("identity encoding should be listed");
-        assert_eq!(
-            encoding.sha256.as_ref().unwrap().as_ref(),
-            expected_hash.as_slice()
-        );
+        assert_eq!(encoding.sha256.as_ref(), expected_hash.as_slice());
     }
 
     #[test]
@@ -1739,7 +1740,7 @@ mod set_asset_content_sha256_verification {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            sha256: Some(ByteBuf::from(correct_hash.as_slice())),
+            sha256: ByteBuf::from(correct_hash.as_slice()),
         });
 
         assert!(result.is_ok());

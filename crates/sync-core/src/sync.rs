@@ -308,8 +308,7 @@ fn is_already_in_place(
         .encodings
         .iter()
         .find(|d| d.content_encoding == encoding)
-        .and_then(|d| d.sha256.as_deref())
-        .is_some_and(|s| s == sha256)
+        .is_some_and(|d| d.sha256.as_ref() == sha256)
 }
 
 fn encoding_suffix(encoding: &str) -> String {
@@ -634,7 +633,7 @@ fn build_operations(
                     key: key.clone(),
                     content_encoding: encoding.clone(),
                     chunk_ids: enc.chunk_ids.clone(),
-                    sha256: Some(ByteBuf::from(enc.sha256.clone())),
+                    sha256: ByteBuf::from(enc.sha256.clone()),
                 },
             ));
         }
@@ -967,7 +966,7 @@ mod tests {
             key: key.to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids: vec![0u64],
-            sha256: Some(serde_bytes::ByteBuf::from(vec![0u8; 32])),
+            sha256: serde_bytes::ByteBuf::from(vec![0u8; 32]),
         })
     }
 
@@ -1195,13 +1194,13 @@ mod tests {
     fn mk_canister_asset(
         key: &str,
         content_type: &str,
-        encodings: &[(&str, Option<Vec<u8>>)],
+        encodings: &[(&str, Vec<u8>)],
     ) -> (String, AssetDetails) {
         let encs = encodings
             .iter()
             .map(|(enc, sha)| AssetEncodingDetails {
                 content_encoding: enc.to_string(),
-                sha256: sha.clone().map(serde_bytes::ByteBuf::from),
+                sha256: serde_bytes::ByteBuf::from(sha.clone()),
             })
             .collect();
         (
@@ -1220,7 +1219,7 @@ mod tests {
     fn mk_canister_asset_with_headers(
         key: &str,
         content_type: &str,
-        encodings: &[(&str, Option<Vec<u8>>)],
+        encodings: &[(&str, Vec<u8>)],
         headers: &[(&str, &str)],
     ) -> (String, AssetDetails) {
         let (k, mut details) = mk_canister_asset(key, content_type, encodings);
@@ -1272,7 +1271,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
             "text/html",
-            &[("identity", Some(sha))],
+            &[("identity", sha)],
         )]);
         assert!(build_operations(&project, &canister, &[], &[], &[]).is_empty());
     }
@@ -1287,7 +1286,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
             "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
@@ -1301,7 +1300,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/old.html",
             "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
         )]);
         let ops = build_operations(&HashMap::new(), &canister, &[], &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
@@ -1318,7 +1317,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/file",
             "application/octet-stream",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 1);
@@ -1339,7 +1338,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
             "text/html",
-            &[("identity", Some(sha)), ("gzip", Some(vec![9, 8, 7]))],
+            &[("identity", sha), ("gzip", vec![9, 8, 7])],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 1);
@@ -1362,7 +1361,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
             "text/html",
-            &[("identity", Some(identity_sha))],
+            &[("identity", identity_sha)],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         assert_eq!(count_op(&ops, "SetAssetContent"), 1);
@@ -1374,12 +1373,8 @@ mod tests {
     #[test]
     fn empty_project_deletes_all_canister_assets() {
         let canister = HashMap::from([
-            mk_canister_asset("/a.html", "text/html", &[("identity", Some(vec![1]))]),
-            mk_canister_asset(
-                "/b.js",
-                "application/javascript",
-                &[("identity", Some(vec![2]))],
-            ),
+            mk_canister_asset("/a.html", "text/html", &[("identity", vec![1])]),
+            mk_canister_asset("/b.js", "application/javascript", &[("identity", vec![2])]),
         ]);
         let ops = build_operations(&HashMap::new(), &canister, &[], &[], &[]);
         assert_eq!(count_op(&ops, "DeleteAsset"), 2);
@@ -1417,7 +1412,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
             "text/html",
-            &[("identity", Some(sha))],
+            &[("identity", sha)],
         )]);
         let project_rules = vec![mk_rule(
             crate::canister::RulePattern::Exact("/old".into()),
@@ -1680,7 +1675,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
             "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
         assert!(
@@ -1699,7 +1694,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset_with_headers(
             "/index.html",
             "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
             &[("X-Frame-Options", "DENY")],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
@@ -1723,7 +1718,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset_with_headers(
             "/file",
             "application/octet-stream",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
             &[("X-Frame-Options", "DENY")],
         )]);
         let ops = build_operations(&project, &canister, &[], &[], &[]);
@@ -1812,7 +1807,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset(
             "/index.html",
             "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
         )]);
         let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
         let ops = build_operations(&project, &canister, &[], &[], &header_rules);
@@ -1834,7 +1829,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset_with_headers(
             "/index.html",
             "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
             &[("X-Frame-Options", "DENY")],
         )]);
         // No header rules — canister-stored headers should be cleared.
@@ -1955,7 +1950,7 @@ mod tests {
         let canister = HashMap::from([mk_canister_asset_with_headers(
             "/index.html",
             "text/html",
-            &[("identity", Some(vec![1, 2, 3]))],
+            &[("identity", vec![1, 2, 3])],
             &[("X-Frame-Options", "DENY")],
         )]);
         let header_rules = vec![mk_header_rule("/*", &[("X-Frame-Options", "DENY")])];
@@ -2146,7 +2141,7 @@ mod tests {
                 content_type: "text/plain".to_string(),
                 encodings: vec![AssetEncodingDetails {
                     content_encoding: "identity".to_string(),
-                    sha256: Some(serde_bytes::ByteBuf::from(identity_sha)),
+                    sha256: serde_bytes::ByteBuf::from(identity_sha),
                 }],
                 // Matches what `_headers` resolves to, so no SetAssetHeaders.
                 headers: vec![("X-Frame-Options".into(), "DENY".into())],
@@ -2278,7 +2273,7 @@ mod tests {
                 content_type: "text/html".to_string(),
                 encodings: vec![AssetEncodingDetails {
                     content_encoding: "identity".to_string(),
-                    sha256: Some(serde_bytes::ByteBuf::from(identity_sha)),
+                    sha256: serde_bytes::ByteBuf::from(identity_sha),
                 }],
                 headers: vec![],
             }],

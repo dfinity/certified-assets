@@ -19,7 +19,7 @@ type SetAssetContentArguments = record {
   key: Key;
   content_encoding: text;
   chunk_ids: vec ChunkId;
-  sha256: opt blob;
+  sha256: blob;
 };
 
 // Remove content for an asset, by content encoding
@@ -92,7 +92,7 @@ type SetAssetHeadersArguments = record {
 
 type AssetEncodingDetails = record {
   content_encoding: text;
-  sha256: opt blob; // sha256 of the entire encoded asset
+  sha256: blob; // sha256 of the entire encoded asset
 };
 
 type AssetDetails = record {

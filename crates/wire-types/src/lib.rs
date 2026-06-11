@@ -41,7 +41,7 @@ pub struct SetAssetContentArguments {
     pub key: String,
     pub content_encoding: String,
     pub chunk_ids: Vec<ChunkId>,
-    pub sha256: Option<ByteBuf>,
+    pub sha256: ByteBuf,
 }
 
 /// Remove content for an asset, by content encoding.
@@ -156,7 +156,7 @@ pub struct UploadChunksArguments {
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct AssetEncodingDetails {
     pub content_encoding: String,
-    pub sha256: Option<ByteBuf>,
+    pub sha256: ByteBuf,
 }
 
 /// An asset as the `get_asset_details` query reports it. `headers` carries the
