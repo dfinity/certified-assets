@@ -263,8 +263,10 @@ impl State {
         let content_id = self.alloc_content_id();
         let num_chunks = content_chunks.len() as u32;
         for (index, chunk) in content_chunks.iter().enumerate() {
-            self.content
-                .insert(ContentChunkKey::new(content_id, index as u32), chunk.to_vec());
+            self.content.insert(
+                ContentChunkKey::new(content_id, index as u32),
+                chunk.to_vec(),
+            );
         }
 
         meta.encodings.insert(
@@ -330,8 +332,13 @@ impl State {
         let path = AssetPath::from(key.as_str());
         for (enc_name, enc) in &meta.encodings {
             let cert_expr = certificate_expression_for(&meta.headers, enc_name);
-            let response_hashes =
-                response_hashes_for(&meta.headers, &meta.content_type, enc_name, &cert_expr, &enc.sha256);
+            let response_hashes = response_hashes_for(
+                &meta.headers,
+                &meta.content_type,
+                enc_name,
+                &cert_expr,
+                &enc.sha256,
+            );
             for status_code in STATUS_CODES_TO_CERTIFY {
                 let response_hash = response_hashes[&status_code];
                 let hash_path = path.hash_tree_path(

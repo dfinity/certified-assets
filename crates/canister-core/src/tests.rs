@@ -11,13 +11,13 @@ use crate::types::{
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
 use candid::{Nat, Principal};
-use ic_stable_structures::DefaultMemoryImpl;
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
 use ic_http_certification::{Method, StatusCode};
 use ic_response_verification_test_utils::{
     base64_encode, create_canister_id, get_current_timestamp,
 };
+use ic_stable_structures::DefaultMemoryImpl;
 use serde_bytes::ByteBuf;
 use sha2::Digest as Sha2Digest;
 use std::collections::{BTreeMap, HashMap};
