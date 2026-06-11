@@ -211,10 +211,9 @@ impl State {
                         if !self.assets.contains_key(&arg.key) {
                             return ComputationStatus::Error("asset not found".to_string());
                         }
-                        if arg.chunk_ids.is_empty() && arg.last_chunk.is_none() {
+                        if arg.chunk_ids.is_empty() {
                             return ComputationStatus::Error(
-                                "encoding must have at least one chunk or contain last_chunk"
-                                    .to_string(),
+                                "encoding must have at least one chunk".to_string(),
                             );
                         }
 
@@ -236,9 +235,6 @@ impl State {
                                 }
                             };
                             content_chunks.push(chunk);
-                        }
-                        if let Some(encoding_content) = arg.last_chunk.clone() {
-                            content_chunks.push(encoding_content.into());
                         }
 
                         // Start hashing phase with an empty hasher

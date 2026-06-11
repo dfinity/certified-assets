@@ -136,8 +136,7 @@ fn run_bench(label: &str, count: usize, size_bytes: usize) {
 // Sized to exercise the three regimes the optimisations target:
 //  - many small files  → most calls today are `upload_chunks` for sub-MAX
 //    chunks; chunk-batching should collapse the count
-//  - few medium files  → mix of multi-chunk uploads + single trailing chunk;
-//    last_chunk inlining should remove the trailing-chunk call
+//  - few medium files  → mix of multi-chunk uploads + a smaller trailing chunk
 //  - one huge file     → multi-chunk upload of a single asset; chunk packing
 //    doesn't help (chunks already at MAX), but a useful control case
 

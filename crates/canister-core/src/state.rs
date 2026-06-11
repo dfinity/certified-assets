@@ -107,8 +107,8 @@ impl State {
     }
 
     pub fn set_asset_content(&mut self, arg: SetAssetContentArguments) -> Result<(), String> {
-        if arg.chunk_ids.is_empty() && arg.last_chunk.is_none() {
-            return Err("encoding must have at least one chunk or contain last_chunk".to_string());
+        if arg.chunk_ids.is_empty() {
+            return Err("encoding must have at least one chunk".to_string());
         }
 
         let dependent_keys = self.dependent_keys(&arg.key);
@@ -124,9 +124,6 @@ impl State {
                 .and_then(Option::take)
                 .expect("chunk not found");
             content_chunks.push(chunk);
-        }
-        if let Some(encoding_content) = arg.last_chunk.clone() {
-            content_chunks.push(encoding_content.into());
         }
 
         let mut hasher = sha2::Sha256::new();

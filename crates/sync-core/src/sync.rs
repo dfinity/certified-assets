@@ -634,7 +634,6 @@ fn build_operations(
                     key: key.clone(),
                     content_encoding: encoding.clone(),
                     chunk_ids: enc.chunk_ids.clone(),
-                    last_chunk: None,
                     sha256: Some(ByteBuf::from(enc.sha256.clone())),
                 },
             ));
@@ -968,7 +967,6 @@ mod tests {
             key: key.to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids: vec![0u64],
-            last_chunk: None,
             sha256: Some(serde_bytes::ByteBuf::from(vec![0u8; 32])),
         })
     }

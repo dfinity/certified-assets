@@ -289,7 +289,6 @@ fn assemble_create_assets_and_set_contents_operations(
                     key: asset.name.clone(),
                     content_encoding: enc,
                     chunk_ids,
-                    last_chunk: None,
                     sha256: None,
                 }
             }));
@@ -1603,7 +1602,6 @@ mod set_asset_content_sha256_verification {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            last_chunk: None,
             sha256: Some(ByteBuf::from(correct_hash.as_slice())),
         });
 
@@ -1643,7 +1641,6 @@ mod set_asset_content_sha256_verification {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            last_chunk: None,
             sha256: Some(ByteBuf::from(incorrect_hash.as_slice())),
         });
 
@@ -1683,7 +1680,6 @@ mod set_asset_content_sha256_verification {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            last_chunk: None,
             sha256: None,
         });
 
@@ -1743,51 +1739,6 @@ mod set_asset_content_sha256_verification {
             key: "/test.txt".to_string(),
             content_encoding: "identity".to_string(),
             chunk_ids,
-            last_chunk: None,
-            sha256: Some(ByteBuf::from(correct_hash.as_slice())),
-        });
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn verifies_sha256_with_last_chunk() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const CHUNK_1: &[u8] = b"Hello, ";
-        const LAST_CHUNK: &[u8] = b"World!";
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(CHUNK_1);
-        hasher.update(LAST_CHUNK);
-        let correct_hash = hasher.finalize();
-
-        // Create asset first
-        state
-            .create_asset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: vec![],
-            })
-            .unwrap();
-
-        // Create batch and chunk
-        let session_id = start_session(&mut state, &system_context);
-        let chunks = vec![ByteBuf::from(CHUNK_1)];
-        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
-        state
-            .upload_chunks(
-                UploadChunksArguments { session_id, chunks },
-                &system_context,
-            )
-            .unwrap();
-
-        // set_asset_content with last_chunk and correct hash should succeed
-        let result = state.set_asset_content(SetAssetContentArguments {
-            key: "/test.txt".to_string(),
-            content_encoding: "identity".to_string(),
-            chunk_ids,
-            last_chunk: Some(ByteBuf::from(LAST_CHUNK)),
             sha256: Some(ByteBuf::from(correct_hash.as_slice())),
         });
 

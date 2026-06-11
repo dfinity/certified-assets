@@ -19,7 +19,6 @@ type SetAssetContentArguments = record {
   key: Key;
   content_encoding: text;
   chunk_ids: vec ChunkId;
-  last_chunk: opt blob;
   sha256: opt blob;
 };
 
