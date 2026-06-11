@@ -1,11 +1,15 @@
 //! Stable-memory storage types for the assets canister.
 //!
 //! These are the `Storable` representations persisted directly in stable memory
-//! via `ic-stable-structures`, replacing the old CBOR-blob `StableState`. The
-//! layout is split across three memory regions:
+//! via `ic-stable-structures`, replacing the old CBOR-blob `StableState`. Each
+//! independently-written piece of state lives in its own memory region so a
+//! write touches only that piece:
 //!
-//! - [`Settings`] — one `StableCell`: the small scalar/collection state that is
-//!   always read and written together.
+//! - [`AuthorizedSet`] / [`RedirectRules`] — one `StableCell` each. Kept apart
+//!   from the counters because they're written rarely but `redirect_rules` can
+//!   be large, and we don't want a frequent counter bump to reserialize it.
+//! - the two monotonic counters — a `StableCell<u64>` each (bumped on every
+//!   sync / content write, so they must be cheap to write).
 //! - [`AssetMeta`] — `StableBTreeMap<AssetKey, AssetMeta>`: per-asset metadata,
 //!   no content bytes.
 //! - content chunks — `StableBTreeMap<ContentChunkKey, Vec<u8>>`: raw bytes,
@@ -24,20 +28,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::redirect::RedirectRule;
 
-/// Small scalar/collection state persisted as a single `StableCell`. Everything
-/// here is tiny and read/written together, so serializing it as one value is
-/// cheap — unlike asset content, which must live one entry per chunk.
+/// Principals authorized to sync (controllers are always allowed and are not
+/// stored here). Newtype so it can carry a `Storable` impl (the orphan rule
+/// forbids implementing it for the bare `BTreeSet<Principal>`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Settings {
-    /// Principals authorized to sync (controllers are always allowed and are
-    /// not stored here).
-    pub authorized: BTreeSet<Principal>,
-    pub redirect_rules: Vec<RedirectRule>,
-    /// Monotonic, never-reused sync session id allocator.
-    pub next_session_id: u64,
-    /// Monotonic, never-reused allocator for chunk groups; see [`ContentChunkKey`].
-    pub next_content_id: u64,
-}
+pub struct AuthorizedSet(pub BTreeSet<Principal>);
+
+/// The ordered redirect-rule list. Newtype for the same `Storable` reason as
+/// [`AuthorizedSet`]. Stored as one cell (not a per-rule map) because serving
+/// scans the whole list in order on every request and reads the cached value
+/// for free, and `SetRedirectRules` replaces the list wholesale.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RedirectRules(pub Vec<RedirectRule>);
 
 /// Per-asset metadata. Content bytes live in the chunk store, grouped by each
 /// encoding's `content_id`.
@@ -134,7 +136,8 @@ macro_rules! impl_cbor_storable {
     };
 }
 
-impl_cbor_storable!(Settings);
+impl_cbor_storable!(AuthorizedSet);
+impl_cbor_storable!(RedirectRules);
 impl_cbor_storable!(AssetMeta);
 
 #[cfg(test)]
@@ -158,14 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn settings_cbor_roundtrips() {
-        let s = Settings {
-            next_session_id: 7,
-            next_content_id: 42,
-            ..Default::default()
-        };
-        let restored = Settings::from_bytes(s.to_bytes());
-        assert_eq!(restored.next_session_id, 7);
-        assert_eq!(restored.next_content_id, 42);
+    fn redirect_rules_cbor_roundtrips() {
+        use crate::redirect::{RedirectRule, RulePattern};
+        let rules = RedirectRules(vec![RedirectRule {
+            from: RulePattern::Exact("/old".into()),
+            to: "/new".into(),
+            status: 301,
+            headers: vec![],
+        }]);
+        let restored = RedirectRules::from_bytes(rules.to_bytes());
+        assert_eq!(restored.0, rules.0);
     }
 }
