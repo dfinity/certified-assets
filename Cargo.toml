@@ -32,3 +32,9 @@ serde_cbor = "0.11.1"
 sha2 = "0.11.0"
 wit-bindgen = "0.57.1"
 tempfile = "3.27.0"
+
+[profile.canister-release]
+inherits = "release"
+debug = false
+lto = true
+opt-level = 'z'
