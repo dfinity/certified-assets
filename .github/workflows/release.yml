@@ -25,6 +25,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history + all branches so the publish step can tell whether the
+          # tagged commit is on main (release provenance).
+          fetch-depth: 0
 
       - name: Validate tag matches the released commit
         run: |
@@ -60,8 +64,23 @@ jobs:
           # wire_types::format_tag) — pure string slicing, no `date` needed.
           t=$GITHUB_REF_NAME
           title="${t:0:4}-${t:4:2}-${t:6:2} ${t:8:2}:${t:10:2} UTC"
+
+          # Releases are allowed from any branch. One whose commit is not on main
+          # is published as a GitHub pre-release (kept out of "Latest release")
+          # with its origin in the title, so it's clearly distinguishable from a
+          # main release without being blocked.
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            flag=--latest
+          else
+            origin=$(git branch -r --contains "$GITHUB_SHA" --format='%(refname:short)' \
+                     | grep -vx 'origin/HEAD' | head -n1)
+            title="$title — off-main (${origin:-detached HEAD} @ $(git rev-parse --short "$GITHUB_SHA"))"
+            flag=--prerelease
+          fi
+
           gh release create "$GITHUB_REF_NAME" \
             dist/canister-release.wasm.gz \
             dist/plugin-release.wasm \
             --title "$title" \
-            --generate-notes
+            --generate-notes \
+            "$flag"
