@@ -27,6 +27,9 @@ names (so it never clobbers the plain `dist/canister.wasm`/`dist/plugin.wasm`):
   (`cargo install ic-wasm`), and `dist/canister-release.wasm.gz`, its gzipped form.
 - `dist/plugin-release.wasm` — copied as-is for now; it'll be gzipped once the
   icp-cli sync plugin can load a gzipped wasi module.
+- `dist/assets.did` — the candid interface, for integrators.
+- `dist/<file>.sha256` — a SHA-256 checksum beside each published file, so a
+  downloaded artifact can be verified on its own (`shasum -a 256 -c <file>.sha256`).
 
 `ASSETS_BUNDLE_TAG` is the optional release identity stamped into **both**
 modules so a deployed canister and its sync plugin only pair with their exact

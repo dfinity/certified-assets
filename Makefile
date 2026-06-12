@@ -54,19 +54,28 @@ plugin:
 	cp $(PLUGIN_OUT) $(DIST)/plugin.wasm
 
 # Publishable artifacts. Written under *-release names so the post-processing
-# never clobbers the plain dist/canister.wasm / dist/plugin.wasm the tests build:
+# never clobbers the plain dist/canister.wasm / dist/plugin.wasm the tests build.
+# This is the complete set the release workflow uploads:
 #
 #   dist/canister-release.wasm     — candid interface attached as metadata
 #   dist/canister-release.wasm.gz  — the above, gzipped (the canister the IC installs)
 #   dist/plugin-release.wasm       — copied as-is; icp-cli can't load a gzipped
 #                                    wasi module yet, so gzip it here once it can
+#   dist/assets.did                — the candid interface, for integrators
+#   dist/<file>.sha256             — a SHA-256 checksum beside each artifact above,
+#                                    so a downloaded file verifies on its own
 #
 # The canister attach requires ic-wasm (`cargo install ic-wasm`); the plain
-# `wasm` target does not.
+# `wasm` target does not. `shasum -a 256` is used for the checksums so it runs
+# the same on macOS and Linux.
 release: wasm
 	ic-wasm $(DIST)/canister.wasm -o $(DIST)/canister-release.wasm metadata candid:service -f $(CANDID) -v public
 	gzip -n9c $(DIST)/canister-release.wasm > $(DIST)/canister-release.wasm.gz
 	cp $(DIST)/plugin.wasm $(DIST)/plugin-release.wasm
+	cp $(CANDID) $(DIST)/assets.did
+	cd $(DIST) && for f in canister-release.wasm.gz plugin-release.wasm assets.did; do \
+	  shasum -a 256 "$$f" > "$$f.sha256"; \
+	done
 
 # Create the release tag for HEAD. The tag's name IS the bundle tag — HEAD's
 # committer time as YYYYMMDDhhmm in UTC — so it depends only on the commit, not

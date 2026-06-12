@@ -65,6 +65,14 @@ jobs:
           t=$GITHUB_REF_NAME
           title="${t:0:4}-${t:4:2}-${t:6:2} ${t:8:2}:${t:10:2} UTC"
 
+          # The full set `make release` produced: each artifact plus its
+          # sibling .sha256 (wasm + candid + checksums).
+          assets=(
+            dist/canister-release.wasm.gz dist/canister-release.wasm.gz.sha256
+            dist/plugin-release.wasm      dist/plugin-release.wasm.sha256
+            dist/assets.did               dist/assets.did.sha256
+          )
+
           # Releases are allowed from any branch. One whose commit is not on main
           # is published as a GitHub pre-release (kept out of "Latest release")
           # with its origin in the title, so it's clearly distinguishable from a
@@ -78,9 +86,13 @@ jobs:
             flag=--prerelease
           fi
 
-          gh release create "$GITHUB_REF_NAME" \
-            dist/canister-release.wasm.gz \
-            dist/plugin-release.wasm \
-            --title "$title" \
-            --generate-notes \
-            "$flag"
+          # Idempotent: a re-run re-uploads the assets instead of failing if the
+          # release already exists (e.g. a prior run died after creating it).
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "$title" \
+              --generate-notes \
+              "$flag"
+          fi
