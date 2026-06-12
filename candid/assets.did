@@ -199,4 +199,14 @@ service: {
   list_authorized: () -> (vec principal);
   // Whether the calling identity may sync assets (authorized or a controller).
   can_sync: () -> (bool) query;
+
+  // ───────── Environment ─────────
+
+  // Recapture the canister's `PUBLIC_*` env vars and IC root key and re-certify
+  // the `ic_env` cookie served on every HTML response. Authorized to the same
+  // callers as a sync (authorized syncers and controllers). The env is also
+  // captured automatically at the start of every sync, so this is only needed to
+  // publish an env-var change without a content sync. Blast radius is bounded:
+  // only `text/html` assets and redirect rules re-certify.
+  refresh_env: () -> ();
 }

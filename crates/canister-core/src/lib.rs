@@ -5,10 +5,10 @@ pub mod http;
 pub mod nested_tree;
 pub mod rc_bytes;
 pub mod redirect;
+pub mod runtime;
 pub mod stable_store;
 pub mod state;
 pub mod sync;
-pub mod system_context;
 pub mod types;
 mod url;
 
@@ -20,9 +20,9 @@ use crate::{
         CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
         StreamingCallbackToken,
     },
+    runtime::{CanisterEnv, SystemContext},
     state::State,
     sync::ComputationStatus,
-    system_context::SystemContext,
     types::*,
 };
 use candid::Principal;
@@ -61,7 +61,19 @@ pub fn start_sync() -> StartSyncResult {
     let system_context = SystemContext::new();
     let caller = msg_caller();
 
-    with_state_mut(|s| s.start_sync(caller, &system_context))
+    with_state_mut(|s| {
+        let result = s.start_sync(caller, &system_context);
+        // Capture the env once, at sync start, so every asset (re)certified by
+        // the operations that follow already carries the current `ic_env`
+        // cookie — no separate re-cert pass once the sync completes. Env vars
+        // aren't expected to change mid-sync; `refresh_env` publishes an
+        // env-only change without a sync. Only on a real start (not `Busy`).
+        if matches!(result, StartSyncResult::Started { .. }) {
+            s.capture_env_at_sync_start(&CanisterEnv::load());
+            certified_data_set(s.root_hash());
+        }
+        result
+    })
 }
 
 pub fn upload_chunks(arg: UploadChunksArguments) {
@@ -152,14 +164,34 @@ pub fn guard_is_controller() -> Result<(), String> {
     }
 }
 
+/// Recaptures the environment snapshot and re-certifies everything it touches:
+/// every `text/html` asset (whose effective header set now carries the cookie)
+/// and the redirect-rule entries (a 200-rewrite to an HTML asset borrows it).
+/// Controller-guarded at the endpoint; icp-cli calls this during deploy once the
+/// `PUBLIC_*` env vars are set.
+pub fn refresh_env() {
+    let env = CanisterEnv::load(); // replicated context — system API is readable
+    with_state_mut(|s| {
+        s.refresh_env(&env);
+        certified_data_set(s.root_hash());
+    });
+}
+
 /// Rebuilds derived heap state (the certified-response tree) from the durable
 /// state already present in stable memory, then re-publishes `certified_data`.
 ///
 /// There is no `pre_upgrade`: settings, asset metadata, and content live in
 /// stable memory and survive the upgrade untouched. The authorized set is left
 /// as-is; change it after upgrade via `authorize`/`deauthorize`.
+///
+/// The env cookie is *derived* heap state, wiped by the upgrade, so we recapture
+/// it from the live system API and store it **before** the rebuild — otherwise
+/// `post_upgrade_rebuild` would re-certify every HTML asset without the cookie
+/// and it would silently vanish until the next `refresh_env`.
 pub fn post_upgrade() {
+    let env = CanisterEnv::load(); // replicated context — system API is readable
     with_state_mut(|s| {
+        s.store_env(&env);
         s.post_upgrade_rebuild();
         certified_data_set(s.root_hash());
     });

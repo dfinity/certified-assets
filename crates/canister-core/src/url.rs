@@ -1,6 +1,6 @@
 use std::fmt;
 
-use percent_encoding::percent_decode_str;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UrlDecodeError {
@@ -31,4 +31,12 @@ pub fn url_decode(url: &str) -> Result<String, UrlDecodeError> {
         Ok(result) => Ok(result.to_string()),
         Err(_) => Err(UrlDecodeError::InvalidPercentEncoding),
     }
+}
+
+/// Percent-encodes every non-alphanumeric byte (the `NON_ALPHANUMERIC` set),
+/// matching what `decodeURIComponent` reverses on the client. Used to render the
+/// `ic_env` cookie payload: it encodes the `&`/`=` separators so they survive
+/// transport inside a single cookie value and are restored client-side.
+pub fn url_encode(url: &str) -> String {
+    utf8_percent_encode(url, NON_ALPHANUMERIC).to_string()
 }
