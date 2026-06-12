@@ -58,6 +58,17 @@ fn deauthorize(principal: Principal) {
     canister_core::deauthorize(principal)
 }
 
+// Recaptures the `PUBLIC_*` env vars + IC root key and re-certifies the `ic_env`
+// cookie onto every HTML response. Any sync-authorized caller may trigger it
+// (same guard as a sync) — only controllers can *change* the env vars, but an
+// authorized syncer should be able to re-publish them. The env is also captured
+// at the start of every sync, so this is only needed to publish an env-var
+// change without a content sync.
+#[update(guard = "guard_can_sync")]
+fn refresh_env() {
+    canister_core::refresh_env()
+}
+
 #[update]
 fn list_authorized() -> Vec<Principal> {
     canister_core::list_authorized()

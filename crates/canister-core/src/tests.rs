@@ -1,9 +1,9 @@
 use crate::http::{
     CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
 };
+use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
-use crate::system_context::SystemContext;
 use crate::types::{
     CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
     SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
@@ -2519,5 +2519,417 @@ mod redirect_rules {
         // Unshadowed path falls back to the rule → /index.html content.
         let fallback = certified_http_request(&state, RequestBuilder::get("/anything").build());
         assert_eq!(fallback.body.as_ref(), INDEX_BODY);
+    }
+}
+
+/// The certified, canister-injected `ic_env` cookie (the IC root key + `PUBLIC_*`
+/// env vars, layered onto every `text/html` response).
+mod env_cookie {
+    use super::*;
+    use crate::runtime::CanisterEnv;
+
+    /// A deterministic, correctly-sized (133-byte DER) mock root key. The client
+    /// lib asserts exactly this length when hex-decoding `ic_root_key`.
+    fn mock_root_key() -> Vec<u8> {
+        (0..133u32).map(|i| i as u8).collect()
+    }
+
+    /// A mock env snapshot carrying the given (already `PUBLIC_`-filtered) vars.
+    fn env_with(vars: &[(&str, &str)]) -> CanisterEnv {
+        CanisterEnv {
+            root_key: mock_root_key(),
+            public_vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// All values of a (case-insensitive) response header, in order.
+    fn all_headers<'a>(response: &'a HttpResponse, name: &str) -> Vec<&'a str> {
+        response
+            .headers
+            .iter()
+            .filter(|(h, _)| h.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    /// Reproduces the `@icp-sdk/core/agent/canister-env` parse exactly: the
+    /// browser exposes only the part of `Set-Cookie` before the first `;` via
+    /// `document.cookie`; the lib then strips `ic_env=`, `decodeURIComponent`s,
+    /// splits on `&` / first-`=`, and hex-decodes `ic_root_key`.
+    fn parse_like_client(set_cookie: &str) -> (Vec<u8>, BTreeMap<String, String>) {
+        let visible = set_cookie.split(';').next().unwrap().trim();
+        let encoded = visible.strip_prefix("ic_env=").expect("ic_env= prefix");
+        let decoded = url_decode(encoded).unwrap();
+        let mut root_key = None;
+        let mut vars = BTreeMap::new();
+        for entry in decoded.split('&') {
+            let eq = entry.find('=').expect("entry has '='");
+            let (k, v) = (&entry[..eq], &entry[eq + 1..]);
+            if k == "ic_root_key" {
+                root_key = Some(hex::decode(v).unwrap());
+            } else {
+                vars.insert(k.to_string(), v.to_string());
+            }
+        }
+        (root_key.expect("ic_root_key present"), vars)
+    }
+
+    /// Mirrors `canister_core::post_upgrade`: a fresh `State` over the same
+    /// memory, recapturing the env snapshot *before* the derived-state rebuild.
+    fn upgrade_with_env(state: State, memory: DefaultMemoryImpl, env: &CanisterEnv) -> State {
+        drop(state);
+        let mut restored = State::new(memory);
+        restored.store_env(env);
+        restored.post_upgrade_rebuild();
+        restored
+    }
+
+    fn html_asset(key: &str, body: &'static [u8]) -> AssetBuilder {
+        AssetBuilder::new(key, "text/html").with_encoding("identity", vec![body])
+    }
+
+    #[test]
+    fn render_env_cookie_orders_and_encodes() {
+        use crate::asset::render_env_cookie;
+        let vars = BTreeMap::from([
+            ("PUBLIC_B".to_string(), "2".to_string()),
+            // A value containing `=` must survive: only the structural `&`/`=`
+            // separators are escaped, and the client splits each entry on its
+            // first `=` so the rest of the value is preserved verbatim.
+            ("PUBLIC_A".to_string(), "v=with=eq".to_string()),
+        ]);
+        let rendered = render_env_cookie(&[0xab, 0xcd], &vars);
+
+        assert!(rendered.ends_with("; SameSite=Lax"));
+        let value = rendered
+            .strip_prefix("ic_env=")
+            .unwrap()
+            .strip_suffix("; SameSite=Lax")
+            .unwrap();
+        // Separators are percent-encoded, so the payload rides in one cookie value.
+        assert!(!value.contains('&') && !value.contains('='));
+        // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
+        assert_eq!(
+            url_decode(value).unwrap(),
+            "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2"
+        );
+    }
+
+    #[test]
+    fn url_encode_escapes_cookie_separators() {
+        use crate::url::url_encode;
+        assert_eq!(url_encode("a=b&c=d"), "a%3Db%26c%3Dd");
+    }
+
+    #[test]
+    fn from_raw_keeps_only_public_vars() {
+        let env = CanisterEnv::from_raw(
+            mock_root_key(),
+            [
+                ("PUBLIC_A".to_string(), "1".to_string()),
+                ("SECRET_KEY".to_string(), "leak".to_string()),
+                ("PATH".to_string(), "/bin".to_string()),
+            ],
+        );
+        assert_eq!(env.public_vars.keys().collect::<Vec<_>>(), vec!["PUBLIC_A"]);
+    }
+
+    #[test]
+    fn no_cookie_before_first_refresh() {
+        // A fresh install captures no env (there is no `#[init]`), so HTML
+        // responses carry no cookie until the first `refresh_env`.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html_asset("/index.html", b"<html></html>")],
+        );
+
+        let resp = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(resp.status_code, 200);
+        assert!(all_headers(&resp, "set-cookie").is_empty());
+    }
+
+    #[test]
+    fn cookie_present_and_certified_on_html() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html_asset("/page.html", b"<html></html>")],
+        );
+        state.refresh_env(&env_with(&[("PUBLIC_API_URL", "https://example.com")]));
+
+        // `certified_http_request` panics unless the witness verifies — so it
+        // passing *is* the assertion that the cookie is certified.
+        let resp = certified_http_request(&state, RequestBuilder::get("/page.html").build());
+        assert_eq!(resp.status_code, 200);
+        let cookies = all_headers(&resp, "set-cookie");
+        assert_eq!(cookies.len(), 1);
+        assert!(cookies[0].starts_with("ic_env="), "got: {}", cookies[0]);
+        assert!(cookies[0].ends_with("; SameSite=Lax"));
+    }
+
+    #[test]
+    fn cookie_absent_on_non_html() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/app.js", "text/javascript")
+                    .with_encoding("identity", vec![b"//js".as_ref()]),
+                AssetBuilder::new("/style.css", "text/css")
+                    .with_encoding("identity", vec![b"body{}".as_ref()]),
+                AssetBuilder::new("/logo.png", "application/octet-stream")
+                    .with_encoding("identity", vec![b"\x89PNG".as_ref()]),
+            ],
+        );
+        state.refresh_env(&env_with(&[("PUBLIC_X", "1")]));
+
+        for path in ["/app.js", "/style.css", "/logo.png"] {
+            let resp = certified_http_request(&state, RequestBuilder::get(path).build());
+            assert_eq!(resp.status_code, 200);
+            assert!(
+                all_headers(&resp, "set-cookie").is_empty(),
+                "{path} must carry no cookie"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_on_root_via_200_rewrite() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const INDEX: &[u8] = b"<!DOCTYPE html><html>index</html>";
+        create_assets(&mut state, &ctx, vec![html_asset("/index.html", INDEX)]);
+        set_root_spa_rule(&mut state, "/index.html");
+        state.refresh_env(&env_with(&[("PUBLIC_X", "1")]));
+
+        // `/` is served by the 200-rewrite alias to /index.html — the common SPA
+        // entry point, which is not a direct asset hit.
+        let root = certified_http_request(&state, RequestBuilder::get("/").build());
+        assert_eq!(root.status_code, 200);
+        assert_eq!(root.body.as_ref(), INDEX);
+        let root_cookies = all_headers(&root, "set-cookie");
+        assert_eq!(root_cookies.len(), 1);
+        assert!(root_cookies[0].starts_with("ic_env="));
+
+        // The direct hit carries it too.
+        let direct = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert!(all_headers(&direct, "set-cookie")[0].starts_with("ic_env="));
+    }
+
+    #[test]
+    fn cookie_roundtrips_client_lib_algorithm() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html_asset("/index.html", b"<html></html>")],
+        );
+
+        // Mix PUBLIC_ and non-PUBLIC vars; only the former reach the cookie.
+        let env = CanisterEnv::from_raw(
+            mock_root_key(),
+            [
+                (
+                    "PUBLIC_API_URL".to_string(),
+                    "https://api.example.com".to_string(),
+                ),
+                (
+                    "PUBLIC_CANISTER_ID:backend".to_string(),
+                    "ryjl3-tyaaa-aaaaa-aaaba-cai".to_string(),
+                ),
+                ("SECRET_KEY".to_string(), "do-not-leak".to_string()),
+                ("DATABASE_URL".to_string(), "postgres://nope".to_string()),
+            ],
+        );
+        state.refresh_env(&env);
+
+        let resp = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        let cookie = all_headers(&resp, "set-cookie")[0];
+
+        let (root_key, vars) = parse_like_client(cookie);
+        assert_eq!(root_key.len(), 133);
+        assert_eq!(root_key, mock_root_key());
+        assert_eq!(
+            vars.get("PUBLIC_API_URL").map(String::as_str),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
+            vars.get("PUBLIC_CANISTER_ID:backend").map(String::as_str),
+            Some("ryjl3-tyaaa-aaaaa-aaaba-cai")
+        );
+        // Non-PUBLIC vars are excluded — the prefix is the security boundary.
+        assert!(!vars.contains_key("SECRET_KEY"));
+        assert!(!vars.contains_key("DATABASE_URL"));
+        assert_eq!(vars.len(), 2);
+
+        // Entries are emitted in sorted order: root key first, then sorted vars.
+        let visible = cookie.split(';').next().unwrap().trim();
+        let decoded = url_decode(visible.strip_prefix("ic_env=").unwrap()).unwrap();
+        let keys: Vec<&str> = decoded
+            .split('&')
+            .map(|e| &e[..e.find('=').unwrap()])
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "ic_root_key",
+                "PUBLIC_API_URL",
+                "PUBLIC_CANISTER_ID:backend"
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_env_swaps_value_and_leaves_non_html_untouched() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                html_asset("/page.html", b"<html></html>"),
+                AssetBuilder::new("/app.js", "text/javascript")
+                    .with_encoding("identity", vec![b"//js".as_ref()]),
+            ],
+        );
+
+        state.refresh_env(&env_with(&[("PUBLIC_X", "one")]));
+        let html1 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
+        let cookie1 = all_headers(&html1, "set-cookie")[0].to_string();
+        let js1 = certified_http_request(&state, RequestBuilder::get("/app.js").build());
+        assert!(all_headers(&js1, "set-cookie").is_empty());
+
+        // A second snapshot swaps the value; the new cookie is certified.
+        state.refresh_env(&env_with(&[("PUBLIC_X", "two")]));
+        let html2 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
+        let cookie2 = all_headers(&html2, "set-cookie")[0].to_string();
+        assert_ne!(cookie1, cookie2);
+        let (_, vars2) = parse_like_client(&cookie2);
+        assert_eq!(vars2.get("PUBLIC_X").map(String::as_str), Some("two"));
+
+        // The old value is no longer certified: re-serving it fails verification.
+        let mut stale = html2.clone();
+        for (h, v) in stale.headers.iter_mut() {
+            if h.eq_ignore_ascii_case("set-cookie") {
+                *v = cookie1.clone();
+            }
+        }
+        let req = RequestBuilder::get("/page.html").build();
+        assert!(
+            !verify_response(&state, &req, &stale).unwrap_or(false),
+            "stale cookie must not verify against the refreshed tree"
+        );
+
+        // The JS asset is unaffected: still no cookie, still verifies.
+        let js2 = certified_http_request(&state, RequestBuilder::get("/app.js").build());
+        assert!(all_headers(&js2, "set-cookie").is_empty());
+    }
+
+    #[test]
+    fn coexists_with_user_set_cookie() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html_asset("/page.html", b"<html></html>")
+                .with_header("Set-Cookie", "session=xyz; Path=/")],
+        );
+        state.refresh_env(&env_with(&[("PUBLIC_X", "1")]));
+
+        // Passing certification proves the gateway/`ic-certification` accepts a
+        // `set-cookie` listed twice in the certificate expression.
+        let resp = certified_http_request(&state, RequestBuilder::get("/page.html").build());
+        let cookies = all_headers(&resp, "set-cookie");
+        assert_eq!(cookies.len(), 2, "user cookie + env cookie coexist");
+        assert!(cookies.iter().any(|c| c.contains("session=xyz")));
+        assert!(cookies.iter().any(|c| c.starts_with("ic_env=")));
+    }
+
+    #[test]
+    fn cookie_survives_upgrade_roundtrip() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+        const INDEX: &[u8] = b"<!DOCTYPE html><html>index</html>";
+        create_assets(&mut state, &ctx, vec![html_asset("/index.html", INDEX)]);
+        let env = env_with(&[("PUBLIC_X", "kept")]);
+        state.refresh_env(&env);
+
+        let before = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        let cookie_before = all_headers(&before, "set-cookie")[0].to_string();
+
+        let state = upgrade_with_env(state, memory.clone(), &env);
+
+        let after = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        let cookie_after = all_headers(&after, "set-cookie")[0].to_string();
+        assert_eq!(cookie_before, cookie_after);
+        let (rk, vars) = parse_like_client(&cookie_after);
+        assert_eq!(rk.len(), 133);
+        assert_eq!(vars.get("PUBLIC_X").map(String::as_str), Some("kept"));
+    }
+
+    #[test]
+    fn capture_at_sync_start_recertifies_only_on_change() {
+        // `capture_env_at_sync_start` is what the entry layer calls at the start
+        // of every sync. The asset here is never re-synced after the first
+        // capture, so it exercises the correctness guarantee: an env change must
+        // re-certify even assets the sync doesn't touch, or they'd serve a new
+        // cookie against an old-cookie certificate.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html_asset("/page.html", b"<html></html>")],
+        );
+
+        // First capture (was `None`): the cookie is published and certified.
+        state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "one")]));
+        let r1 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
+        let cookie1 = all_headers(&r1, "set-cookie")[0].to_string();
+        assert!(parse_like_client(&cookie1)
+            .1
+            .get("PUBLIC_X")
+            .is_some_and(|v| v == "one"));
+
+        // Capturing the *same* env again is a no-op: still certified, unchanged.
+        state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "one")]));
+        let r2 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
+        assert_eq!(all_headers(&r2, "set-cookie")[0], cookie1);
+
+        // A *changed* env re-certifies the (untouched) asset: it now serves and
+        // certifies the new cookie, and the old value no longer verifies.
+        state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "two")]));
+        let r3 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
+        let cookie3 = all_headers(&r3, "set-cookie")[0].to_string();
+        assert_ne!(cookie1, cookie3);
+        assert!(parse_like_client(&cookie3)
+            .1
+            .get("PUBLIC_X")
+            .is_some_and(|v| v == "two"));
+
+        let mut stale = r3.clone();
+        for (h, v) in stale.headers.iter_mut() {
+            if h.eq_ignore_ascii_case("set-cookie") {
+                *v = cookie1.clone();
+            }
+        }
+        let req = RequestBuilder::get("/page.html").build();
+        assert!(
+            !verify_response(&state, &req, &stale).unwrap_or(false),
+            "the pre-change cookie must not verify after capture re-certified it"
+        );
     }
 }

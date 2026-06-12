@@ -89,6 +89,13 @@ pub struct State {
     /// asset shadows an exact rule at the same path, or because an alias rule
     /// (200/4xx) points at a target asset that doesn't exist yet.
     pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
+    /// The fully rendered `Set-Cookie: ic_env=…` value layered onto every
+    /// `text/html` response, or `None` before any env snapshot has been
+    /// captured. Owned by the canister (never stored in `meta.headers`) and
+    /// recomputed on capture; rebuilt from the live system API in `post_upgrade`
+    /// (the env vars themselves survive as canister settings), exactly like
+    /// `asset_hashes`. See [`State::effective_headers`].
+    pub(crate) env_cookie: Option<String>,
 }
 
 impl Default for State {
@@ -122,6 +129,7 @@ impl State {
             sync_session: None,
             asset_hashes: CertifiedResponses::default(),
             rule_certified_entries: Vec::new(),
+            env_cookie: None,
         }
     }
 
@@ -330,6 +338,24 @@ impl State {
         Ok(())
     }
 
+    /// The header list a response actually certifies and serves: the asset's own
+    /// `meta.headers`, plus the canister-owned env cookie on `text/html` assets
+    /// when a snapshot exists. The cookie is *never* stored in `meta.headers`
+    /// (`_headers` remains the sole owner of that field); it is layered on here
+    /// at the single point every cert/serve site funnels through, guaranteeing
+    /// the certified set and the served set agree. A user's own `_headers`
+    /// `Set-Cookie` coexists as a separate entry (per-asset headers are a `Vec`,
+    /// not a name-keyed map, so neither overwrites the other).
+    fn effective_headers(&self, meta: &AssetMeta) -> Vec<(String, String)> {
+        let mut headers = meta.headers.clone();
+        if let Some(cookie) = &self.env_cookie {
+            if crate::asset::is_html_content_type(&meta.content_type) {
+                headers.push(("set-cookie".to_string(), cookie.clone()));
+            }
+        }
+        headers
+    }
+
     /// Removes and recomputes every certified response for one asset from its
     /// metadata. Recompute is cheap: it reads only headers/content_type/sha256,
     /// never content bytes.
@@ -339,11 +365,12 @@ impl State {
             return;
         }
 
+        let effective_headers = self.effective_headers(meta);
         let path = AssetPath::from(key.as_str());
         for (&encoding, enc) in &meta.encodings {
-            let cert_expr = certificate_expression_for(&meta.headers, encoding);
+            let cert_expr = certificate_expression_for(&effective_headers, encoding);
             let response_hashes = response_hashes_for(
-                &meta.headers,
+                &effective_headers,
                 &meta.content_type,
                 encoding,
                 &cert_expr,
@@ -537,7 +564,7 @@ impl State {
         etags: &[Hash],
         status_override: Option<u16>,
     ) -> HttpResponse {
-        let mut headers = headers_for(&meta.headers, &meta.content_type, encoding);
+        let mut headers = headers_for(&self.effective_headers(meta), &meta.content_type, encoding);
         if let Some(head) = certificate_header {
             headers.push((head.0.clone(), head.1.clone()));
         }
@@ -809,14 +836,18 @@ impl State {
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         let target_key = rule.to.clone();
         let meta = self.metadata.get(&target_key)?;
+        // Mirror the target asset's effective headers (incl. the env cookie on
+        // an HTML target) so the alias reuses the same certified response the
+        // direct hit / serve path produces.
+        let effective_headers = self.effective_headers(&meta);
         let location = crate::redirect::tree_location(rule);
         let mut tree_paths = Vec::new();
         for (&encoding, enc) in &meta.encodings {
-            let cert_expr = certificate_expression_for(&meta.headers, encoding);
+            let cert_expr = certificate_expression_for(&effective_headers, encoding);
             let resp_hash = if status == 200 {
                 // The encoding's already-certified 200 response hash.
                 response_hashes_for(
-                    &meta.headers,
+                    &effective_headers,
                     &meta.content_type,
                     encoding,
                     &cert_expr,
@@ -826,7 +857,7 @@ impl State {
                 // 4xx custom error page: re-certify with the override status
                 // using the same headers and body the asset would serve at 200.
                 let base_headers: Vec<(String, Value)> =
-                    headers_for(&meta.headers, &meta.content_type, encoding)
+                    headers_for(&effective_headers, &meta.content_type, encoding)
                         .into_iter()
                         .map(|(k, v)| (k, Value::String(v)))
                         .collect();
@@ -845,6 +876,52 @@ impl State {
             location,
             kind: crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status },
         })
+    }
+
+    // ---- environment cookie ----
+
+    /// Stores the rendered env cookie from a freshly captured snapshot **without**
+    /// re-certifying. Used by `post_upgrade` *before* `post_upgrade_rebuild`, so
+    /// the rebuild — which re-certifies every asset from scratch — picks the
+    /// cookie up through `effective_headers`.
+    pub(crate) fn store_env(&mut self, env: &crate::runtime::CanisterEnv) {
+        self.env_cookie = Some(env.render_cookie());
+    }
+
+    /// Captures the env at the **start of a sync**, so the operations that follow
+    /// certify their assets against the current cookie (no end-of-sync re-cert
+    /// pass). If the rendered cookie is unchanged — the common case, since env
+    /// vars rarely change between syncs — this is a no-op: existing certs are
+    /// already correct and the sync's own ops will re-use the same cookie. Only
+    /// when it *changed* must we re-certify here (via [`Self::refresh_env`]):
+    /// otherwise HTML assets the sync doesn't touch would keep an old-cookie
+    /// certificate while `effective_headers` serves the new cookie, and the
+    /// gateway would reject them. Caller publishes `certified_data` afterwards.
+    pub(crate) fn capture_env_at_sync_start(&mut self, env: &crate::runtime::CanisterEnv) {
+        if self.env_cookie.as_deref() != Some(env.render_cookie().as_str()) {
+            self.refresh_env(env);
+        }
+    }
+
+    /// Captures a new env snapshot on an already-running canister and re-certifies
+    /// everything it affects: every `text/html` asset (its effective header set
+    /// changed) and the redirect-rule entries (a 200-rewrite to an HTML asset
+    /// borrows the cookie). Non-HTML assets are untouched. Caller must refresh
+    /// `certified_data` afterwards. Mirrors `set_redirect_rules` →
+    /// `on_redirect_rules_change`.
+    pub fn refresh_env(&mut self, env: &crate::runtime::CanisterEnv) {
+        self.store_env(env);
+        let keys: Vec<AssetKey> = self.metadata.keys().collect();
+        for key in keys {
+            if let Some(meta) = self.metadata.get(&key) {
+                if crate::asset::is_html_content_type(&meta.content_type) {
+                    self.recertify_asset(&key, &meta);
+                }
+            }
+        }
+        // Rebuild rule entries: a 200-rewrite (e.g. the `/` SPA alias) to an HTML
+        // target must pick up the cookie via its now-changed certified response.
+        self.on_redirect_rules_change();
     }
 
     // ---- upgrade ----
