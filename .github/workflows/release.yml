@@ -1,0 +1,65 @@
+name: Release
+
+# Triggered by pushing a tag whose name is the bundle tag: the released commit's
+# committer time in minutes since the Unix epoch (UTC). Create it with `make tag`
+# and push it. The bundle tag is a function of the commit, not of when you tag,
+# so the release is reproducible and the tag equals the integer the `bundle_tag`
+# query returns at runtime.
+on:
+  push:
+    tags:
+      - "[0-9]*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel an in-flight publish.
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub release and upload its assets
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate tag matches the released commit
+        run: |
+          # Re-derive the bundle tag from the tagged commit and reject anything
+          # else, so a hand-crafted or stale tag can't ship a mislabelled build.
+          # `git log -1` reads the checked-out tag's commit (shallow clone is fine).
+          expected=$(( $(git log -1 --format=%ct) / 60 ))
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match the released commit's time ($expected minutes since epoch, UTC). Create the tag with 'make tag'."
+            exit 1
+          fi
+
+      - name: Remove pre-installed Rust stable toolchain
+        run: rustup toolchain remove stable 2>/dev/null || true
+
+      # No explicit toolchain — uses the channel and the wasm32-unknown-unknown /
+      # wasm32-wasip2 targets from rust-toolchain.toml.
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Install ic-wasm
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dfinity/ic-wasm/releases/download/0.9.11/ic-wasm-installer.sh | sh
+
+      - name: Build release artifacts
+        run: make release ASSETS_BUNDLE_TAG="${GITHUB_REF_NAME}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Humanize the integer tag for the release title (the IC HTTP gateway
+          # is UTC; this mirrors wire_types::format_tag).
+          title=$(date -u -d "@$(( GITHUB_REF_NAME * 60 ))" '+%Y-%m-%d %H:%M UTC')
+          gh release create "$GITHUB_REF_NAME" \
+            dist/canister-release.wasm.gz \
+            dist/plugin-release.wasm \
+            --title "$title" \
+            --generate-notes

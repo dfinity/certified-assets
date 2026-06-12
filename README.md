@@ -8,7 +8,7 @@ An ICP assets canister and `icp-cli` sync plugin for serving certified static as
 make wasm        # build both modules into dist/
 make canister    # canister wasm only
 make plugin      # sync-plugin wasm only
-make release ASSETS_BUNDLE_TAG=$(( $(date -u +%s) / 60 ))  # publishable build
+make release     # publishable build (see Releasing for ASSETS_BUNDLE_TAG)
 ```
 
 Artifacts land in `dist/` under stable names (`dist/canister.wasm`,
@@ -30,8 +30,28 @@ names (so it never clobbers the plain `dist/canister.wasm`/`dist/plugin.wasm`):
 
 `ASSETS_BUNDLE_TAG` is the optional release identity stamped into **both**
 modules so a deployed canister and its sync plugin only pair with their exact
-counterpart. The release workflow computes it once and passes the same value to
-the build; left unset (e2e and manual builds) the artifacts are unstamped.
+counterpart. It's a single integer — minutes since the Unix epoch (UTC) — and is
+left unset for e2e and manual builds, which are then unstamped. See Releasing for
+where its value comes from.
+
+## Releasing
+
+A release is a git tag whose name **is** the bundle tag: the released commit's
+committer time in minutes since the Unix epoch (UTC). Deriving it from the commit
+— not from when you happen to tag — means re-tagging the same commit always
+yields the same value, and the tag equals the exact integer the `bundle_tag`
+query returns at runtime, so a plugin/canister mismatch maps straight back to a
+release.
+
+```sh
+make tag                 # create the tag for HEAD (prints the push command)
+git push origin <tag>    # triggers .github/workflows/release.yml
+```
+
+The workflow re-derives the tag from the commit and rejects a mismatch, then runs
+`make release ASSETS_BUNDLE_TAG=<tag>` and publishes `dist/canister-release.wasm.gz`
+and `dist/plugin-release.wasm` to a GitHub release. Crate versions stay `0.0.0`;
+the bundle tag is the only release identifier.
 
 ## Candid interface
 

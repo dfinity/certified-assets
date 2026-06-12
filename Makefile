@@ -34,7 +34,7 @@ CANDID := assets.did
 # the recompile-on-tag-change path.
 TAG_ENV := $(if $(ASSETS_BUNDLE_TAG),ASSETS_BUNDLE_TAG=$(ASSETS_BUNDLE_TAG),)
 
-.PHONY: wasm canister plugin release clean
+.PHONY: wasm canister plugin release tag clean
 
 # Build both wasm modules into dist/. Used by the tests and for manual builds;
 # needs no extra tooling.
@@ -67,6 +67,16 @@ release: wasm
 	ic-wasm $(DIST)/canister.wasm -o $(DIST)/canister-release.wasm metadata candid:service -f $(CANDID) -v public
 	gzip -n9c $(DIST)/canister-release.wasm > $(DIST)/canister-release.wasm.gz
 	cp $(DIST)/plugin.wasm $(DIST)/plugin-release.wasm
+
+# Create the release tag for HEAD. The tag's name IS the bundle tag — HEAD's
+# committer time in minutes since the Unix epoch (UTC) — so it depends only on
+# the commit, not on when you run this: re-tagging the same commit yields the
+# same value. Push it (`git push origin <tag>`) to trigger the release workflow,
+# which re-derives this value from the commit and rejects a mismatch.
+tag:
+	@tag=$$(( $$(git log -1 --format=%ct) / 60 )); \
+	git tag -a "$$tag" -m "Release $$tag"; \
+	echo "Created tag $$tag — push it with: git push origin $$tag"
 
 clean:
 	rm -rf $(DIST)
