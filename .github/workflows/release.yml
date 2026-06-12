@@ -1,0 +1,98 @@
+name: Release
+
+# Triggered by pushing a tag whose name is the bundle tag: the released commit's
+# committer time as YYYYMMDDhhmm in UTC. Create it with `make tag` and push it.
+# The bundle tag is a function of the commit, not of when you tag, so the release
+# is reproducible and the tag equals the integer the `bundle_tag` query returns
+# at runtime.
+on:
+  push:
+    tags:
+      - "[0-9]*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel an in-flight publish.
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub release and upload its assets
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history + all branches so the publish step can tell whether the
+          # tagged commit is on main (release provenance).
+          fetch-depth: 0
+
+      - name: Validate tag matches the released commit
+        run: |
+          # Re-derive the bundle tag from the tagged commit and reject anything
+          # else, so a hand-crafted or stale tag can't ship a mislabelled build.
+          # `git log -1` reads the checked-out tag's commit (shallow clone is fine);
+          # git formats the date identically on every OS.
+          expected=$(TZ=UTC git log -1 --date=format-local:'%Y%m%d%H%M' --format=%cd)
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match the released commit's time ($expected, YYYYMMDDhhmm UTC). Create the tag with 'make tag'."
+            exit 1
+          fi
+
+      - name: Remove pre-installed Rust stable toolchain
+        run: rustup toolchain remove stable 2>/dev/null || true
+
+      # No explicit toolchain — uses the channel and the wasm32-unknown-unknown /
+      # wasm32-wasip2 targets from rust-toolchain.toml.
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Install ic-wasm
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dfinity/ic-wasm/releases/download/0.9.11/ic-wasm-installer.sh | sh
+
+      - name: Build release artifacts
+        run: make release ASSETS_BUNDLE_TAG="${GITHUB_REF_NAME}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Punctuate the YYYYMMDDhhmm tag for the release title (mirrors
+          # wire_types::format_tag) — pure string slicing, no `date` needed.
+          t=$GITHUB_REF_NAME
+          title="${t:0:4}-${t:4:2}-${t:6:2} ${t:8:2}:${t:10:2} UTC"
+
+          # The full set `make release` produced: each artifact plus its
+          # sibling .sha256 (wasm + candid + checksums).
+          assets=(
+            dist/canister-release.wasm.gz dist/canister-release.wasm.gz.sha256
+            dist/plugin-release.wasm      dist/plugin-release.wasm.sha256
+            dist/certified-assets.did     dist/certified-assets.did.sha256
+          )
+
+          # Releases are allowed from any branch. One whose commit is not on main
+          # is published as a GitHub pre-release (kept out of "Latest release")
+          # with its origin in the title, so it's clearly distinguishable from a
+          # main release without being blocked.
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            flag=--latest
+          else
+            origin=$(git branch -r --contains "$GITHUB_SHA" --format='%(refname:short)' \
+                     | grep -vx 'origin/HEAD' | head -n1)
+            title="$title — off-main (${origin:-detached HEAD} @ $(git rev-parse --short "$GITHUB_SHA"))"
+            flag=--prerelease
+          fi
+
+          # Idempotent: a re-run re-uploads the assets instead of failing if the
+          # release already exists (e.g. a prior run died after creating it).
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "$title" \
+              --generate-notes \
+              "$flag"
+          fi

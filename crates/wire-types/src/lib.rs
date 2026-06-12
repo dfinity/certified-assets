@@ -1,7 +1,7 @@
 //! Candid wire types for the assets canister interface.
 //!
 //! These are the Rust shapes of the records and variants in
-//! [`candid/assets.did`](../../../candid/assets.did) that cross the wire between
+//! [`certified-assets.did`](../../../certified-assets.did) that cross the wire between
 //! the canister (server) and the sync plugin / e2e tests (clients). They live in
 //! a single dependency-light crate so the two sides share one definition instead
 //! of each hand-maintaining its own copy.

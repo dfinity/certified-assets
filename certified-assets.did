@@ -1,8 +1,59 @@
-// Reuse the HTTP Gateway types (HeaderField, HttpRequest, HttpResponse,
-// StreamingToken, StreamingStrategy, StreamingCallbackHttpResponse) instead of
-// repeating them here. `import` (without `service`) pulls in only the type
-// definitions, not the gateway's own service.
-import "http-gateway.did";
+// ───────── HTTP Gateway types ─────────
+//
+// The IC HTTP Gateway interface types, from the official specification:
+// https://docs.internetcomputer.org/references/http-gateway-protocol-spec/
+// Kept as published except for `StreamingToken`: the spec defines it as an
+// opaque placeholder that each canister fills in with its own concrete type,
+// and the record below is the assets canister's concrete token.
+
+type HeaderField = record { text; text; };
+
+type HttpRequest = record {
+  method: text;
+  url: text;
+  headers: vec HeaderField;
+  body: blob;
+  certificate_version: opt nat16;
+};
+
+type HttpResponse = record {
+  status_code: nat16;
+  headers: vec HeaderField;
+  body: blob;
+  upgrade : opt bool;
+  streaming_strategy: opt StreamingStrategy;
+};
+
+// The content encodings the canister and sync plugin support — a deliberately
+// small, closed set (see `wire-types::Encoding`). Carried as a variant
+// (one byte on the wire) rather than a string. `Identity` is the uncompressed
+// form; it is a real stored encoding but never emitted as a `Content-Encoding`
+// header. Defined up here so both the streaming token and the asset types below
+// can reference it.
+type Encoding = variant { Identity; Gzip; Brotli };
+
+// Each canister that uses the streaming feature gets to choose their concrete
+// type; the HTTP Gateway will treat it as an opaque value that is only fed to
+// the callback method. This is the assets canister's concrete token.
+
+type StreamingToken = record {
+  key: text;
+  encoding: Encoding;
+  index: nat;
+  sha256: blob;
+};
+
+type StreamingCallbackHttpResponse = record {
+  body: blob;
+  token: opt StreamingToken;
+};
+
+type StreamingStrategy = variant {
+  Callback: record {
+    callback: func (StreamingToken) -> (opt StreamingCallbackHttpResponse) query;
+    token: StreamingToken;
+  };
+};
 
 // ───────── Shared aliases ─────────
 
@@ -144,8 +195,8 @@ service: {
   // ───────── Canister metadata ─────────
 
   // Release identity shared by the canister and its paired sync plugin; the
-  // plugin refuses to sync unless this matches its own tag. Minutes since the
-  // Unix epoch (UTC) at build time, or null for an unstamped dev build.
+  // plugin refuses to sync unless this matches its own tag. The build time as a
+  // YYYYMMDDhhmm decimal (UTC), or null for an unstamped dev build.
   bundle_tag: () -> (opt nat64) query;
 
   // ───────── HTTP gateway ─────────

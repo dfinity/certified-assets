@@ -105,9 +105,9 @@ fn candid_interface_compatibility() {
 
     let new_interface = __export_service();
 
-    // crates/canister -> crates -> workspace root, then candid/assets.did
-    let old_interface =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../candid/assets.did");
+    // crates/canister -> crates -> workspace root, then certified-assets.did
+    let old_interface = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("../../certified-assets.did");
 
     println!("Exported interface: {new_interface}");
 
@@ -115,5 +115,5 @@ fn candid_interface_compatibility() {
         CandidSource::Text(&new_interface),
         CandidSource::File(old_interface.as_path()),
     )
-    .expect("The assets canister interface is not compatible with the assets.did file");
+    .expect("The assets canister interface is not compatible with the certified-assets.did file");
 }
