@@ -24,7 +24,7 @@ CANISTER_OUT := target/$(CANISTER_TARGET)/$(CANISTER_PROFILE)/canister.wasm
 PLUGIN_OUT   := target/$(PLUGIN_TARGET)/$(PLUGIN_PROFILE)/sync_plugin.wasm
 
 # Candid interface attached to the published canister wasm as `candid:service`.
-CANDID := assets.did
+CANDID := certified-assets.did
 
 # Optional release identity (YYYYMMDDhhmm, UTC) compiled into both modules. The
 # release workflow derives it once from the released commit (see the `tag`
@@ -61,7 +61,7 @@ plugin:
 #   dist/canister-release.wasm.gz  — the above, gzipped (the canister the IC installs)
 #   dist/plugin-release.wasm       — copied as-is; icp-cli can't load a gzipped
 #                                    wasi module yet, so gzip it here once it can
-#   dist/assets.did                — the candid interface, for integrators
+#   dist/certified-assets.did      — the candid interface, for integrators
 #   dist/<file>.sha256             — a SHA-256 checksum beside each artifact above,
 #                                    so a downloaded file verifies on its own
 #
@@ -72,8 +72,8 @@ release: wasm
 	ic-wasm $(DIST)/canister.wasm -o $(DIST)/canister-release.wasm metadata candid:service -f $(CANDID) -v public
 	gzip -n9c $(DIST)/canister-release.wasm > $(DIST)/canister-release.wasm.gz
 	cp $(DIST)/plugin.wasm $(DIST)/plugin-release.wasm
-	cp $(CANDID) $(DIST)/assets.did
-	cd $(DIST) && for f in canister-release.wasm.gz plugin-release.wasm assets.did; do \
+	cp $(CANDID) $(DIST)/$(CANDID)
+	cd $(DIST) && for f in canister-release.wasm.gz plugin-release.wasm $(CANDID); do \
 	  shasum -a 256 "$$f" > "$$f.sha256"; \
 	done
 

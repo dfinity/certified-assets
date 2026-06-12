@@ -70,7 +70,7 @@ jobs:
           assets=(
             dist/canister-release.wasm.gz dist/canister-release.wasm.gz.sha256
             dist/plugin-release.wasm      dist/plugin-release.wasm.sha256
-            dist/assets.did               dist/assets.did.sha256
+            dist/certified-assets.did     dist/certified-assets.did.sha256
           )
 
           # Releases are allowed from any branch. One whose commit is not on main
