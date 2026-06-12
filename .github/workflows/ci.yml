@@ -18,10 +18,11 @@ concurrency:
 # automatically separated per job (the key includes the job name, OS, and a
 # hash of Cargo.lock).
 #
-# Jobs with caching remove the pre-installed stable toolchain first so it
-# doesn't pollute the rust-cache environment hash.  macOS (and sometimes Linux)
-# runner images ship with varying stable versions, making the hash
-# non-deterministic and causing constant cache misses.
+# The toolchain is pinned in rust-toolchain.toml, but the runner image also
+# ships a `stable` toolchain whose version drifts as the image updates.
+# rust-cache folds every installed toolchain's version into its hash, so jobs
+# with caching remove the bundled `stable` first — leaving only the pinned
+# version, which keeps the cache key deterministic instead of missing every run.
 
 jobs:
   test:
