@@ -35,10 +35,10 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
-/// The bundle tag this canister was built with: minutes since the Unix epoch
-/// (UTC), or `None` for an unstamped dev build. The sync plugin checks this
-/// against its own tag and refuses to proceed on a mismatch. See
-/// [`wire_types::BUNDLE_TAG`].
+/// The bundle tag this canister was built with: the build time as a
+/// `YYYYMMDDhhmm` decimal (UTC), or `None` for an unstamped dev build. The sync
+/// plugin checks this against its own tag and refuses to proceed on a mismatch.
+/// See [`wire_types::BUNDLE_TAG`].
 pub fn bundle_tag() -> Option<u64> {
     wire_types::BUNDLE_TAG
 }

@@ -1,10 +1,10 @@
 name: Release
 
 # Triggered by pushing a tag whose name is the bundle tag: the released commit's
-# committer time in minutes since the Unix epoch (UTC). Create it with `make tag`
-# and push it. The bundle tag is a function of the commit, not of when you tag,
-# so the release is reproducible and the tag equals the integer the `bundle_tag`
-# query returns at runtime.
+# committer time as YYYYMMDDhhmm in UTC. Create it with `make tag` and push it.
+# The bundle tag is a function of the commit, not of when you tag, so the release
+# is reproducible and the tag equals the integer the `bundle_tag` query returns
+# at runtime.
 on:
   push:
     tags:
@@ -30,10 +30,11 @@ jobs:
         run: |
           # Re-derive the bundle tag from the tagged commit and reject anything
           # else, so a hand-crafted or stale tag can't ship a mislabelled build.
-          # `git log -1` reads the checked-out tag's commit (shallow clone is fine).
-          expected=$(( $(git log -1 --format=%ct) / 60 ))
+          # `git log -1` reads the checked-out tag's commit (shallow clone is fine);
+          # git formats the date identically on every OS.
+          expected=$(TZ=UTC git log -1 --date=format-local:'%Y%m%d%H%M' --format=%cd)
           if [ "$GITHUB_REF_NAME" != "$expected" ]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match the released commit's time ($expected minutes since epoch, UTC). Create the tag with 'make tag'."
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match the released commit's time ($expected, YYYYMMDDhhmm UTC). Create the tag with 'make tag'."
             exit 1
           fi
 
@@ -55,9 +56,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Humanize the integer tag for the release title (the IC HTTP gateway
-          # is UTC; this mirrors wire_types::format_tag).
-          title=$(date -u -d "@$(( GITHUB_REF_NAME * 60 ))" '+%Y-%m-%d %H:%M UTC')
+          # Punctuate the YYYYMMDDhhmm tag for the release title (mirrors
+          # wire_types::format_tag) — pure string slicing, no `date` needed.
+          t=$GITHUB_REF_NAME
+          title="${t:0:4}-${t:4:2}-${t:6:2} ${t:8:2}:${t:10:2} UTC"
           gh release create "$GITHUB_REF_NAME" \
             dist/canister-release.wasm.gz \
             dist/plugin-release.wasm \

@@ -30,18 +30,17 @@ names (so it never clobbers the plain `dist/canister.wasm`/`dist/plugin.wasm`):
 
 `ASSETS_BUNDLE_TAG` is the optional release identity stamped into **both**
 modules so a deployed canister and its sync plugin only pair with their exact
-counterpart. It's a single integer — minutes since the Unix epoch (UTC) — and is
-left unset for e2e and manual builds, which are then unstamped. See Releasing for
-where its value comes from.
+counterpart. It's the build time as a 12-digit `YYYYMMDDhhmm` (UTC) integer —
+e.g. `202606121430` for 2026-06-12 14:30 — and is left unset for e2e and manual
+builds, which are then unstamped. See Releasing for where its value comes from.
 
 ## Releasing
 
 A release is a git tag whose name **is** the bundle tag: the released commit's
-committer time in minutes since the Unix epoch (UTC). Deriving it from the commit
-— not from when you happen to tag — means re-tagging the same commit always
-yields the same value, and the tag equals the exact integer the `bundle_tag`
-query returns at runtime, so a plugin/canister mismatch maps straight back to a
-release.
+committer time as `YYYYMMDDhhmm` in UTC. Deriving it from the commit — not from
+when you happen to tag — means re-tagging the same commit always yields the same
+value, and the tag equals the exact integer the `bundle_tag` query returns at
+runtime, so a plugin/canister mismatch maps straight back to a release.
 
 ```sh
 make tag                 # create the tag for HEAD (prints the push command)

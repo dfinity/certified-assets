@@ -26,12 +26,12 @@ PLUGIN_OUT   := target/$(PLUGIN_TARGET)/$(PLUGIN_PROFILE)/sync_plugin.wasm
 # Candid interface attached to the published canister wasm as `candid:service`.
 CANDID := assets.did
 
-# Optional release identity compiled into both modules. The release workflow
-# computes it once — `ASSETS_BUNDLE_TAG=$$(( $$(date -u +%s) / 60 ))` — and passes
-# it here, so the plugin only syncs against its exact counterpart. Left unset for
-# e2e and manual builds, which become unstamped (None) dev builds. wire-types
-# reads it via option_env!, so leaving it unset also keeps those builds out of
-# the recompile-on-tag-change path.
+# Optional release identity (YYYYMMDDhhmm, UTC) compiled into both modules. The
+# release workflow derives it once from the released commit (see the `tag`
+# target) and passes it here, so the plugin only syncs against its exact
+# counterpart. Left unset for e2e and manual builds, which become unstamped
+# (None) dev builds. wire-types reads it via option_env!, so leaving it unset
+# also keeps those builds out of the recompile-on-tag-change path.
 TAG_ENV := $(if $(ASSETS_BUNDLE_TAG),ASSETS_BUNDLE_TAG=$(ASSETS_BUNDLE_TAG),)
 
 .PHONY: wasm canister plugin release tag clean
@@ -69,12 +69,13 @@ release: wasm
 	cp $(DIST)/plugin.wasm $(DIST)/plugin-release.wasm
 
 # Create the release tag for HEAD. The tag's name IS the bundle tag — HEAD's
-# committer time in minutes since the Unix epoch (UTC) — so it depends only on
-# the commit, not on when you run this: re-tagging the same commit yields the
-# same value. Push it (`git push origin <tag>`) to trigger the release workflow,
-# which re-derives this value from the commit and rejects a mismatch.
+# committer time as YYYYMMDDhhmm in UTC — so it depends only on the commit, not
+# on when you run this: re-tagging the same commit yields the same value. Push it
+# (`git push origin <tag>`) to trigger the release workflow, which re-derives
+# this value from the commit and rejects a mismatch. We format via git (not
+# `date`) so it behaves identically on macOS and Linux.
 tag:
-	@tag=$$(( $$(git log -1 --format=%ct) / 60 )); \
+	@tag=$$(TZ=UTC git log -1 --date=format-local:'%Y%m%d%H%M' --format=%cd); \
 	git tag -a "$$tag" -m "Release $$tag"; \
 	echo "Created tag $$tag — push it with: git push origin $$tag"
 

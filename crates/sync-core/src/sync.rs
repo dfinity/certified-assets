@@ -105,8 +105,8 @@ pub fn sync<C: CanisterCall>(
     // The canister and this plugin ship as one bundle and only work as a pair.
     // Refuse to sync against a canister from a different bundle — most often a
     // canister that wasn't re-installed after the recipe was bumped. The tag is
-    // Option<minutes-since-epoch> (None = unstamped dev build, ordering before
-    // any real tag), so the compare tells the user which side is stale and
+    // Option<YYYYMMDDhhmm> (None = unstamped dev build, ordering before any real
+    // tag), so the numeric compare tells the user which side is stale and
     // format_tag renders each as a readable UTC timestamp.
     let canister_tag = bundle_tag(canister)?;
     let plugin_tag = wire_types::BUNDLE_TAG;
