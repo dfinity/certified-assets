@@ -10,18 +10,17 @@ use crate::types::{
 };
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::{Nat, Principal};
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
 use ic_http_certification::{Method, StatusCode};
-use ic_response_verification_test_utils::{
-    base64_encode, create_canister_id, get_current_timestamp,
-};
 use ic_stable_structures::DefaultMemoryImpl;
 use serde_bytes::ByteBuf;
 use sha2::Digest as Sha2Digest;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // from ic-response-verification tests
 const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
@@ -78,8 +77,11 @@ pub fn verify_response(
     response: &HttpResponse,
 ) -> anyhow::Result<bool> {
     let mut response = response.clone();
-    let current_time = get_current_timestamp();
-    let canister_id = create_canister_id("rdmx6-jaaaa-aaaaa-aaadq-cai");
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
     let min_requested_verification_version: u16 = 2;
 
     // inject certificate into IC-Certificate header with 'certificate=::'
@@ -89,7 +91,7 @@ pub fn verify_response(
     )?
     .with_time(current_time)
     .build()?;
-    let replacement_cert_value = base64_encode(&data.cbor_encoded_certificate);
+    let replacement_cert_value = BASE64.encode(&data.cbor_encoded_certificate);
     let (_, header_value) = response
         .headers
         .iter_mut()

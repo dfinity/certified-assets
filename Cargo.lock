@@ -405,13 +405,12 @@ dependencies = [
  "hex",
  "http",
  "ic-cdk",
- "ic-certification 3.2.0",
+ "ic-certification",
  "ic-certification-testing",
  "ic-crypto-tree-hash",
- "ic-http-certification 3.2.0",
- "ic-representation-independent-hash 3.2.0",
+ "ic-http-certification",
+ "ic-representation-independent-hash",
  "ic-response-verification",
- "ic-response-verification-test-utils",
  "ic-stable-structures",
  "itertools 0.14.0",
  "num-traits",
@@ -1269,7 +1268,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3deef16d1d03492439cfba19256e38a08159f38241acc738188ec11831781d71"
 dependencies = [
  "candid",
- "ic-certification 3.2.0",
+ "ic-certification",
  "leb128",
  "nom",
  "thiserror 1.0.69",
@@ -1324,7 +1323,7 @@ dependencies = [
  "cached 0.54.0",
  "candid",
  "ic-cbor",
- "ic-certification 3.2.0",
+ "ic-certification",
  "ic-verify-bls-signature",
  "lazy_static",
  "leb128",
@@ -1332,17 +1331,6 @@ dependencies = [
  "parking_lot",
  "sha2 0.10.9",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "ic-certification"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "hex",
- "serde",
- "serde_bytes",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1552,22 +1540,6 @@ dependencies = [
 
 [[package]]
 name = "ic-http-certification"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "base64 0.22.1",
- "candid",
- "http",
- "ic-certification 3.0.3",
- "ic-representation-independent-hash 3.0.3",
- "serde",
- "serde_cbor",
- "thiserror 1.0.69",
- "urlencoding",
-]
-
-[[package]]
-name = "ic-http-certification"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "689c75307307b577220b7bade846123d62ef0a8fe536540267571c8e94825cf5"
@@ -1575,8 +1547,8 @@ dependencies = [
  "base64 0.22.1",
  "candid",
  "http",
- "ic-certification 3.2.0",
- "ic-representation-independent-hash 3.2.0",
+ "ic-certification",
+ "ic-representation-independent-hash",
  "serde",
  "serde_cbor",
  "thiserror 1.0.69",
@@ -1635,15 +1607,6 @@ dependencies = [
 
 [[package]]
 name = "ic-representation-independent-hash"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "leb128",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "ic-representation-independent-hash"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c80c46e399bcce51c531237e1111ced114dec295cff22b0996099a6168814b03"
@@ -1665,33 +1628,15 @@ dependencies = [
  "http",
  "ic-cbor",
  "ic-certificate-verification",
- "ic-certification 3.2.0",
- "ic-http-certification 3.2.0",
- "ic-representation-independent-hash 3.2.0",
+ "ic-certification",
+ "ic-http-certification",
+ "ic-representation-independent-hash",
  "leb128",
  "log",
  "nom",
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "urlencoding",
-]
-
-[[package]]
-name = "ic-response-verification-test-utils"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "hex",
- "ic-certification 3.0.3",
- "ic-certification-testing",
- "ic-http-certification 3.0.3",
- "ic-types",
- "leb128",
- "serde",
- "serde_cbor",
- "sha2 0.10.9",
 ]
 
 [[package]]
