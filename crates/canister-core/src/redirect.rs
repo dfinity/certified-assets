@@ -479,8 +479,9 @@ mod tests {
             status: 301,
             headers: vec![],
         };
-        let bytes = serde_cbor::to_vec(&r).unwrap();
-        let back: RedirectRule = serde_cbor::from_slice(&bytes).unwrap();
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&r, &mut bytes).unwrap();
+        let back: RedirectRule = ciborium::from_reader(&bytes[..]).unwrap();
         assert_eq!(r, back);
     }
 }

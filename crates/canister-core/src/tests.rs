@@ -1292,8 +1292,9 @@ fn headers_cbor_deserialize_from_hashmap_to_btreemap() {
             ("b-name".into(), "b-value".into()),
             ("a-name".into(), "a-value".into()),
         ]);
-        let serialized = serde_cbor::to_vec(&old_headers).unwrap();
-        let new_headers: BTreeMap<String, String> = serde_cbor::from_slice(&serialized).unwrap();
+        let mut serialized = Vec::new();
+        ciborium::into_writer(&old_headers, &mut serialized).unwrap();
+        let new_headers: BTreeMap<String, String> = ciborium::from_reader(&serialized[..]).unwrap();
         // Compare the order to check that the BTreeMap is deterministic
         assert_eq!(
             new_headers.into_iter().collect::<Vec<(String, String)>>(),

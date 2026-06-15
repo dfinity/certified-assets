@@ -22,7 +22,7 @@ itertools.workspace = true
 num-traits.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
-serde_cbor.workspace = true
+ciborium.workspace = true
 sha2.workspace = true
 percent-encoding.workspace = true
 

@@ -15,8 +15,6 @@ use ic_certification::merge_hash_trees;
 pub use ic_certification::HashTree;
 use ic_representation_independent_hash::{representation_independent_hash, Value};
 use serde::{Deserialize, Serialize};
-use serde_cbor::ser::IoWrite;
-use serde_cbor::Serializer;
 use sha2::Digest;
 use std::borrow::Borrow;
 
@@ -218,14 +216,11 @@ fn serialize_cbor_self_describing<T>(value: &T) -> Vec<u8>
 where
     T: serde::Serialize,
 {
-    let mut vec = Vec::new();
-    let mut binding = IoWrite::new(&mut vec);
-    let mut s = Serializer::new(&mut binding);
-    s.self_describe()
-        .expect("Cannot produce self-describing cbor.");
-    value
-        .serialize(&mut s)
-        .expect("Failed to serialize self-describing CBOR.");
+    // The IC certification spec requires the witness tree to be encoded as
+    // self-describing CBOR (tag 55799). `ciborium` has no `self_describe()`
+    // helper, so we prepend the tag's fixed 3-byte encoding manually.
+    let mut vec = vec![0xd9, 0xd9, 0xf7];
+    ciborium::into_writer(value, &mut vec).expect("Failed to serialize self-describing CBOR.");
     vec
 }
 
@@ -426,9 +421,7 @@ impl CertifiedResponses {
         certificate: &[u8],
     ) -> (String, String) {
         let (witness, _) = self.witness_path(request_path);
-        let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
-        serializer.self_describe().unwrap();
-        witness.serialize(&mut serializer).unwrap();
+        let tree = serialize_cbor_self_describing(&witness);
 
         (
             "IC-Certificate".to_string(),
@@ -436,7 +429,7 @@ impl CertifiedResponses {
                 + "certificate=:"
                 + &BASE64.encode(certificate)
                 + ":, tree=:"
-                + &BASE64.encode(serializer.into_inner())
+                + &BASE64.encode(tree)
                 + ":, expr_path=:"
                 + &location.expr_path()
                 + ":",
@@ -451,10 +444,7 @@ impl CertifiedResponses {
     ) -> ((String, String), WitnessResult) {
         let (witness, witness_result) = self.witness_path(path);
         let expr_path = self.expr_path(path);
-
-        let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
-        serializer.self_describe().unwrap();
-        witness.serialize(&mut serializer).unwrap();
+        let tree = serialize_cbor_self_describing(&witness);
 
         (
             (
@@ -463,7 +453,7 @@ impl CertifiedResponses {
                     + "certificate=:"
                     + &BASE64.encode(certificate)
                     + ":, tree=:"
-                    + &BASE64.encode(serializer.into_inner())
+                    + &BASE64.encode(tree)
                     + ":, expr_path=:"
                     + &expr_path
                     + ":",

@@ -114,21 +114,25 @@ impl Storable for ContentChunkKey {
     };
 }
 
-/// `Storable` via `serde_cbor`, unbounded. Used for the small/medium structs
-/// whose size we don't need to bound for stable-structure node sizing.
+/// `Storable` via CBOR (`ciborium`), unbounded. Used for the small/medium
+/// structs whose size we don't need to bound for stable-structure node sizing.
 macro_rules! impl_cbor_storable {
     ($t:ty) => {
         impl Storable for $t {
             fn to_bytes(&self) -> Cow<'_, [u8]> {
-                Cow::Owned(serde_cbor::to_vec(self).expect("cbor serialize"))
+                let mut buf = Vec::new();
+                ciborium::into_writer(self, &mut buf).expect("cbor serialize");
+                Cow::Owned(buf)
             }
 
             fn into_bytes(self) -> Vec<u8> {
-                serde_cbor::to_vec(&self).expect("cbor serialize")
+                let mut buf = Vec::new();
+                ciborium::into_writer(&self, &mut buf).expect("cbor serialize");
+                buf
             }
 
             fn from_bytes(bytes: Cow<[u8]>) -> Self {
-                serde_cbor::from_slice(&bytes).expect("cbor deserialize")
+                ciborium::from_reader(&bytes[..]).expect("cbor deserialize")
             }
 
             const BOUND: Bound = Bound::Unbounded;
