@@ -45,23 +45,23 @@ pub fn bundle_tag() -> Option<u64> {
 
 /// Adds `principal` to the authorized set. Controller-guarded at the endpoint.
 pub fn authorize(principal: Principal) {
-    with_state_mut(|s| s.authorize(principal))
+    STATE.with_borrow_mut(|s| s.authorize(principal))
 }
 
 /// Removes `principal` from the authorized set. Controller-guarded at the endpoint.
 pub fn deauthorize(principal: Principal) {
-    with_state_mut(|s| s.deauthorize(&principal))
+    STATE.with_borrow_mut(|s| s.deauthorize(&principal))
 }
 
 pub fn list_authorized() -> Vec<Principal> {
-    with_state(|s| s.list_authorized())
+    STATE.with_borrow(|s| s.list_authorized())
 }
 
 pub fn start_sync() -> StartSyncResult {
     let system_context = SystemContext::new();
     let caller = msg_caller();
 
-    with_state_mut(|s| {
+    STATE.with_borrow_mut(|s| {
         let result = s.start_sync(caller, &system_context);
         // Capture the env once, at sync start, so every asset (re)certified by
         // the operations that follow already carries the current `ic_env`
@@ -79,7 +79,7 @@ pub fn start_sync() -> StartSyncResult {
 pub fn upload_chunks(arg: UploadChunksArguments) {
     let system_context = SystemContext::new();
 
-    with_state_mut(|s| {
+    STATE.with_borrow_mut(|s| {
         if let Err(msg) = s.upload_chunks(arg, &system_context) {
             trap(&msg);
         }
@@ -91,21 +91,21 @@ pub async fn execute_operations(arg: ExecuteOperationsArguments) {
     let arg_ref = &arg;
 
     loop_with_message_extension_until_completion(|progress| {
-        with_state_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
+        STATE.with_borrow_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
     })
     .await
     .map_err(|msg| trap(&msg))
     .ok();
 
-    with_state_mut(|s| certified_data_set(s.root_hash()));
+    STATE.with_borrow_mut(|s| certified_data_set(s.root_hash()));
 }
 
 pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
-    with_state(|s| s.get_asset_details(start_after))
+    STATE.with_borrow(|s| s.get_asset_details(start_after))
 }
 
 pub fn get_redirect_rules(start_index: u64) -> Vec<RedirectRule> {
-    with_state(|s| s.get_redirect_rules(start_index))
+    STATE.with_borrow(|s| s.get_redirect_rules(start_index))
 }
 
 pub fn http_request(req: HttpRequest) -> HttpResponse {
@@ -114,7 +114,7 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
     }
     let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
 
-    with_state(|s| {
+    STATE.with_borrow(|s| {
         s.http_request(
             req,
             &certificate,
@@ -129,7 +129,7 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
 pub fn http_request_streaming_callback(
     token: StreamingCallbackToken,
 ) -> Option<StreamingCallbackHttpResponse> {
-    with_state(|s| {
+    STATE.with_borrow(|s| {
         Some(
             s.http_request_streaming_callback(token)
                 .unwrap_or_else(|msg| trap(&msg)),
@@ -142,7 +142,7 @@ pub fn http_request_streaming_callback(
 /// principals — controllers are always allowed without being stored.
 pub fn can_sync() -> bool {
     let caller = msg_caller();
-    with_state(|s| s.is_authorized(&caller)) || ic_cdk::api::is_controller(&caller)
+    STATE.with_borrow(|s| s.is_authorized(&caller)) || ic_cdk::api::is_controller(&caller)
 }
 
 /// `#[update(guard = ...)]` guard over every asset-sync operation.
@@ -171,7 +171,7 @@ pub fn guard_is_controller() -> Result<(), String> {
 /// `PUBLIC_*` env vars are set.
 pub fn refresh_env() {
     let env = CanisterEnv::load(); // replicated context — system API is readable
-    with_state_mut(|s| {
+    STATE.with_borrow_mut(|s| {
         s.refresh_env(&env);
         certified_data_set(s.root_hash());
     });
@@ -190,25 +190,11 @@ pub fn refresh_env() {
 /// and it would silently vanish until the next `refresh_env`.
 pub fn post_upgrade() {
     let env = CanisterEnv::load(); // replicated context — system API is readable
-    with_state_mut(|s| {
+    STATE.with_borrow_mut(|s| {
         s.store_env(&env);
         s.post_upgrade_rebuild();
         certified_data_set(s.root_hash());
     });
-}
-
-fn with_state_mut<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut State) -> R,
-{
-    STATE.with(|s| f(&mut s.borrow_mut()))
-}
-
-fn with_state<F, R>(f: F) -> R
-where
-    F: FnOnce(&State) -> R,
-{
-    STATE.with(|s| f(&s.borrow()))
 }
 
 /// Loops calling a state machine function until completion, periodically async-calling
