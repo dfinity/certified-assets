@@ -19,6 +19,7 @@ pub struct KeyPattern {
 }
 
 impl KeyPattern {
+    #[cfg(test)]
     pub fn source(&self) -> &str {
         &self.source
     }

@@ -7,12 +7,7 @@ use crate::certification::{
 use http::{HeaderName, HeaderValue, StatusCode};
 use ic_representation_independent_hash::Value;
 use sha2::Digest;
-
-// The rule data types are shared with the plugin, so they live in `wire-types`.
-// The behaviour below (matching, certification, tree placement) is
-// canister-only and stays here as free functions — Rust's orphan rule forbids
-// inherent `impl`s on a type defined in another crate.
-pub use wire_types::{RedirectRule, RulePattern};
+use wire_types::{RedirectRule, RulePattern};
 
 const SUPPORTED_STATUS_CODES: &[StatusCode] = &[
     StatusCode::OK,
@@ -198,7 +193,7 @@ pub enum CertifiedRuleEntryKind {
 /// Build the certified-tree entries for a 3xx redirect rule. The response
 /// has an empty body; only the headers (content-type, Location, and any
 /// rule-supplied extras) are certified.
-pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
+pub fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
     let headers = certified_headers(rule);
     let header_values: Vec<(String, Value)> = headers
         .iter()
@@ -232,7 +227,7 @@ pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
 /// Build a tree path slot for the rule's location with the given expression
 /// hash and response hash. Used by the status-200 path to mirror each
 /// encoding of a target asset.
-pub(crate) fn alias_tree_path(
+pub fn alias_tree_path(
     location: &HashTreePath,
     expression_hash: [u8; 32],
     response_hash: [u8; 32],
@@ -484,8 +479,9 @@ mod tests {
             status: 301,
             headers: vec![],
         };
-        let bytes = serde_cbor::to_vec(&r).unwrap();
-        let back: RedirectRule = serde_cbor::from_slice(&bytes).unwrap();
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&r, &mut bytes).unwrap();
+        let back: RedirectRule = ciborium::from_reader(&bytes[..]).unwrap();
         assert_eq!(r, back);
     }
 }

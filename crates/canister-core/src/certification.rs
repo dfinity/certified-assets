@@ -9,15 +9,12 @@
 //!   operations.
 
 use crate::nested_tree::NestedTree;
-use crate::rc_bytes::RcBytes;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::CandidType;
 use ic_certification::merge_hash_trees;
 pub use ic_certification::HashTree;
 use ic_representation_independent_hash::{representation_independent_hash, Value};
 use serde::{Deserialize, Serialize};
-use serde_cbor::ser::IoWrite;
-use serde_cbor::Serializer;
 use sha2::Digest;
 use std::borrow::Borrow;
 
@@ -68,11 +65,6 @@ where
 }
 
 impl AssetPath {
-    pub fn reconstruct_asset_key(&self) -> AssetKey {
-        // this reconstructs "" as "/", but this is not a problem because no http client actually requests ""
-        format!("/{}", self.0.join("/"))
-    }
-
     pub fn asset_hash_path_root(&self) -> HashTreePath {
         let mut hash_path: Vec<NestedTreeKey> = self
             .0
@@ -171,40 +163,6 @@ impl HashTreePath {
         paths
     }
 
-    pub fn new(
-        asset: &str,
-        status_code: u16,
-        headers: &[(String, Value)],
-        body: &RcBytes,
-        body_hash: Option<[u8; 32]>,
-    ) -> Self {
-        Self::from_parts(asset, status_code, headers, body, body_hash, None, None)
-    }
-
-    pub fn from_parts(
-        path: &str,
-        status_code: u16,
-        headers: &[(String, Value)],
-        body: &[u8],
-        body_hash: Option<[u8; 32]>,
-        certificate_expression: Option<&CertificateExpression>,
-        response_hash_value: Option<ResponseHash>,
-    ) -> Self {
-        let certificate_expression = certificate_expression
-            .cloned()
-            .unwrap_or_else(|| build_ic_certificate_expression_from_headers(headers));
-        let request_hash = RequestHash::default(); // request certification currently not supported
-        let body_hash = body_hash.unwrap_or_else(|| sha2::Sha256::digest(body).into());
-        let resolved_response_hash =
-            response_hash_value.unwrap_or_else(|| response_hash(headers, status_code, &body_hash));
-
-        AssetPath::from(path).hash_tree_path(
-            &certificate_expression,
-            &request_hash,
-            resolved_response_hash,
-        )
-    }
-
     pub fn not_found_base_path() -> Self {
         HashTreePath::from(Vec::from([
             NestedTreeKey::String("http_expr".into()),
@@ -258,14 +216,11 @@ fn serialize_cbor_self_describing<T>(value: &T) -> Vec<u8>
 where
     T: serde::Serialize,
 {
-    let mut vec = Vec::new();
-    let mut binding = IoWrite::new(&mut vec);
-    let mut s = Serializer::new(&mut binding);
-    s.self_describe()
-        .expect("Cannot produce self-describing cbor.");
-    value
-        .serialize(&mut s)
-        .expect("Failed to serialize self-describing CBOR.");
+    // The IC certification spec requires the witness tree to be encoded as
+    // self-describing CBOR (tag 55799). `ciborium` has no `self_describe()`
+    // helper, so we prepend the tag's fixed 3-byte encoding manually.
+    let mut vec = vec![0xd9, 0xd9, 0xf7];
+    ciborium::into_writer(value, &mut vec).expect("Failed to serialize self-describing CBOR.");
     vec
 }
 
@@ -351,45 +306,6 @@ pub fn build_ic_certificate_expression_header(
 pub type CertifiedResponses = NestedTree<NestedTreeKey, Vec<u8>>;
 
 impl CertifiedResponses {
-    /// Certifies a response for a number of paths.
-    ///
-    /// # Arguments
-    /// * `paths`: path(s) to the resource
-    /// * `status_code`: HTTP status code of the response
-    /// * `headers`: All certified headers. It is possible to respond with additional headers, but only the ones supplied in this argument are certified
-    /// * `body`: Response body. Ignored if `body_hash.is_some()`
-    /// * `body_hash`: Hash of the response body. If supplied the response body will not be hashed, which can save a lot of computation
-    ///
-    /// # Return Value
-    /// * `Vec<HashTreePath>`: `HashTreePath`s corresponding to the supplied `paths`. Can be used to remove or re-insert certification for a specific response without having to re-compute the full path
-    pub fn certify_response(
-        &mut self,
-        paths: &[&str],
-        status_code: u16,
-        headers: &[(String, Value)],
-        body: &[u8],
-        body_hash: Option<[u8; 32]>,
-    ) -> Vec<HashTreePath> {
-        let certificate_expression = build_ic_certificate_expression_from_headers(headers);
-        let request_hash = RequestHash::default(); // request certification currently not supported
-        let body_hash = body_hash.unwrap_or_else(|| sha2::Sha256::digest(body).into());
-        let response_hash = response_hash(headers, status_code, &body_hash);
-
-        paths
-            .iter()
-            .map(|path| {
-                let asset_path = AssetPath::from(path);
-                let hash_tree_path = asset_path.hash_tree_path(
-                    &certificate_expression,
-                    &request_hash,
-                    response_hash,
-                );
-                self.certify_response_precomputed(&hash_tree_path);
-                hash_tree_path
-            })
-            .collect()
-    }
-
     /// Certifies a response that can be used if no certified response is available for the requested path.
     ///
     /// # Arguments
@@ -459,7 +375,7 @@ impl CertifiedResponses {
     ///   rule) — callers that serve such a response use
     ///   `witness_to_header_with_location` to point `expr_path` at the
     ///   right `<*>` ancestor.
-    pub fn witness_path(&self, path: &str) -> (HashTree, WitnessResult) {
+    fn witness_path(&self, path: &str) -> (HashTree, WitnessResult) {
         let path = AssetPath::from(path);
         let hash_tree_path_root = path.asset_hash_path_root();
         if self.contains_path(hash_tree_path_root.as_vec()) {
@@ -483,7 +399,7 @@ impl CertifiedResponses {
         }
     }
 
-    pub fn expr_path(&self, path: &str) -> String {
+    fn expr_path(&self, path: &str) -> String {
         let path = AssetPath::from(path);
         let hash_tree_path_root = path.asset_hash_path_root();
         if self.contains_path(hash_tree_path_root.as_vec()) {
@@ -505,9 +421,7 @@ impl CertifiedResponses {
         certificate: &[u8],
     ) -> (String, String) {
         let (witness, _) = self.witness_path(request_path);
-        let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
-        serializer.self_describe().unwrap();
-        witness.serialize(&mut serializer).unwrap();
+        let tree = serialize_cbor_self_describing(&witness);
 
         (
             "IC-Certificate".to_string(),
@@ -515,7 +429,7 @@ impl CertifiedResponses {
                 + "certificate=:"
                 + &BASE64.encode(certificate)
                 + ":, tree=:"
-                + &BASE64.encode(serializer.into_inner())
+                + &BASE64.encode(tree)
                 + ":, expr_path=:"
                 + &location.expr_path()
                 + ":",
@@ -530,10 +444,7 @@ impl CertifiedResponses {
     ) -> ((String, String), WitnessResult) {
         let (witness, witness_result) = self.witness_path(path);
         let expr_path = self.expr_path(path);
-
-        let mut serializer = serde_cbor::ser::Serializer::new(vec![]);
-        serializer.self_describe().unwrap();
-        witness.serialize(&mut serializer).unwrap();
+        let tree = serialize_cbor_self_describing(&witness);
 
         (
             (
@@ -542,7 +453,7 @@ impl CertifiedResponses {
                     + "certificate=:"
                     + &BASE64.encode(certificate)
                     + ":, tree=:"
-                    + &BASE64.encode(serializer.into_inner())
+                    + &BASE64.encode(tree)
                     + ":, expr_path=:"
                     + &expr_path
                     + ":",

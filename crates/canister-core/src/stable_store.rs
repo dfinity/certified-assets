@@ -26,8 +26,7 @@ use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use serde::{Deserialize, Serialize};
 
-use crate::redirect::RedirectRule;
-use wire_types::Encoding;
+use wire_types::{Encoding, RedirectRule};
 
 /// Principals authorized to sync (controllers are always allowed and are not
 /// stored here). Newtype so it can carry a `Storable` impl (the orphan rule
@@ -115,21 +114,25 @@ impl Storable for ContentChunkKey {
     };
 }
 
-/// `Storable` via `serde_cbor`, unbounded. Used for the small/medium structs
-/// whose size we don't need to bound for stable-structure node sizing.
+/// `Storable` via CBOR (`ciborium`), unbounded. Used for the small/medium
+/// structs whose size we don't need to bound for stable-structure node sizing.
 macro_rules! impl_cbor_storable {
     ($t:ty) => {
         impl Storable for $t {
             fn to_bytes(&self) -> Cow<'_, [u8]> {
-                Cow::Owned(serde_cbor::to_vec(self).expect("cbor serialize"))
+                let mut buf = Vec::new();
+                ciborium::into_writer(self, &mut buf).expect("cbor serialize");
+                Cow::Owned(buf)
             }
 
             fn into_bytes(self) -> Vec<u8> {
-                serde_cbor::to_vec(&self).expect("cbor serialize")
+                let mut buf = Vec::new();
+                ciborium::into_writer(&self, &mut buf).expect("cbor serialize");
+                buf
             }
 
             fn from_bytes(bytes: Cow<[u8]>) -> Self {
-                serde_cbor::from_slice(&bytes).expect("cbor deserialize")
+                ciborium::from_reader(&bytes[..]).expect("cbor deserialize")
             }
 
             const BOUND: Bound = Bound::Unbounded;
@@ -163,7 +166,7 @@ mod tests {
 
     #[test]
     fn redirect_rules_cbor_roundtrips() {
-        use crate::redirect::{RedirectRule, RulePattern};
+        use wire_types::RulePattern;
         let rules = RedirectRules(vec![RedirectRule {
             from: RulePattern::Exact("/old".into()),
             to: "/new".into(),

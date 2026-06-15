@@ -402,23 +402,22 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "candid",
+ "ciborium",
  "hex",
  "http",
  "ic-cdk",
- "ic-certification 3.2.0",
+ "ic-certification",
  "ic-certification-testing",
  "ic-crypto-tree-hash",
- "ic-http-certification 3.2.0",
- "ic-representation-independent-hash 3.2.0",
+ "ic-http-certification",
+ "ic-representation-independent-hash",
  "ic-response-verification",
- "ic-response-verification-test-utils",
  "ic-stable-structures",
  "itertools 0.14.0",
  "num-traits",
  "percent-encoding",
  "serde",
  "serde_bytes",
- "serde_cbor",
  "sha2 0.11.0",
  "wire-types",
 ]
@@ -449,6 +448,33 @@ dependencies = [
  "num-traits",
  "serde",
  "windows-link",
+]
+
+[[package]]
+name = "ciborium"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42e69ffd6f0917f5c029256a24d0161db17cea3997d185db0d35926308770f0e"
+dependencies = [
+ "ciborium-io",
+ "ciborium-ll",
+ "serde",
+]
+
+[[package]]
+name = "ciborium-io"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05afea1e0a06c9be33d539b876f1ce3692f4afea2cb41f740e7743225ed1c757"
+
+[[package]]
+name = "ciborium-ll"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
+dependencies = [
+ "ciborium-io",
+ "half 2.7.1",
 ]
 
 [[package]]
@@ -1043,6 +1069,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
 
 [[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
+]
+
+[[package]]
 name = "handlebars"
 version = "6.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1103,9 +1140,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.0"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
  "bytes",
  "itoa",
@@ -1269,7 +1306,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3deef16d1d03492439cfba19256e38a08159f38241acc738188ec11831781d71"
 dependencies = [
  "candid",
- "ic-certification 3.2.0",
+ "ic-certification",
  "leb128",
  "nom",
  "thiserror 1.0.69",
@@ -1324,7 +1361,7 @@ dependencies = [
  "cached 0.54.0",
  "candid",
  "ic-cbor",
- "ic-certification 3.2.0",
+ "ic-certification",
  "ic-verify-bls-signature",
  "lazy_static",
  "leb128",
@@ -1332,17 +1369,6 @@ dependencies = [
  "parking_lot",
  "sha2 0.10.9",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "ic-certification"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "hex",
- "serde",
- "serde_bytes",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1552,22 +1578,6 @@ dependencies = [
 
 [[package]]
 name = "ic-http-certification"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "base64 0.22.1",
- "candid",
- "http",
- "ic-certification 3.0.3",
- "ic-representation-independent-hash 3.0.3",
- "serde",
- "serde_cbor",
- "thiserror 1.0.69",
- "urlencoding",
-]
-
-[[package]]
-name = "ic-http-certification"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "689c75307307b577220b7bade846123d62ef0a8fe536540267571c8e94825cf5"
@@ -1575,8 +1585,8 @@ dependencies = [
  "base64 0.22.1",
  "candid",
  "http",
- "ic-certification 3.2.0",
- "ic-representation-independent-hash 3.2.0",
+ "ic-certification",
+ "ic-representation-independent-hash",
  "serde",
  "serde_cbor",
  "thiserror 1.0.69",
@@ -1635,15 +1645,6 @@ dependencies = [
 
 [[package]]
 name = "ic-representation-independent-hash"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "leb128",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "ic-representation-independent-hash"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c80c46e399bcce51c531237e1111ced114dec295cff22b0996099a6168814b03"
@@ -1665,33 +1666,15 @@ dependencies = [
  "http",
  "ic-cbor",
  "ic-certificate-verification",
- "ic-certification 3.2.0",
- "ic-http-certification 3.2.0",
- "ic-representation-independent-hash 3.2.0",
+ "ic-certification",
+ "ic-http-certification",
+ "ic-representation-independent-hash",
  "leb128",
  "log",
  "nom",
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "urlencoding",
-]
-
-[[package]]
-name = "ic-response-verification-test-utils"
-version = "3.0.3"
-source = "git+https://github.com/dfinity/response-verification.git?rev=66d33cf61e6ac17ec895598dd7f584605637bb42#66d33cf61e6ac17ec895598dd7f584605637bb42"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "hex",
- "ic-certification 3.0.3",
- "ic-certification-testing",
- "ic-http-certification 3.0.3",
- "ic-types",
- "leb128",
- "serde",
- "serde_cbor",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2693,9 +2676,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "reqwest"
-version = "0.12.28"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2711,9 +2694,6 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
- "serde",
- "serde_json",
- "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -2756,12 +2736,6 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
-
-[[package]]
-name = "ryu"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "same-file"
@@ -2827,7 +2801,7 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
 dependencies = [
- "half",
+ "half 1.8.3",
  "serde",
 ]
 
@@ -2870,18 +2844,6 @@ version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
- "serde",
-]
-
-[[package]]
-name = "serde_urlencoded"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3491c14715ca2294c4d6a88f15e84739788c1d030eed8c110436aafdaa2f3fd"
-dependencies = [
- "form_urlencoded",
- "itoa",
- "ryu",
  "serde",
 ]
 
@@ -3121,7 +3083,7 @@ dependencies = [
  "candid",
  "serde",
  "sync-core",
- "wit-bindgen 0.57.1",
+ "wit-bindgen 0.58.0",
 ]
 
 [[package]]
@@ -3615,12 +3577,12 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.247.0"
+version = "0.251.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30b6733b8b91d010a6ac5b0fb237dc46a19650bc4c67db66857e2e787d437204"
+checksum = "5a879a421bd17c528b74721b2abf4c62e8f1d1889c2ba8c3c50d02deaf2ce395"
 dependencies = [
  "leb128fmt",
- "wasmparser 0.247.0",
+ "wasmparser 0.251.0",
 ]
 
 [[package]]
@@ -3637,14 +3599,14 @@ dependencies = [
 
 [[package]]
 name = "wasm-metadata"
-version = "0.247.0"
+version = "0.251.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "665fe59e56cc9b419ca6fcca56673e3421d1a5011e3b65caf6b726fd9e041d10"
+checksum = "5f998ccc6e012f7b86865eb2a106c8a0422017a1a88977ce01a69f2244be2e57"
 dependencies = [
  "anyhow",
  "indexmap",
- "wasm-encoder 0.247.0",
- "wasmparser 0.247.0",
+ "wasm-encoder 0.251.0",
+ "wasmparser 0.251.0",
 ]
 
 [[package]]
@@ -3661,9 +3623,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.247.0"
+version = "0.251.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e6fb4c2bee46c5ea4d40f8cdb5c131725cd976718ec56f1c8e82fbde5fa2a80"
+checksum = "437970b35b1a85cfde9c74b2398352d8d653f3bd8e3a3db0c063ea8f5b4b36ff"
 dependencies = [
  "bitflags",
  "hashbrown 0.17.1",
@@ -3895,9 +3857,15 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wit-bindgen"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a43552cfa071f246cfd99e5dbb23710dfe7336b3259e09339818483359470749"
 dependencies = [
  "bitflags",
- "wit-bindgen-rust-macro 0.57.1",
+ "wit-bindgen-rust-macro 0.58.0",
 ]
 
 [[package]]
@@ -3913,13 +3881,13 @@ dependencies = [
 
 [[package]]
 name = "wit-bindgen-core"
-version = "0.57.1"
+version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02dee27a2dc20d1008016c742ec9fc6ea498492994ba3750be7454cbc97ff04c"
+checksum = "4738d1c9a78e97bc7f664bfafd5d8e67d7bb26faa5c41e6d628e8bbdad3ec351"
 dependencies = [
  "anyhow",
  "heck",
- "wit-parser 0.247.0",
+ "wit-parser 0.251.0",
 ]
 
 [[package]]
@@ -3940,18 +3908,18 @@ dependencies = [
 
 [[package]]
 name = "wit-bindgen-rust"
-version = "0.57.1"
+version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5007dae772945b7a5003d69d90a3a4a78929d41f19d004e980c4259a6af4484"
+checksum = "1130ce1f531bc9f9a75922244aa773bf5e2117fda1ef4a86b9f98d6b8135eb46"
 dependencies = [
  "anyhow",
  "heck",
  "indexmap",
  "prettyplease",
  "syn 2.0.117",
- "wasm-metadata 0.247.0",
- "wit-bindgen-core 0.57.1",
- "wit-component 0.247.0",
+ "wasm-metadata 0.251.0",
+ "wit-bindgen-core 0.58.0",
+ "wit-component 0.251.0",
 ]
 
 [[package]]
@@ -3971,9 +3939,9 @@ dependencies = [
 
 [[package]]
 name = "wit-bindgen-rust-macro"
-version = "0.57.1"
+version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af9237d678e3513ad24e96fe98beacdc0db6405284ba2a2400418cf0d42caa89"
+checksum = "07296369e4d598e7e79b64eef66f724d83324ea671bcf677d78fc5cf92604ae5"
 dependencies = [
  "anyhow",
  "macro-string",
@@ -3981,8 +3949,8 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
- "wit-bindgen-core 0.57.1",
- "wit-bindgen-rust 0.57.1",
+ "wit-bindgen-core 0.58.0",
+ "wit-bindgen-rust 0.58.0",
 ]
 
 [[package]]
@@ -4006,9 +3974,9 @@ dependencies = [
 
 [[package]]
 name = "wit-component"
-version = "0.247.0"
+version = "0.251.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d567162a6b9843080e5e0053f696623ff694bae8ae017c9ec536d1873bbe3d8"
+checksum = "83a5e60173c413659c689f0581b0cf5d1a2404077568f9ffdce748a9eb2fc913"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -4017,10 +3985,10 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "wasm-encoder 0.247.0",
- "wasm-metadata 0.247.0",
- "wasmparser 0.247.0",
- "wit-parser 0.247.0",
+ "wasm-encoder 0.251.0",
+ "wasm-metadata 0.251.0",
+ "wasmparser 0.251.0",
+ "wit-parser 0.251.0",
 ]
 
 [[package]]
@@ -4043,9 +4011,9 @@ dependencies = [
 
 [[package]]
 name = "wit-parser"
-version = "0.247.0"
+version = "0.251.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ffe4064318cdf3c08cb99343b44c039fcefe61ccdf58aa9975285f13d74d1fc"
+checksum = "e960732e824fab95099971a09e638979347c94ca48568d3c854c945729196947"
 dependencies = [
  "anyhow",
  "hashbrown 0.17.1",
@@ -4057,7 +4025,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "unicode-xid",
- "wasmparser 0.247.0",
+ "wasmparser 0.251.0",
 ]
 
 [[package]]

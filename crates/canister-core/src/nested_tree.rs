@@ -52,6 +52,7 @@ impl<K: NestedTreeKeyRequirements, V: NestedTreeValueRequirements> NestedTree<K,
     }
 
     /// Returns true if there is a leaf at the specified path
+    #[allow(dead_code)]
     pub fn contains_leaf(&self, path: &[K]) -> bool {
         if let Some(key) = path.first() {
             match self {
@@ -143,74 +144,78 @@ impl<K: NestedTreeKeyRequirements, V: NestedTreeValueRequirements> NestedTree<K,
     }
 }
 
-#[test]
-fn nested_tree_operation() {
-    let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
-    // insertion
-    tree.insert(&["one", "two"], vec![2]);
-    tree.insert(&["one", "three"], vec![3]);
-    assert_eq!(tree.get(&["one", "two"]), Some(&vec![2]));
-    assert_eq!(tree.get(&["one", "two", "three"]), None);
-    assert_eq!(tree.get(&["one"]), None);
-    assert!(tree.contains_leaf(&["one", "two"]));
-    assert!(tree.contains_path(&["one"]));
-    assert!(!tree.contains_leaf(&["one", "two", "three"]));
-    assert!(!tree.contains_path(&["one", "two", "three"]));
-    assert!(!tree.contains_leaf(&["one"]));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nested_tree_operation() {
+        let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
+        // insertion
+        tree.insert(&["one", "two"], vec![2]);
+        tree.insert(&["one", "three"], vec![3]);
+        assert_eq!(tree.get(&["one", "two"]), Some(&vec![2]));
+        assert_eq!(tree.get(&["one", "two", "three"]), None);
+        assert_eq!(tree.get(&["one"]), None);
+        assert!(tree.contains_leaf(&["one", "two"]));
+        assert!(tree.contains_path(&["one"]));
+        assert!(!tree.contains_leaf(&["one", "two", "three"]));
+        assert!(!tree.contains_path(&["one", "two", "three"]));
+        assert!(!tree.contains_leaf(&["one"]));
 
-    // deleting non-existent key doesn't do anything
-    tree.delete(&["one", "two", "three"]);
-    assert_eq!(tree.get(&["one", "two"]), Some(&vec![2]));
-    assert!(tree.contains_leaf(&["one", "two"]));
+        // deleting non-existent key doesn't do anything
+        tree.delete(&["one", "two", "three"]);
+        assert_eq!(tree.get(&["one", "two"]), Some(&vec![2]));
+        assert!(tree.contains_leaf(&["one", "two"]));
 
-    // deleting existing key works
-    tree.delete(&["one", "three"]);
-    assert_eq!(tree.get(&["one", "two"]), Some(&vec![2]));
-    assert_eq!(tree.get(&["one", "three"]), None);
-    assert!(tree.contains_leaf(&["one", "two"]));
-    assert!(!tree.contains_leaf(&["one", "three"]));
+        // deleting existing key works
+        tree.delete(&["one", "three"]);
+        assert_eq!(tree.get(&["one", "two"]), Some(&vec![2]));
+        assert_eq!(tree.get(&["one", "three"]), None);
+        assert!(tree.contains_leaf(&["one", "two"]));
+        assert!(!tree.contains_leaf(&["one", "three"]));
 
-    // deleting subtree works
-    tree.delete(&["one"]);
-    assert_eq!(tree.get(&["one", "two"]), None);
-    assert_eq!(tree.get(&["one"]), None);
-    assert!(!tree.contains_leaf(&["one", "two"]));
-    assert!(!tree.contains_leaf(&["one"]));
-}
+        // deleting subtree works
+        tree.delete(&["one"]);
+        assert_eq!(tree.get(&["one", "two"]), None);
+        assert_eq!(tree.get(&["one"]), None);
+        assert!(!tree.contains_leaf(&["one", "two"]));
+        assert!(!tree.contains_leaf(&["one"]));
+    }
 
-#[test]
-fn delete_prunes_empty_parent_chain() {
-    // Deleting a deeply-nested leaf must unlink every now-empty ancestor.
-    // Otherwise `contains_path` for the deleted leaf's parents still returns
-    // true (the empty `Nested` subtrees count as "the path exists"), and
-    // the HTTP gateway's response verifier rejects wildcard responses
-    // because a "potential exact expression path" is visible at the
-    // orphaned path.
-    let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
-    tree.insert(&["a", "b", "c"], vec![1]);
-    assert!(tree.contains_path(&["a", "b", "c"]));
-    assert!(tree.contains_path(&["a", "b"]));
-    assert!(tree.contains_path(&["a"]));
+    #[test]
+    fn delete_prunes_empty_parent_chain() {
+        // Deleting a deeply-nested leaf must unlink every now-empty ancestor.
+        // Otherwise `contains_path` for the deleted leaf's parents still returns
+        // true (the empty `Nested` subtrees count as "the path exists"), and
+        // the HTTP gateway's response verifier rejects wildcard responses
+        // because a "potential exact expression path" is visible at the
+        // orphaned path.
+        let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
+        tree.insert(&["a", "b", "c"], vec![1]);
+        assert!(tree.contains_path(&["a", "b", "c"]));
+        assert!(tree.contains_path(&["a", "b"]));
+        assert!(tree.contains_path(&["a"]));
 
-    tree.delete(&["a", "b", "c"]);
-    // Every ancestor that has no remaining content must be unlinked.
-    assert!(!tree.contains_path(&["a", "b", "c"]));
-    assert!(!tree.contains_path(&["a", "b"]));
-    assert!(!tree.contains_path(&["a"]));
-}
+        tree.delete(&["a", "b", "c"]);
+        // Every ancestor that has no remaining content must be unlinked.
+        assert!(!tree.contains_path(&["a", "b", "c"]));
+        assert!(!tree.contains_path(&["a", "b"]));
+        assert!(!tree.contains_path(&["a"]));
+    }
 
-#[test]
-fn delete_preserves_siblings_in_ancestor_chain() {
-    // Pruning must stop at the first ancestor that still has other
-    // children — we don't want to collapse the whole tree just because
-    // one leaf went away.
-    let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
-    tree.insert(&["a", "b", "c"], vec![1]);
-    tree.insert(&["a", "x"], vec![2]);
+    #[test]
+    fn delete_preserves_siblings_in_ancestor_chain() {
+        // Pruning must stop at the first ancestor that still has other
+        // children — we don't want to collapse the whole tree just because
+        // one leaf went away.
+        let mut tree: NestedTree<&str, Vec<u8>> = NestedTree::default();
+        tree.insert(&["a", "b", "c"], vec![1]);
+        tree.insert(&["a", "x"], vec![2]);
 
-    tree.delete(&["a", "b", "c"]);
-    // "a" still has "x" so the chain stops there.
-    assert!(!tree.contains_path(&["a", "b"]));
-    assert!(tree.contains_path(&["a"]));
-    assert_eq!(tree.get(&["a", "x"]), Some(&vec![2]));
+        tree.delete(&["a", "b", "c"]);
+        // "a" still has "x" so the chain stops there.
+        assert!(!tree.contains_path(&["a", "b"]));
+        assert!(tree.contains_path(&["a"]));
+        assert_eq!(tree.get(&["a", "x"]), Some(&vec![2]));
+    }
 }

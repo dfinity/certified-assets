@@ -72,7 +72,7 @@ impl Content {
 /// Already-compressed formats are left alone: images/audio/video, archives, and
 /// `font/woff` + `font/woff2` (which embed their own compression — `woff2` is
 /// itself Brotli, so re-compressing only wastes space and CPU).
-pub fn is_compressible(media_type: &Mime) -> bool {
+fn is_compressible(media_type: &Mime) -> bool {
     let ty = media_type.type_();
     let subtype = media_type.subtype();
 

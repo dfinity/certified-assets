@@ -27,7 +27,6 @@ use crate::http::{
 use crate::rc_bytes::RcBytes;
 use crate::stable_store::{AssetMeta, AuthorizedSet, ContentChunkKey, EncodingMeta, RedirectRules};
 use crate::sync::{Chunk, SyncSession};
-use crate::types::*;
 use crate::url::url_decode;
 use candid::Principal;
 use ic_certification::{AsHashTree, Hash};
@@ -36,14 +35,19 @@ use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemor
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
 use num_traits::ToPrimitive;
 use serde_bytes::ByteBuf;
-use sha2::Digest;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
+
+use wire_types::{
+    AssetDetails, AssetEncodingDetails, CreateAssetArguments, DeleteAssetArguments, Encoding,
+    RedirectRule, RulePattern, SessionId, SetAssetContentArguments, SetAssetHeadersArguments,
+    UnsetAssetContentArguments,
+};
 
 /// Maximum number of items the canister returns from a single paginated query
 /// (`get_asset_details`, `get_redirect_rules`). The caller follows the cursor
 /// until it sees a short or empty page; it never needs to know this value.
-pub(crate) const PAGE_SIZE: usize = 100;
+pub const PAGE_SIZE: usize = 100;
 
 type Mem = VirtualMemory<DefaultMemoryImpl>;
 
@@ -78,24 +82,24 @@ pub struct State {
     /// freed incrementally without renumbering the surviving slots. Cleared on
     /// sync start/finish. The plugin reproduces these same indices locally, so
     /// they are never sent over the wire.
-    pub(crate) chunks: Vec<Option<Chunk>>,
+    pub chunks: Vec<Option<Chunk>>,
     /// The single in-progress sync, if any. At most one runs at a time.
-    pub(crate) sync_session: Option<SyncSession>,
+    pub sync_session: Option<SyncSession>,
 
     // ---- derived heap (rebuilt in post_upgrade) ----
-    pub(crate) asset_hashes: CertifiedResponses,
+    pub asset_hashes: CertifiedResponses,
     /// Per-rule certified-tree entries, parallel to `settings.redirect_rules`. A
     /// `None` slot means the rule has no certified entry — either because an
     /// asset shadows an exact rule at the same path, or because an alias rule
     /// (200/4xx) points at a target asset that doesn't exist yet.
-    pub(crate) rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
+    pub rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
     /// The fully rendered `Set-Cookie: ic_env=…` value layered onto every
     /// `text/html` response, or `None` before any env snapshot has been
     /// captured. Owned by the canister (never stored in `meta.headers`) and
     /// recomputed on capture; rebuilt from the live system API in `post_upgrade`
     /// (the env vars themselves survive as canister settings), exactly like
     /// `asset_hashes`. See [`State::effective_headers`].
-    pub(crate) env_cookie: Option<String>,
+    pub env_cookie: Option<String>,
 }
 
 impl Default for State {
@@ -144,14 +148,14 @@ impl State {
     }
 
     /// Allocates a fresh, never-reused sync session id.
-    pub(crate) fn alloc_session_id(&mut self) -> SessionId {
+    pub fn alloc_session_id(&mut self) -> SessionId {
         let id = *self.next_session_id.get();
         self.next_session_id.set(id + 1);
         id
     }
 
     /// Whether an asset exists at `key`.
-    pub(crate) fn contains_asset(&self, key: &AssetKey) -> bool {
+    pub fn contains_asset(&self, key: &AssetKey) -> bool {
         self.metadata.contains_key(key)
     }
 
@@ -223,7 +227,9 @@ impl State {
     /// Test/helper entry point that hashes the staged chunks itself. The live
     /// sync path hashes incrementally in `execute_operations` and calls
     /// `complete_set_asset_content` directly.
+    #[cfg(test)]
     pub fn set_asset_content(&mut self, arg: SetAssetContentArguments) -> Result<(), String> {
+        use sha2::Digest;
         if arg.chunk_ids.is_empty() {
             return Err("encoding must have at least one chunk".to_string());
         }
@@ -252,7 +258,7 @@ impl State {
 
     /// Writes an encoding's content into the chunk store and re-certifies the
     /// asset. Replacing an existing encoding frees the old content group first.
-    pub(crate) fn complete_set_asset_content(
+    pub fn complete_set_asset_content(
         &mut self,
         arg: SetAssetContentArguments,
         content_chunks: Vec<RcBytes>,
@@ -433,7 +439,7 @@ impl State {
     /// `start_index`. `start_index` is the number of rules already seen; at most
     /// `PAGE_SIZE` rules are returned, and an empty result means there is nothing
     /// at or after `start_index`.
-    pub fn get_redirect_rules(&self, start_index: u64) -> Vec<crate::redirect::RedirectRule> {
+    pub fn get_redirect_rules(&self, start_index: u64) -> Vec<RedirectRule> {
         let start = start_index as usize;
         self.redirect_rules
             .get()
@@ -610,7 +616,7 @@ impl State {
     #[allow(clippy::too_many_arguments)]
     fn build_redirect_rule_response(
         &self,
-        rule: &crate::redirect::RedirectRule,
+        rule: &RedirectRule,
         entry: &crate::redirect::CertifiedRuleEntry,
         path: &str,
         certificate: &[u8],
@@ -754,7 +760,7 @@ impl State {
     /// no active rule claims `<*>`. That keeps `build_http_response`'s
     /// fallthrough certified — the gateway rejects uncertified responses, so an
     /// uncertified fallback 404 would be unservable.
-    pub(crate) fn on_redirect_rules_change(&mut self) {
+    pub fn on_redirect_rules_change(&mut self) {
         for entry in self.rule_certified_entries.drain(..).flatten() {
             for tp in &entry.tree_paths {
                 self.asset_hashes.remove_response_precomputed(tp);
@@ -797,16 +803,16 @@ impl State {
     }
 
     /// Replaces the redirect rules and rebuilds their certified entries.
-    pub(crate) fn set_redirect_rules(&mut self, rules: Vec<crate::redirect::RedirectRule>) {
+    pub fn set_redirect_rules(&mut self, rules: Vec<RedirectRule>) {
         self.redirect_rules.set(RedirectRules(rules));
         self.on_redirect_rules_change();
     }
 
     fn build_rule_entry(
         &mut self,
-        rule: &crate::redirect::RedirectRule,
+        rule: &RedirectRule,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
-        if let crate::redirect::RulePattern::Exact(src) = &rule.from {
+        if let RulePattern::Exact(src) = &rule.from {
             if self.metadata.contains_key(src) {
                 // Asset at the source path shadows the rule.
                 return None;
@@ -831,7 +837,7 @@ impl State {
 
     fn build_alias_rule_entry(
         &mut self,
-        rule: &crate::redirect::RedirectRule,
+        rule: &RedirectRule,
         status: u16,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         let target_key = rule.to.clone();
@@ -884,7 +890,7 @@ impl State {
     /// re-certifying. Used by `post_upgrade` *before* `post_upgrade_rebuild`, so
     /// the rebuild — which re-certifies every asset from scratch — picks the
     /// cookie up through `effective_headers`.
-    pub(crate) fn store_env(&mut self, env: &crate::runtime::CanisterEnv) {
+    pub fn store_env(&mut self, env: &crate::runtime::CanisterEnv) {
         self.env_cookie = Some(env.render_cookie());
     }
 
@@ -897,7 +903,7 @@ impl State {
     /// otherwise HTML assets the sync doesn't touch would keep an old-cookie
     /// certificate while `effective_headers` serves the new cookie, and the
     /// gateway would reject them. Caller publishes `certified_data` afterwards.
-    pub(crate) fn capture_env_at_sync_start(&mut self, env: &crate::runtime::CanisterEnv) {
+    pub fn capture_env_at_sync_start(&mut self, env: &crate::runtime::CanisterEnv) {
         if self.env_cookie.as_deref() != Some(env.render_cookie().as_str()) {
             self.refresh_env(env);
         }

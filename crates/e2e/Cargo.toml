@@ -12,7 +12,7 @@ wire-types = { path = "../wire-types" }
 assert_cmd.workspace = true
 candid.workspace = true
 hex.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
+reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

@@ -1,18 +1,21 @@
-pub mod canister;
-pub mod content;
-pub mod glob;
-pub mod headers;
-pub mod html_handling;
-pub mod not_found;
-pub mod redirects;
-pub mod scan;
-pub mod sync;
+mod canister;
+mod content;
+mod glob;
+mod headers;
+mod html_handling;
+mod not_found;
+mod redirects;
+mod scan;
+mod sync;
+
+pub use canister::{CallType, CanisterCall};
+pub use sync::sync;
 
 /// Strips a Netlify-style trailing comment from a single line of a `_redirects`
 /// or `_headers` file. A `#` only starts a comment when it sits at the start of
 /// the line or is preceded by whitespace; a `#` inside a token (e.g. the URL
 /// fragment in `/to/#topic`, or a CSP `report-uri /csp#endpoint`) is preserved.
-pub(crate) fn strip_comment(line: &str) -> &str {
+fn strip_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     let mut prev_is_ws = true;
     for (i, &b) in bytes.iter().enumerate() {

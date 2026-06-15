@@ -14,12 +14,12 @@ use crate::rc_bytes::RcBytes;
 use crate::redirect;
 use crate::runtime::SystemContext;
 use crate::state::State;
-use crate::types::{
+use candid::Principal;
+use sha2::Digest;
+use wire_types::{
     ExecuteOperationsArguments, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
     UploadChunksArguments,
 };
-use candid::Principal;
-use sha2::Digest;
 
 /// How long a sync may sit idle (no calls carrying its session id) before a
 /// *different* caller is allowed to reclaim it. Comfortably shorter than any
@@ -30,7 +30,7 @@ pub const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 /// A single chunk of content staged under a sync, before it is stitched into an
 /// asset encoding. Just the bytes: a chunk's id is its slot index in
 /// [`State::chunks`](crate::state::State), not anything stored here.
-pub(crate) type Chunk = RcBytes;
+pub type Chunk = RcBytes;
 
 /// The single in-progress sync. The canister holds at most one at a time;
 /// `start_sync` rejects a second caller while this is present and non-stale.

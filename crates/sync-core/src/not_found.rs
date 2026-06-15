@@ -22,7 +22,7 @@
 //! rules (and the prepended html-handling rules) win first; it only fires for
 //! paths nothing else claims.
 
-use crate::canister::{RedirectRule, RulePattern};
+use wire_types::{RedirectRule, RulePattern};
 
 /// Asset key for the site-wide not-found page.
 pub const ROOT_404_KEY: &str = "/404.html";

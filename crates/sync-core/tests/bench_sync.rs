@@ -17,8 +17,8 @@ use candid::{CandidType, Decode, Encode, Principal};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
-use sync_core::canister::{AssetDetails, CallType, CanisterCall, RedirectRule};
-use sync_core::sync::sync;
+use sync_core::{sync, CallType, CanisterCall};
+use wire_types::{AssetDetails, RedirectRule};
 
 // Wire-compatible mirrors of the response types defined privately in
 // sync_core::canister. Same variant/field names → same Candid encoding.

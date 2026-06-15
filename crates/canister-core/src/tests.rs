@@ -4,24 +4,23 @@ use crate::http::{
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
-use crate::types::{
-    CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
-    SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
-};
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::{Nat, Principal};
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
 use ic_http_certification::{Method, StatusCode};
-use ic_response_verification_test_utils::{
-    base64_encode, create_canister_id, get_current_timestamp,
-};
 use ic_stable_structures::DefaultMemoryImpl;
 use serde_bytes::ByteBuf;
 use sha2::Digest as Sha2Digest;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
+use wire_types::{
+    CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
+    SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
+};
 
 // from ic-response-verification tests
 const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
@@ -78,8 +77,11 @@ pub fn verify_response(
     response: &HttpResponse,
 ) -> anyhow::Result<bool> {
     let mut response = response.clone();
-    let current_time = get_current_timestamp();
-    let canister_id = create_canister_id("rdmx6-jaaaa-aaaaa-aaadq-cai");
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
     let min_requested_verification_version: u16 = 2;
 
     // inject certificate into IC-Certificate header with 'certificate=::'
@@ -89,7 +91,7 @@ pub fn verify_response(
     )?
     .with_time(current_time)
     .build()?;
-    let replacement_cert_value = base64_encode(&data.cbor_encoded_certificate);
+    let replacement_cert_value = BASE64.encode(&data.cbor_encoded_certificate);
     let (_, header_value) = response
         .headers
         .iter_mut()
@@ -524,8 +526,7 @@ fn serve_fallback_via_rule() {
 }
 
 fn set_root_spa_rule(state: &mut State, target: &str) {
-    use crate::redirect::{RedirectRule, RulePattern};
-    use crate::types::SetRedirectRulesArguments;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
     let system_context = mock_system_context();
     let session_id = start_session(state, &system_context);
     let ops = vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
@@ -544,8 +545,7 @@ fn set_exact_rewrite_rule(state: &mut State, from: &str, to: &str) {
 }
 
 fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
-    use crate::redirect::{RedirectRule, RulePattern};
-    use crate::types::SetRedirectRulesArguments;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
     let system_context = mock_system_context();
     let session_id = start_session(state, &system_context);
     let rules = pairs
@@ -1292,8 +1292,9 @@ fn headers_cbor_deserialize_from_hashmap_to_btreemap() {
             ("b-name".into(), "b-value".into()),
             ("a-name".into(), "a-value".into()),
         ]);
-        let serialized = serde_cbor::to_vec(&old_headers).unwrap();
-        let new_headers: BTreeMap<String, String> = serde_cbor::from_slice(&serialized).unwrap();
+        let mut serialized = Vec::new();
+        ciborium::into_writer(&old_headers, &mut serialized).unwrap();
+        let new_headers: BTreeMap<String, String> = ciborium::from_reader(&serialized[..]).unwrap();
         // Compare the order to check that the BTreeMap is deterministic
         assert_eq!(
             new_headers.into_iter().collect::<Vec<(String, String)>>(),
@@ -1847,8 +1848,7 @@ mod set_asset_content_sha256_verification {
 
 mod redirect_rules {
     use super::*;
-    use crate::redirect::{RedirectRule, RulePattern};
-    use crate::types::SetRedirectRulesArguments;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
 
     fn commit(state: &mut State, ops: Vec<Operation>) -> Result<(), String> {
         let system_context = mock_system_context();
