@@ -26,8 +26,7 @@ use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use serde::{Deserialize, Serialize};
 
-use crate::redirect::RedirectRule;
-use wire_types::Encoding;
+use wire_types::{Encoding, RedirectRule};
 
 /// Principals authorized to sync (controllers are always allowed and are not
 /// stored here). Newtype so it can carry a `Storable` impl (the orphan rule
@@ -163,7 +162,7 @@ mod tests {
 
     #[test]
     fn redirect_rules_cbor_roundtrips() {
-        use crate::redirect::{RedirectRule, RulePattern};
+        use wire_types::RulePattern;
         let rules = RedirectRules(vec![RedirectRule {
             from: RulePattern::Exact("/old".into()),
             to: "/new".into(),

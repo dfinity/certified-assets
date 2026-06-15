@@ -4,10 +4,6 @@ use crate::http::{
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
-use crate::types::{
-    CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
-    SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
-};
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -21,6 +17,10 @@ use sha2::Digest as Sha2Digest;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
+use wire_types::{
+    CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
+    SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
+};
 
 // from ic-response-verification tests
 const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
@@ -526,8 +526,7 @@ fn serve_fallback_via_rule() {
 }
 
 fn set_root_spa_rule(state: &mut State, target: &str) {
-    use crate::redirect::{RedirectRule, RulePattern};
-    use crate::types::SetRedirectRulesArguments;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
     let system_context = mock_system_context();
     let session_id = start_session(state, &system_context);
     let ops = vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
@@ -546,8 +545,7 @@ fn set_exact_rewrite_rule(state: &mut State, from: &str, to: &str) {
 }
 
 fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
-    use crate::redirect::{RedirectRule, RulePattern};
-    use crate::types::SetRedirectRulesArguments;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
     let system_context = mock_system_context();
     let session_id = start_session(state, &system_context);
     let rules = pairs
@@ -1849,8 +1847,7 @@ mod set_asset_content_sha256_verification {
 
 mod redirect_rules {
     use super::*;
-    use crate::redirect::{RedirectRule, RulePattern};
-    use crate::types::SetRedirectRulesArguments;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
 
     fn commit(state: &mut State, ops: Vec<Operation>) -> Result<(), String> {
         let system_context = mock_system_context();

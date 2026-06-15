@@ -2,8 +2,7 @@ use candid::Principal;
 use canister_core::{
     guard_can_sync, guard_is_controller,
     http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
-    redirect::RedirectRule,
-    types::{AssetDetails, ExecuteOperationsArguments, StartSyncResult, UploadChunksArguments},
+    AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
 };
 use ic_cdk::{post_upgrade, query, update};
 

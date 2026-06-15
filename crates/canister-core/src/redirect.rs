@@ -7,12 +7,7 @@ use crate::certification::{
 use http::{HeaderName, HeaderValue, StatusCode};
 use ic_representation_independent_hash::Value;
 use sha2::Digest;
-
-// The rule data types are shared with the plugin, so they live in `wire-types`.
-// The behaviour below (matching, certification, tree placement) is
-// canister-only and stays here as free functions — Rust's orphan rule forbids
-// inherent `impl`s on a type defined in another crate.
-pub use wire_types::{RedirectRule, RulePattern};
+use wire_types::{RedirectRule, RulePattern};
 
 const SUPPORTED_STATUS_CODES: &[StatusCode] = &[
     StatusCode::OK,

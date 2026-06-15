@@ -27,7 +27,6 @@ use crate::http::{
 use crate::rc_bytes::RcBytes;
 use crate::stable_store::{AssetMeta, AuthorizedSet, ContentChunkKey, EncodingMeta, RedirectRules};
 use crate::sync::{Chunk, SyncSession};
-use crate::types::*;
 use crate::url::url_decode;
 use candid::Principal;
 use ic_certification::{AsHashTree, Hash};
@@ -39,6 +38,12 @@ use serde_bytes::ByteBuf;
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
+
+use wire_types::{
+    AssetDetails, AssetEncodingDetails, CreateAssetArguments, DeleteAssetArguments, Encoding,
+    RedirectRule, RulePattern, SessionId, SetAssetContentArguments, SetAssetHeadersArguments,
+    UnsetAssetContentArguments,
+};
 
 /// Maximum number of items the canister returns from a single paginated query
 /// (`get_asset_details`, `get_redirect_rules`). The caller follows the cursor
@@ -433,7 +438,7 @@ impl State {
     /// `start_index`. `start_index` is the number of rules already seen; at most
     /// `PAGE_SIZE` rules are returned, and an empty result means there is nothing
     /// at or after `start_index`.
-    pub fn get_redirect_rules(&self, start_index: u64) -> Vec<crate::redirect::RedirectRule> {
+    pub fn get_redirect_rules(&self, start_index: u64) -> Vec<RedirectRule> {
         let start = start_index as usize;
         self.redirect_rules
             .get()
@@ -610,7 +615,7 @@ impl State {
     #[allow(clippy::too_many_arguments)]
     fn build_redirect_rule_response(
         &self,
-        rule: &crate::redirect::RedirectRule,
+        rule: &RedirectRule,
         entry: &crate::redirect::CertifiedRuleEntry,
         path: &str,
         certificate: &[u8],
@@ -797,16 +802,16 @@ impl State {
     }
 
     /// Replaces the redirect rules and rebuilds their certified entries.
-    pub(crate) fn set_redirect_rules(&mut self, rules: Vec<crate::redirect::RedirectRule>) {
+    pub(crate) fn set_redirect_rules(&mut self, rules: Vec<RedirectRule>) {
         self.redirect_rules.set(RedirectRules(rules));
         self.on_redirect_rules_change();
     }
 
     fn build_rule_entry(
         &mut self,
-        rule: &crate::redirect::RedirectRule,
+        rule: &RedirectRule,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
-        if let crate::redirect::RulePattern::Exact(src) = &rule.from {
+        if let RulePattern::Exact(src) = &rule.from {
             if self.metadata.contains_key(src) {
                 // Asset at the source path shadows the rule.
                 return None;
@@ -831,7 +836,7 @@ impl State {
 
     fn build_alias_rule_entry(
         &mut self,
-        rule: &crate::redirect::RedirectRule,
+        rule: &RedirectRule,
         status: u16,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         let target_key = rule.to.clone();

@@ -9,7 +9,6 @@ pub mod runtime;
 pub mod stable_store;
 pub mod state;
 pub mod sync;
-pub mod types;
 mod url;
 
 #[cfg(test)]
@@ -23,11 +22,14 @@ use crate::{
     runtime::{CanisterEnv, SystemContext},
     state::State,
     sync::ComputationStatus,
-    types::*,
 };
 use candid::Principal;
 use ic_cdk::api::{canister_self, certified_data_set, data_certificate, msg_caller, trap};
 use std::cell::RefCell;
+
+pub use wire_types::{
+    AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
+};
 
 pub static SUPPORTED_CERTIFICATE_VERSIONS: [u8; 3] = *b"1,2";
 
@@ -104,7 +106,7 @@ pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
     with_state(|s| s.get_asset_details(start_after))
 }
 
-pub fn get_redirect_rules(start_index: u64) -> Vec<crate::redirect::RedirectRule> {
+pub fn get_redirect_rules(start_index: u64) -> Vec<RedirectRule> {
     with_state(|s| s.get_redirect_rules(start_index))
 }
 

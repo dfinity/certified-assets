@@ -14,12 +14,12 @@ use crate::rc_bytes::RcBytes;
 use crate::redirect;
 use crate::runtime::SystemContext;
 use crate::state::State;
-use crate::types::{
+use candid::Principal;
+use sha2::Digest;
+use wire_types::{
     ExecuteOperationsArguments, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
     UploadChunksArguments,
 };
-use candid::Principal;
-use sha2::Digest;
 
 /// How long a sync may sit idle (no calls carrying its session id) before a
 /// *different* caller is allowed to reclaim it. Comfortably shorter than any

@@ -19,7 +19,7 @@ use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
-pub mod bundle_tag;
+mod bundle_tag;
 pub use bundle_tag::{format_tag, BUNDLE_TAG};
 
 /// Identifies an in-progress sync. Sequential and monotonic across the
