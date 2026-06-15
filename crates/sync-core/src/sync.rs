@@ -11,10 +11,7 @@ use std::collections::HashMap;
 
 use crate::canister::{
     authorize_via_proxy, bundle_tag, can_sync, execute_operations, list_all_assets,
-    list_all_redirect_rules, start_sync, upload_chunks, AssetDetails, CanisterCall,
-    CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
-    RedirectRule, SetAssetContentArguments, SetAssetHeadersArguments, SetRedirectRulesArguments,
-    UnsetAssetContentArguments,
+    list_all_redirect_rules, start_sync, upload_chunks, CanisterCall,
 };
 use crate::content::{encoders_for, Content};
 use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
@@ -23,6 +20,11 @@ use crate::not_found;
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::AssetSource;
 use std::path::{Path, PathBuf};
+use wire_types::{
+    AssetDetails, CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments,
+    Operation, RedirectRule, RulePattern, SetAssetContentArguments, SetAssetHeadersArguments,
+    SetRedirectRulesArguments, UnsetAssetContentArguments,
+};
 
 // Stay safely under the canister's ingress message limit (~2 MB).
 const MAX_CHUNK_SIZE: usize = 1_900_000;
@@ -757,10 +759,10 @@ fn resolve_3xx_rule_headers(
 /// patterns yield the prefix, so only header rules that subsume the subtree
 /// (the same or a broader subtree) match — narrower or unrelated patterns are
 /// rejected by the resolver's `starts_with` check.
-fn redirect_pattern_to_key(pattern: &crate::canister::RulePattern) -> String {
+fn redirect_pattern_to_key(pattern: &RulePattern) -> String {
     match pattern {
-        crate::canister::RulePattern::Exact(p) => p.clone(),
-        crate::canister::RulePattern::Subtree(prefix) => prefix.clone(),
+        RulePattern::Exact(p) => p.clone(),
+        RulePattern::Subtree(prefix) => prefix.clone(),
     }
 }
 
@@ -831,12 +833,13 @@ fn load_header_rules(dir: &str) -> Result<Vec<HeaderRule>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canister::{AssetDetails, AssetEncodingDetails, CallType, CanisterCall, Operation};
+    use crate::{CallType, CanisterCall};
     use candid::{CandidType, Principal};
     use serde::de::DeserializeOwned;
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
+    use wire_types::{AssetDetails, AssetEncodingDetails, Operation};
 
     /// The canister-side state a finished sync leaves for the injected branded
     /// `/404.html`: its `AssetDetails` (content_type + per-encoding shas) derived
@@ -1105,19 +1108,19 @@ mod tests {
         // SetRedirectRules: only 3xx rules carry inlined headers; sum across rules.
         let rules = vec![
             RedirectRule {
-                from: crate::canister::RulePattern::Exact("/a".into()),
+                from: RulePattern::Exact("/a".into()),
                 to: "/b".into(),
                 status: 301,
                 headers: vec![("X-A".into(), "1".into())], // 4 bytes
             },
             RedirectRule {
-                from: crate::canister::RulePattern::Exact("/c".into()),
+                from: RulePattern::Exact("/c".into()),
                 to: "/d".into(),
                 status: 200,
                 headers: vec![],
             },
             RedirectRule {
-                from: crate::canister::RulePattern::Exact("/e".into()),
+                from: RulePattern::Exact("/e".into()),
                 to: "/f".into(),
                 status: 307,
                 headers: vec![("X-B".into(), "22".into())], // 5 bytes
@@ -1483,7 +1486,7 @@ mod tests {
 
     // ── redirect-rule diff ──────────────────────────────────────────────────
 
-    fn mk_rule(from: crate::canister::RulePattern, to: &str, status: u16) -> RedirectRule {
+    fn mk_rule(from: RulePattern, to: &str, status: u16) -> RedirectRule {
         RedirectRule {
             from,
             to: to.to_string(),
@@ -1514,11 +1517,7 @@ mod tests {
             "text/html",
             &[("identity", sha)],
         )]);
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
+        let project_rules = vec![mk_rule(RulePattern::Exact("/old".into()), "/new", 301)];
         let ops = build_operations(&project, &canister, &project_rules, &[], &[]);
         let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
         assert_eq!(rules, project_rules.as_slice());
@@ -1533,11 +1532,7 @@ mod tests {
     fn redirects_file_removed_emits_empty_vec_op() {
         // Canister has rules, project no longer does — sync emits an
         // explicit empty-vec op so the canister clears its ruleset.
-        let canister_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
+        let canister_rules = vec![mk_rule(RulePattern::Exact("/old".into()), "/new", 301)];
         let ops = build_operations(&HashMap::new(), &HashMap::new(), &[], &canister_rules, &[]);
         let rules = set_rules_op(&ops).expect("SetRedirectRules op missing");
         assert!(rules.is_empty(), "expected empty-vec replace-all op");
@@ -1547,7 +1542,7 @@ mod tests {
     fn unchanged_rules_emit_no_op() {
         // Same rules on both sides — no SetRedirectRules op emitted.
         let rules = vec![mk_rule(
-            crate::canister::RulePattern::Subtree("/blog/".into()),
+            RulePattern::Subtree("/blog/".into()),
             "/blog/index.html",
             200,
         )];
@@ -1563,8 +1558,8 @@ mod tests {
     fn reordered_rules_emit_op() {
         // Order matters semantically — first matching rule wins at request
         // time. A swap is a real change even with identical entries.
-        let a = mk_rule(crate::canister::RulePattern::Exact("/a".into()), "/x", 301);
-        let b = mk_rule(crate::canister::RulePattern::Exact("/b".into()), "/y", 301);
+        let a = mk_rule(RulePattern::Exact("/a".into()), "/x", 301);
+        let b = mk_rule(RulePattern::Exact("/b".into()), "/y", 301);
         let ops = build_operations(
             &HashMap::new(),
             &HashMap::new(),
@@ -1593,11 +1588,7 @@ mod tests {
 
         let mut canister_rules =
             crate::html_handling::synthesize(&[not_found::ROOT_404_KEY.into()]);
-        canister_rules.push(mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        ));
+        canister_rules.push(mk_rule(RulePattern::Exact("/old".into()), "/new", 301));
         canister_rules.push(not_found::catchall_rule());
 
         let mock = SyncMock::new();
@@ -1983,11 +1974,7 @@ mod tests {
         // 3xx rules synthesize their response; populate `headers` from any
         // `_headers` rule whose pattern matches the redirect's `from`.
         let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
+        let project_rules = vec![mk_rule(RulePattern::Exact("/old".into()), "/new", 301)];
         let ops = build_operations(
             &HashMap::new(),
             &HashMap::new(),
@@ -2011,7 +1998,7 @@ mod tests {
         let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
         for status in [200u16, 404, 410] {
             let project_rules = vec![mk_rule(
-                crate::canister::RulePattern::Exact("/old".into()),
+                RulePattern::Exact("/old".into()),
                 "/target.html",
                 status,
             )];
@@ -2034,11 +2021,7 @@ mod tests {
     #[test]
     fn three_xx_redirect_rule_omits_headers_when_no_match() {
         let header_rules = vec![mk_header_rule("/other", &[("X-Foo", "bar")])];
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
+        let project_rules = vec![mk_rule(RulePattern::Exact("/old".into()), "/new", 301)];
         let ops = build_operations(
             &HashMap::new(),
             &HashMap::new(),
@@ -2055,13 +2038,9 @@ mod tests {
         // Canister stores the same rule (with the resolved 3xx headers) — no
         // SetRedirectRules op should be emitted.
         let header_rules = vec![mk_header_rule("/*", &[("X-Robots-Tag", "noindex")])];
-        let project_rules = vec![mk_rule(
-            crate::canister::RulePattern::Exact("/old".into()),
-            "/new",
-            301,
-        )];
+        let project_rules = vec![mk_rule(RulePattern::Exact("/old".into()), "/new", 301)];
         let canister_rules = vec![RedirectRule {
-            from: crate::canister::RulePattern::Exact("/old".into()),
+            from: RulePattern::Exact("/old".into()),
             to: "/new".to_string(),
             status: 301,
             headers: vec![("X-Robots-Tag".into(), "noindex".into())],
@@ -2363,7 +2342,7 @@ mod tests {
         // First rule matching `/index` is the synthesised 307 -> /.
         let first_at_index = combined
             .iter()
-            .find(|r| matches!(&r.from, crate::canister::RulePattern::Exact(p) if p == "/index"))
+            .find(|r| matches!(&r.from, RulePattern::Exact(p) if p == "/index"))
             .expect("a rule at /index");
         assert_eq!(first_at_index.status, 307);
         assert_eq!(first_at_index.to, "/");
@@ -2387,13 +2366,11 @@ mod tests {
 
         let index_pos = combined
             .iter()
-            .position(
-                |r| matches!(&r.from, crate::canister::RulePattern::Exact(p) if p == "/index"),
-            )
+            .position(|r| matches!(&r.from, RulePattern::Exact(p) if p == "/index"))
             .expect("a rule at /index");
         let catchall_pos = combined
             .iter()
-            .position(|r| matches!(&r.from, crate::canister::RulePattern::Subtree(p) if p == "/"))
+            .position(|r| matches!(&r.from, RulePattern::Subtree(p) if p == "/"))
             .expect("the /* catch-all");
         assert!(
             index_pos < catchall_pos,

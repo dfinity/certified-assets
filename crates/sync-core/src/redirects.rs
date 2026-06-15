@@ -5,10 +5,10 @@
 //! design plan for the full reject list. Errors carry a line number so the
 //! plugin can point users at the offending entry without a canister round-trip.
 
-use crate::canister::{RedirectRule, RulePattern};
 use crate::strip_comment;
 use http::StatusCode;
 use url::Url;
+use wire_types::{RedirectRule, RulePattern};
 
 pub const REDIRECTS_FILENAME: &str = "_redirects";
 

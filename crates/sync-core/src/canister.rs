@@ -12,11 +12,8 @@ use serde::de::DeserializeOwned;
 use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
-pub use wire_types::{
-    AssetDetails, AssetEncodingDetails, CreateAssetArguments, DeleteAssetArguments, Encoding,
-    ExecuteOperationsArguments, Operation, RedirectRule, RulePattern, SetAssetContentArguments,
-    SetAssetHeadersArguments, SetRedirectRulesArguments, StartSyncResult,
-    UnsetAssetContentArguments, UploadChunksArguments,
+use wire_types::{
+    AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -171,6 +168,7 @@ mod tests {
     use serde::de::DeserializeOwned;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use wire_types::RulePattern;
 
     struct PagedMock {
         pages: RefCell<VecDeque<Vec<AssetDetails>>>,

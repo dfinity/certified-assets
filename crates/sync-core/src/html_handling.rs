@@ -40,7 +40,7 @@
 //! and user rules catch what's left. A user-declared rule with the same `from`
 //! as a synthesised rule is therefore shadowed by the synth rule.
 
-use crate::canister::{RedirectRule, RulePattern};
+use wire_types::{RedirectRule, RulePattern};
 
 const HTML_EXT: &str = ".html";
 const INDEX_HTML: &str = "/index.html";
