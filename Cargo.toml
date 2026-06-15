@@ -11,6 +11,13 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+# From response-verification
+ic-certification = "3.0.3"
+ic-http-certification = "3.0.3"
+ic-response-verification = "3.0.3"
+ic-representation-independent-hash = "3.0.3"
+
+# Others
 anyhow = "1.0.56"
 assert_cmd = "2"
 base64 = "0.22.1"
@@ -19,18 +26,22 @@ candid = "0.10.18"
 candid_parser = "0.3.0"
 flate2 = "1.0"
 hex = "0.4.3"
+http = "1.4.2"
 ic-cdk = "0.20.1"
 ic-stable-structures = "0.7.2"
 itertools = "0.14.0"
 mime = "0.3"
 mime_guess = "2.0"
 num-traits = "0.2.14"
+percent-encoding = "2.3.2"
+reqwest = { version = "0.13", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11.5"
 serde_json = "1.0"
 serde_cbor = "0.11.1"
 sha2 = "0.11.0"
-wit-bindgen = "0.57.1"
+url = "2.5.8"
+wit-bindgen = "0.58.0"
 tempfile = "3.27.0"
 
 [profile.canister-release]

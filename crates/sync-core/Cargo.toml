@@ -13,13 +13,13 @@ brotli.workspace = true
 candid.workspace = true
 flate2.workspace = true
 hex.workspace = true
-http = "1"
+http.workspace = true
 mime.workspace = true
 mime_guess.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 sha2.workspace = true
-url = "2"
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
