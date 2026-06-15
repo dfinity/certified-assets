@@ -193,7 +193,7 @@ pub enum CertifiedRuleEntryKind {
 /// Build the certified-tree entries for a 3xx redirect rule. The response
 /// has an empty body; only the headers (content-type, Location, and any
 /// rule-supplied extras) are certified.
-pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
+pub fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
     let headers = certified_headers(rule);
     let header_values: Vec<(String, Value)> = headers
         .iter()
@@ -227,7 +227,7 @@ pub(crate) fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
 /// Build a tree path slot for the rule's location with the given expression
 /// hash and response hash. Used by the status-200 path to mirror each
 /// encoding of a target asset.
-pub(crate) fn alias_tree_path(
+pub fn alias_tree_path(
     location: &HashTreePath,
     expression_hash: [u8; 32],
     response_hash: [u8; 32],

@@ -30,7 +30,7 @@ pub const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 /// A single chunk of content staged under a sync, before it is stitched into an
 /// asset encoding. Just the bytes: a chunk's id is its slot index in
 /// [`State::chunks`](crate::state::State), not anything stored here.
-pub(crate) type Chunk = RcBytes;
+pub type Chunk = RcBytes;
 
 /// The single in-progress sync. The canister holds at most one at a time;
 /// `start_sync` rejects a second caller while this is present and non-stale.

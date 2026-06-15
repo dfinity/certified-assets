@@ -1,24 +1,21 @@
 //! This module declares canister methods expected by the assets canister client.
-pub mod asset;
-pub mod certification;
-pub mod http;
-pub mod nested_tree;
-pub mod rc_bytes;
-pub mod redirect;
-pub mod runtime;
-pub mod stable_store;
-pub mod state;
-pub mod sync;
+mod asset;
+mod certification;
+mod http;
+mod nested_tree;
+mod rc_bytes;
+mod redirect;
+mod runtime;
+mod stable_store;
+mod state;
+mod sync;
 mod url;
 
 #[cfg(test)]
 mod tests;
 
 use crate::{
-    http::{
-        CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
-        StreamingCallbackToken,
-    },
+    http::CallbackFunc,
     runtime::{CanisterEnv, SystemContext},
     state::State,
     sync::ComputationStatus,
@@ -27,6 +24,7 @@ use candid::Principal;
 use ic_cdk::api::{canister_self, certified_data_set, data_certificate, msg_caller, trap};
 use std::cell::RefCell;
 
+pub use http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken};
 pub use wire_types::{
     AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
 };
@@ -199,14 +197,14 @@ pub fn post_upgrade() {
     });
 }
 
-pub fn with_state_mut<F, R>(f: F) -> R
+fn with_state_mut<F, R>(f: F) -> R
 where
     F: FnOnce(&mut State) -> R,
 {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
-pub fn with_state<F, R>(f: F) -> R
+fn with_state<F, R>(f: F) -> R
 where
     F: FnOnce(&State) -> R,
 {

@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use wire_types::Encoding;
 
 /// Status codes we certify for every asset encoding.
-pub(crate) const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
+pub const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 
 /// Renders the value of the canister-injected `Set-Cookie: ic_env=…` header from
 /// an environment snapshot, in the exact format the client lib
@@ -34,7 +34,7 @@ pub(crate) const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 /// order. `url_encode` percent-encodes the `&`/`=` separators so the whole
 /// payload rides inside one cookie value; `decodeURIComponent` restores them
 /// client-side. Pure (no system-API access) so it can be unit-tested directly.
-pub(crate) fn render_env_cookie(root_key: &[u8], public_vars: &BTreeMap<String, String>) -> String {
+pub fn render_env_cookie(root_key: &[u8], public_vars: &BTreeMap<String, String>) -> String {
     let mut entries = vec![format!("ic_root_key={}", hex::encode(root_key))];
     for (name, value) in public_vars {
         entries.push(format!("{name}={value}"));
@@ -48,7 +48,7 @@ pub(crate) fn render_env_cookie(root_key: &[u8], public_vars: &BTreeMap<String, 
 /// Keying off content-type (rather than the `.html` key suffix) is what lets the
 /// `/` 200-rewrite alias inherit the cookie: `/` and `/index.html` serve the
 /// same `text/html` meta, so both match uniformly.
-pub(crate) fn is_html_content_type(content_type: &str) -> bool {
+pub fn is_html_content_type(content_type: &str) -> bool {
     content_type
         .split(';')
         .next()
@@ -66,7 +66,7 @@ pub(crate) fn is_html_content_type(content_type: &str) -> bool {
 /// own `_headers`, plus the canister-injected `ic_env` `set-cookie` on
 /// `text/html` responses. It is therefore **not** just the user's custom headers
 /// — the env cookie is a certified header like any other.
-pub(crate) fn certificate_expression_for(
+pub fn certificate_expression_for(
     effective_headers: &[(String, String)],
     encoding: Encoding,
 ) -> CertificateExpression {
@@ -83,7 +83,7 @@ pub(crate) fn certificate_expression_for(
 /// `effective_headers` (see [`certificate_expression_for`]) carries the asset's
 /// `_headers` **and** the canister-injected `ic_env` `set-cookie` on `text/html`
 /// responses, so the rendered list includes that cookie when present.
-pub(crate) fn headers_for(
+pub fn headers_for(
     effective_headers: &[(String, String)],
     content_type: &str,
     encoding: Encoding,
@@ -100,7 +100,7 @@ pub(crate) fn headers_for(
 /// The certified 200/304 response hashes for an encoding. `effective_headers`
 /// (see [`certificate_expression_for`]) includes the `ic_env` `set-cookie` on
 /// `text/html` responses, so that cookie is part of the certified hash.
-pub(crate) fn response_hashes_for(
+pub fn response_hashes_for(
     effective_headers: &[(String, String)],
     content_type: &str,
     encoding: Encoding,
