@@ -915,6 +915,174 @@ fn uses_streaming_for_multichunk_assets() {
 }
 
 #[test]
+fn streams_three_chunks_chaining_continuation_tokens() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    // Three chunks exercise the mid-stream case a 2-chunk asset never reaches:
+    // the callback must itself return a *continuation* token (not a terminator)
+    // for the middle chunk.
+    const C0: &[u8] = b"chunk-zero-";
+    const C1: &[u8] = b"chunk-one--";
+    const C2: &[u8] = b"chunk-two";
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![
+            AssetBuilder::new("/big.html", "text/html").with_encoding("identity", vec![C0, C1, C2])
+        ],
+    );
+
+    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
+    let response = state.http_request(
+        RequestBuilder::get("/big.html").build(),
+        &[],
+        streaming_callback.clone(),
+    );
+
+    // First response: 200 with chunk 0 inline and a strategy pointing at chunk 1.
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body.as_ref(), C0);
+    let StreamingStrategy::Callback { callback, token } = response
+        .streaming_strategy
+        .expect("missing streaming strategy");
+    assert_eq!(callback, streaming_callback);
+    assert_eq!(token.index, Nat::from(1_u8));
+
+    // Middle chunk: the callback returns chunk 1 *and* a continuation token for
+    // chunk 2 — the branch that never fires with only two chunks.
+    let second = state.http_request_streaming_callback(token).unwrap();
+    assert_eq!(second.body.as_ref(), C1);
+    let next = second
+        .token
+        .expect("expected a continuation token for the final chunk");
+    assert_eq!(next.index, Nat::from(2_u8));
+
+    // Final chunk: body served, token is None to end the stream.
+    let third = state.http_request_streaming_callback(next).unwrap();
+    assert_eq!(third.body.as_ref(), C2);
+    assert!(
+        third.token.is_none(),
+        "stream must terminate after the last chunk: {third:?}"
+    );
+}
+
+#[test]
+fn streams_multichunk_non_identity_encoding() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    // A gzip encoding split across two chunks: streaming must work for an
+    // encoding that also emits a `content-encoding` header, not just identity.
+    const GZIP_CHUNK_1: &[u8] = b"\x1f\x8b\x08\x00fake-gzip-bytes-1";
+    const GZIP_CHUNK_2: &[u8] = b"fake-gzip-bytes-2";
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/app.js", "text/javascript")
+            .with_encoding("gzip", vec![GZIP_CHUNK_1, GZIP_CHUNK_2])],
+    );
+
+    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
+    let response = state.http_request(
+        RequestBuilder::get("/app.js")
+            .with_header("Accept-Encoding", "gzip")
+            .build(),
+        &[],
+        streaming_callback.clone(),
+    );
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body.as_ref(), GZIP_CHUNK_1);
+    assert_eq!(lookup_header(&response, "content-encoding"), Some("gzip"));
+
+    let StreamingStrategy::Callback { callback, token } = response
+        .streaming_strategy
+        .expect("missing streaming strategy");
+    assert_eq!(callback, streaming_callback);
+    assert_eq!(token.encoding, Encoding::Gzip);
+
+    let second = state.http_request_streaming_callback(token).unwrap();
+    assert_eq!(second.body.as_ref(), GZIP_CHUNK_2);
+    assert!(second.token.is_none(), "stream should end after chunk 2");
+}
+
+#[test]
+fn single_chunk_asset_has_no_streaming_strategy() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/small.html", "text/html")
+            .with_encoding("identity", vec![b"<html></html>"])],
+    );
+
+    let response = state.http_request(
+        RequestBuilder::get("/small.html").build(),
+        &[],
+        unused_callback(),
+    );
+
+    assert_eq!(response.status_code, 200);
+    assert!(
+        response.streaming_strategy.is_none(),
+        "a single-chunk asset must not advertise streaming: {response:?}"
+    );
+}
+
+#[test]
+fn streaming_callback_rejects_unknown_key() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/index.html", "text/html")
+            .with_encoding("identity", vec![b"a", b"b"])],
+    );
+
+    let err = state
+        .http_request_streaming_callback(StreamingCallbackToken {
+            key: "/does-not-exist.html".to_string(),
+            encoding: Encoding::Identity,
+            index: Nat::from(1_u8),
+            sha256: ByteBuf::from([0u8; 32].as_slice()),
+        })
+        .unwrap_err();
+    assert_eq!(err, "Invalid token on streaming: key not found.");
+}
+
+#[test]
+fn streaming_callback_rejects_unknown_encoding() {
+    let mut state = State::default();
+    let system_context = mock_system_context();
+
+    // Asset exists with only an identity encoding; a token naming gzip must be
+    // rejected before the sha256 is even consulted.
+    create_assets(
+        &mut state,
+        &system_context,
+        vec![AssetBuilder::new("/index.html", "text/html")
+            .with_encoding("identity", vec![b"a", b"b"])],
+    );
+
+    let err = state
+        .http_request_streaming_callback(StreamingCallbackToken {
+            key: "/index.html".to_string(),
+            encoding: Encoding::Gzip,
+            index: Nat::from(1_u8),
+            sha256: ByteBuf::from([0u8; 32].as_slice()),
+        })
+        .unwrap_err();
+    assert_eq!(err, "Invalid token on streaming: encoding not found.");
+}
+
+#[test]
 fn supports_cache_control_via_headers() {
     let mut state = State::default();
     let system_context = mock_system_context();

@@ -34,9 +34,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 }
 
 #[query]
-fn http_request_streaming_callback(
-    token: StreamingCallbackToken,
-) -> Option<StreamingCallbackHttpResponse> {
+fn http_request_streaming_callback(token: StreamingCallbackToken) -> StreamingCallbackHttpResponse {
     canister_core::http_request_streaming_callback(token)
 }
 
