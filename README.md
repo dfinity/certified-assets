@@ -64,6 +64,48 @@ The workflow re-reads the version from `Cargo.toml`, rejects a tag that doesn't
 match, then runs `make release` and publishes `dist/canister-release.wasm.gz`
 and `dist/plugin-release.wasm` to a GitHub release named for the version.
 
+## Recipe
+
+Most users don't reference the canister/plugin wasm directly — they use the
+**recipe** published to [`dfinity/icp-cli-recipes`](https://github.com/dfinity/icp-cli-recipes),
+which `icp-cli` expands into a canister build + sync config:
+
+```yaml
+canisters:
+  - name: frontend
+    recipe:
+      type: "@dfinity/certified-assets@v1.0.0"
+      configuration:
+        dir: dist           # required: the single asset directory
+        build: [npm run build]   # optional: commands run before sync
+        # metadata: [...]    # optional: name/value pairs injected via ic-wasm
+```
+
+The recipe (`recipe.hbs`) is generated from one source —
+[`crates/recipe-gen/src/recipe.hbs.in`](crates/recipe-gen/src/recipe.hbs.in) —
+in two variants that differ only in how the wasm is pinned:
+
+```sh
+make recipe-local        # pins wasm by local path -> dist/recipe.local.hbs (for manual testing)
+make recipe-release      # pins wasm by release URL + sha256 -> dist/recipe.hbs (for publishing)
+```
+
+The e2e tests exercise the local variant through the real `icp` CLI
+([`crates/e2e/tests/recipe.rs`](crates/e2e/tests/recipe.rs)), and `recipe-gen`'s
+unit tests assert every config field renders to valid icp-cli YAML.
+
+To publish a new recipe version after a `v<version>` release exists:
+
+```sh
+scripts/publish-recipe.sh v<version>          # generates + commits on a branch in ../icp-cli-recipes; prints the PR command
+scripts/publish-recipe.sh v<version> --push   # also pushes and opens the PR
+```
+
+The script downloads the release's `.sha256` assets to pin the exact published
+wasm, branches off a fresh `origin/main` in your icp-cli-recipes clone, and
+writes `recipes/certified-assets/{recipe.hbs,README.md}`. After the PR merges,
+tag `certified-assets-v<version>` in icp-cli-recipes to cut the recipe release.
+
 ## Candid interface
 
 [`certified-assets.did`](certified-assets.did) is the canister's public interface

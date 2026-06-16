@@ -93,6 +93,20 @@ pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
     tmp
 }
 
+/// Generate a local `recipe.hbs` in `project` that pins the canister/plugin wasm
+/// by the relative paths `setup_project` placed under `wasms/`. The recipe is the
+/// real product produced by `recipe-gen`; writing the *local* variant here lets
+/// the e2e tests exercise icp-cli's recipe resolution end to end against the
+/// freshly built wasm. A fixture's `icp.yaml` references it via
+/// `recipe: { type: "file://recipe.hbs", ... }`.
+pub fn write_local_recipe(project: &Path) {
+    let recipe = recipe_gen::render_recipe(&recipe_gen::WasmSource::Local {
+        canister: "wasms/canister.wasm".to_string(),
+        plugin: "wasms/plugin.wasm".to_string(),
+    });
+    fs::write(project.join("recipe.hbs"), recipe).expect("failed to write recipe.hbs");
+}
+
 /// Return the canister ID of `frontend` as printed by `icp canister status --id-only`.
 pub fn frontend_canister_id(project: &Path) -> String {
     let stdout = icp_cmd(project)

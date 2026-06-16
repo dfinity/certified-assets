@@ -31,7 +31,7 @@ CANDID := certified-assets.did
 # env var to plumb here. See crates/wire-types/src/version.rs and the `tag`
 # target.
 
-.PHONY: wasm canister plugin release tag clean
+.PHONY: wasm canister plugin release recipe-local recipe-release tag clean
 
 # Build both wasm modules into dist/. Used by the tests and for manual builds;
 # needs no extra tooling.
@@ -73,6 +73,32 @@ release: wasm
 	cd $(DIST) && for f in canister-release.wasm.gz plugin-release.wasm $(CANDID); do \
 	  shasum -a 256 "$$f" > "$$f.sha256"; \
 	done
+
+# The icp-cli recipe (`recipe.hbs`) is the product most users consume; both
+# variants are generated from one source by the recipe-gen crate.
+#
+# recipe-local: pins the canister/plugin wasm by local file path — for sanity
+# checks outside the e2e harness. (The e2e tests generate their own local recipe
+# in-process via the recipe-gen library.)
+recipe-local: wasm
+	cargo run -p recipe-gen -- local \
+	  --canister $(DIST)/canister.wasm \
+	  --plugin $(DIST)/plugin.wasm \
+	  -o $(DIST)/recipe.local.hbs
+	@echo "Wrote $(DIST)/recipe.local.hbs"
+
+# recipe-release: pins the canister/plugin wasm by versioned GitHub release URL +
+# sha256. Depends on `release` so the *-release.wasm*.sha256 files exist, and
+# reads the version from Cargo.toml the same way `tag` does so the URLs match the
+# tag the release workflow publishes. This is the recipe published to
+# icp-cli-recipes (see scripts/publish-recipe.sh).
+recipe-release: release
+	@version=$$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/'); \
+	cargo run -p recipe-gen -- release \
+	  --version "v$$version" \
+	  --shas-from $(DIST) \
+	  -o $(DIST)/recipe.hbs; \
+	echo "Wrote $(DIST)/recipe.hbs for v$$version"
 
 # Create the release tag for HEAD from the workspace version in Cargo.toml: the
 # tag is `v<major>.<minor>.<patch>` (e.g. v0.1.0). Bump the version in
