@@ -50,7 +50,7 @@ type StreamingCallbackHttpResponse = record {
 
 type StreamingStrategy = variant {
   Callback: record {
-    callback: func (StreamingToken) -> (opt StreamingCallbackHttpResponse) query;
+    callback: func (StreamingToken) -> (StreamingCallbackHttpResponse) query;
     token: StreamingToken;
   };
 };
@@ -208,7 +208,7 @@ service: {
   // https://docs.internetcomputer.org/references/http-gateway-protocol-spec/
 
   http_request: (request: HttpRequest) -> (HttpResponse) query;
-  http_request_streaming_callback: (token: StreamingToken) -> (opt StreamingCallbackHttpResponse) query;
+  http_request_streaming_callback: (token: StreamingToken) -> (StreamingCallbackHttpResponse) query;
 
   // ───────── Asset queries ─────────
 
