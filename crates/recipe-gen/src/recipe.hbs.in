@@ -1,0 +1,35 @@
+{{! Deploy static assets to the dfinity/certified-assets canister. }}
+{{! `dir: string` Required. The single directory of built assets to synchronize. }}
+{{! `build: [string]` Optional. Commands run before sync to produce the asset directory. }}
+{{! `metadata: [{name, value}]` Optional. Pairs injected into the canister wasm via ic-wasm. }}
+
+build:
+  steps:
+    {{#if metadata}}
+    - type: script
+      commands:
+        - sh -c 'command -v ic-wasm >/dev/null 2>&1 || { echo >&2 "ic-wasm not found. See https://github.com/dfinity/ic-wasm"; exit 1; }'
+    {{/if}}
+    {{#if build}}
+    - type: script
+      commands:
+        {{#each build}}
+        - {{ this }}
+        {{/each}}
+    {{/if}}
+    - type: pre-built
+@@CANISTER_SOURCE@@
+    {{#if metadata}}
+    - type: script
+      commands:
+        {{#each metadata}}
+        - sh -c 'ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata "{{ name }}" -d "{{ value }}" --keep-name-section'
+        {{/each}}
+    {{/if}}
+
+sync:
+  steps:
+    - type: plugin
+@@PLUGIN_SOURCE@@
+      dirs:
+        - {{ dir }}

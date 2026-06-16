@@ -1,0 +1,15 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: frontend
+    recipe:
+      type: "file://recipe.hbs"
+      configuration:
+        dir: dist
+        metadata:
+          - name: "app:framework"
+            value: "react"

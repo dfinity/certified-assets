@@ -1,0 +1,23 @@
+[package]
+name = "recipe-gen"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "recipe-gen"
+path = "src/main.rs"
+
+# Rendering is only exercised in tests; the binary does pure string substitution.
+# handlebars/serde_yaml are pinned to icp-cli's versions so the test renders the
+# recipe exactly as the real CLI does.
+[dev-dependencies]
+handlebars.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
