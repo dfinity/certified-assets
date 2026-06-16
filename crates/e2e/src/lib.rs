@@ -148,15 +148,29 @@ pub fn gateway_url(project: &Path) -> String {
 /// `IC-Certificate` — if certification fails, the gateway short-circuits
 /// before the response reaches the caller.
 pub fn http_fetch(project: &Path, path: &str) -> reqwest::blocking::Response {
+    http_fetch_with_headers(project, path, &[])
+}
+
+/// Like [`http_fetch`], but attaches arbitrary request headers — e.g. an
+/// `If-None-Match` to exercise conditional-request / 304 handling end to end
+/// through the gateway.
+pub fn http_fetch_with_headers(
+    project: &Path,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> reqwest::blocking::Response {
     let cid = frontend_canister_id(project);
     let base = gateway_url(project);
     let url = format!("{base}{path}?canisterId={cid}");
-    reqwest::blocking::Client::builder()
+    let mut req = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("build reqwest client")
-        .get(&url)
-        .send()
+        .get(&url);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    req.send()
         .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
 }
 

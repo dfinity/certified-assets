@@ -1406,7 +1406,7 @@ mod certificate_expression {
         );
         assert_eq!(
             lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "Access-Control-Allow-Origin"]}}}})"#,
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "Access-Control-Allow-Origin", "etag"]}}}})"#,
             "Missing ic-certifiedexpression header in response: {response:#?}",
         );
     }
@@ -1440,7 +1440,7 @@ mod certificate_expression {
         );
         assert_eq!(
             lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "Access-Control-Allow-Origin"]}}}})"#,
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "Access-Control-Allow-Origin", "etag"]}}}})"#,
             "Missing ic-certificateexpression header in response: {response:#?}",
         );
 
@@ -1463,7 +1463,7 @@ mod certificate_expression {
         );
         assert_eq!(
             lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "custom-header"]}}}})"#,
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "custom-header", "etag"]}}}})"#,
             "Missing ic-certifiedexpression header in response: {response:#?}",
         );
     }
@@ -1531,13 +1531,14 @@ mod certification {
 
     #[test]
     fn etag() {
-        // For now only checks that defining a custom etag doesn't break certification.
-        // Serving HTTP 304 responses if the etag matches is part of https://dfinity.atlassian.net/browse/SDK-191
-
+        // The canister owns the `ETag`: it emits a certified `"<hex sha256>"`,
+        // and a custom `etag` smuggled into the asset headers is stripped (it
+        // does not appear on the wire) rather than served.
         let mut state = State::default();
         let system_context = mock_system_context();
 
         const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        let expected_etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
 
         create_assets(
             &mut state,
@@ -1553,10 +1554,59 @@ mod certification {
                 .with_header("Accept-Encoding", "gzip,identity")
                 .build(),
         );
+        assert_eq!(response.status_code, 200);
         assert_eq!(
-            lookup_header(&response, "etag").expect("ic-certificate header missing"),
-            "my-etag"
+            lookup_header(&response, "etag").expect("etag header missing"),
+            expected_etag,
+            "canister must serve its content-hash etag, not the custom one"
         );
+    }
+
+    #[test]
+    fn conditional_request_serves_certified_304() {
+        // A request whose `If-None-Match` carries the asset's current etag gets a
+        // certified 304 with an empty body; `certified_http_request` verifies the
+        // certificate, so this also proves the 304 is cryptographically valid (as
+        // a real HTTP gateway would require).
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![BODY])],
+        );
+
+        // Matching etag -> certified 304, empty body, no streaming.
+        let not_modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("If-None-Match", &etag)
+                .build(),
+        );
+        assert_eq!(not_modified.status_code, 304);
+        assert!(not_modified.body.is_empty());
+        assert!(not_modified.streaming_strategy.is_none());
+        assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
+
+        // A stale etag still serves the full, certified 200.
+        let modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_header(
+                    "If-None-Match",
+                    "\"0000000000000000000000000000000000000000000000000000000000000000\"",
+                )
+                .build(),
+        );
+        assert_eq!(modified.status_code, 200);
+        assert_eq!(modified.body.as_ref(), BODY);
     }
 }
 

@@ -9,6 +9,11 @@ use ic_representation_independent_hash::Value;
 use sha2::Digest;
 use wire_types::{RedirectRule, RulePattern};
 
+// Convention: `http::StatusCode` is used wherever this module *reasons about* a
+// status — `from_u16` to validate untrusted rule input, `is_redirection` /
+// `is_client_error` to classify it. The serving and certification paths instead
+// use plain `u16` literals, since there a status is just a number emitted onto
+// the Candid wire or folded into a response hash. Pick by role, not for uniformity.
 const SUPPORTED_STATUS_CODES: &[StatusCode] = &[
     StatusCode::OK,
     StatusCode::MOVED_PERMANENTLY,

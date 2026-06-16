@@ -49,6 +49,26 @@ use wire_types::{
 /// until it sees a short or empty page; it never needs to know this value.
 pub const PAGE_SIZE: usize = 100;
 
+/// Parse an `If-None-Match` request header into the content hashes the client
+/// already holds. Our `ETag` is `"<hex sha256>"` (see [`crate::asset::etag_value`]),
+/// so each token is unquoted and hex-decoded back to a 32-byte hash; the weak
+/// prefix `W/` is stripped first (RFC 7232 §3.2 mandates the weak comparison for
+/// `If-None-Match`). Tokens we can't read as a 32-byte hash — `*`, or any
+/// validator we didn't mint — simply don't match, so the client gets a normal
+/// 200.
+fn parse_if_none_match(value: &str) -> Vec<Hash> {
+    value
+        .split(',')
+        .filter_map(|token| {
+            let token = token.trim();
+            let token = token.strip_prefix("W/").unwrap_or(token).trim();
+            let token = token.strip_prefix('"')?.strip_suffix('"')?;
+            let bytes = hex::decode(token).ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        })
+        .collect()
+}
+
 type Mem = VirtualMemory<DefaultMemoryImpl>;
 
 const AUTHORIZED_MEMORY: MemoryId = MemoryId::new(0);
@@ -374,7 +394,7 @@ impl State {
         let effective_headers = self.effective_headers(meta);
         let path = AssetPath::from(key.as_str());
         for (&encoding, enc) in &meta.encodings {
-            let cert_expr = certificate_expression_for(&effective_headers, encoding);
+            let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
             let response_hashes = response_hashes_for(
                 &effective_headers,
                 &meta.content_type,
@@ -570,7 +590,12 @@ impl State {
         etags: &[Hash],
         status_override: Option<u16>,
     ) -> HttpResponse {
-        let mut headers = headers_for(&self.effective_headers(meta), &meta.content_type, encoding);
+        let mut headers = headers_for(
+            &self.effective_headers(meta),
+            &meta.content_type,
+            encoding,
+            &enc.sha256,
+        );
         if let Some(head) = certificate_header {
             headers.push((head.0.clone(), head.1.clone()));
         }
@@ -587,21 +612,24 @@ impl State {
             token,
         });
 
-        let (status_code, body) = if let Some(status) = status_override {
-            (status, self.chunk_bytes(enc.content_id, chunk_index))
+        // The canister-managed `etag` header is already in `headers` (and in the
+        // certified set), so both the 200 and the 304 carry it.
+        let (status_code, body, streaming_strategy) = if let Some(status) = status_override {
+            (
+                status,
+                self.chunk_bytes(enc.content_id, chunk_index),
+                streaming_strategy,
+            )
         } else if etags.contains(&enc.sha256) {
-            (304, RcBytes::default())
+            // Conditional request matched: serve the certified 304 — empty body,
+            // no streaming. Its response hash is certified alongside the 200.
+            (304, RcBytes::default(), None)
         } else {
-            if !headers
-                .iter()
-                .any(|(header_name, _)| header_name.eq_ignore_ascii_case("etag"))
-            {
-                headers.push((
-                    "etag".to_string(),
-                    format!("\"{}\"", hex::encode(enc.sha256)),
-                ));
-            }
-            (200, self.chunk_bytes(enc.content_id, chunk_index))
+            (
+                200,
+                self.chunk_bytes(enc.content_id, chunk_index),
+                streaming_strategy,
+            )
         };
 
         HttpResponse {
@@ -672,11 +700,12 @@ impl State {
         callback: CallbackFunc,
     ) -> HttpResponse {
         let mut encodings: Vec<Encoding> = vec![];
-        // waiting for https://dfinity.atlassian.net/browse/BOUN-446
-        let etags = Vec::new();
+        let mut etags: Vec<Hash> = vec![];
         for (name, value) in req.headers.iter() {
             if name.eq_ignore_ascii_case("Accept-Encoding") {
                 encodings.extend(Encoding::parse_accept_encoding(value));
+            } else if name.eq_ignore_ascii_case("If-None-Match") {
+                etags.extend(parse_if_none_match(value));
             }
         }
 
@@ -849,7 +878,7 @@ impl State {
         let location = crate::redirect::tree_location(rule);
         let mut tree_paths = Vec::new();
         for (&encoding, enc) in &meta.encodings {
-            let cert_expr = certificate_expression_for(&effective_headers, encoding);
+            let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
             let resp_hash = if status == 200 {
                 // The encoding's already-certified 200 response hash.
                 response_hashes_for(
@@ -862,11 +891,15 @@ impl State {
             } else {
                 // 4xx custom error page: re-certify with the override status
                 // using the same headers and body the asset would serve at 200.
-                let base_headers: Vec<(String, Value)> =
-                    headers_for(&effective_headers, &meta.content_type, encoding)
-                        .into_iter()
-                        .map(|(k, v)| (k, Value::String(v)))
-                        .collect();
+                let base_headers: Vec<(String, Value)> = headers_for(
+                    &effective_headers,
+                    &meta.content_type,
+                    encoding,
+                    &enc.sha256,
+                )
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect();
                 response_hash(&base_headers, status, &enc.sha256).0
             };
             let tp =
