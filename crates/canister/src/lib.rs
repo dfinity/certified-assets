@@ -14,7 +14,7 @@ fn post_upgrade() {
 #[cfg(target_family = "wasm")]
 #[used]
 #[unsafe(link_section = "icp:public supported_certificate_versions")]
-static CERTIFICATE_VERSIONS: [u8; 3] = canister_core::SUPPORTED_CERTIFICATE_VERSIONS;
+static CERTIFICATE_VERSIONS: [u8; 1] = *b"2"; // The canister supports v2 certificates, but not v1.
 
 // Query methods
 

@@ -30,8 +30,6 @@ pub use wire_types::{
     Version,
 };
 
-pub static SUPPORTED_CERTIFICATE_VERSIONS: [u8; 3] = *b"1,2";
-
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
