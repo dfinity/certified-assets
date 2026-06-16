@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use wire_types::{
     AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
+    Version,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -35,8 +36,8 @@ pub trait CanisterCall {
         R: CandidType + DeserializeOwned;
 }
 
-pub fn bundle_tag(c: &impl CanisterCall) -> Result<Option<u64>, String> {
-    c.call("bundle_tag", (), CallType::Query, true)
+pub fn version(c: &impl CanisterCall) -> Result<Version, String> {
+    c.call("version", (), CallType::Query, true)
 }
 
 // Fetch the complete asset list by paging through `get_asset_details`, returned

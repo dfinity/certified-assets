@@ -8,7 +8,7 @@ An ICP assets canister and `icp-cli` sync plugin for serving certified static as
 make wasm        # build both modules into dist/
 make canister    # canister wasm only
 make plugin      # sync-plugin wasm only
-make release     # publishable build (see Releasing for ASSETS_BUNDLE_TAG)
+make release     # publishable build (canister + plugin + candid + checksums)
 ```
 
 Artifacts land in `dist/` under stable names (`dist/canister.wasm`,
@@ -31,29 +31,38 @@ names (so it never clobbers the plain `dist/canister.wasm`/`dist/plugin.wasm`):
 - `dist/<file>.sha256` — a SHA-256 checksum beside each published file, so a
   downloaded artifact can be verified on its own (`shasum -a 256 -c <file>.sha256`).
 
-`ASSETS_BUNDLE_TAG` is the optional release identity stamped into **both**
-modules so a deployed canister and its sync plugin only pair with their exact
-counterpart. It's the build time as a 12-digit `YYYYMMDDhhmm` (UTC) integer —
-e.g. `202606121430` for 2026-06-12 14:30 — and is left unset for e2e and manual
-builds, which are then unstamped. See Releasing for where its value comes from.
+The release identity stamped into **both** modules is the single workspace
+semver from [`Cargo.toml`](Cargo.toml), read at build time from
+`CARGO_PKG_VERSION` — so every build (dev or release) knows its own version and
+a deployed canister only pairs with the sync plugin that reports the identical
+version. See Releasing for what the number means and how to bump it.
 
 ## Releasing
 
-A release is a git tag whose name **is** the bundle tag: the released commit's
-committer time as `YYYYMMDDhhmm` in UTC. Deriving it from the commit — not from
-when you happen to tag — means re-tagging the same commit always yields the same
-value, and the tag equals the exact integer the `bundle_tag` query returns at
-runtime, so a plugin/canister mismatch maps straight back to a release.
+Every crate shares one semver, and that version doubles as the canister↔plugin
+release identity: the canister returns it from the `version` query and the
+plugin refuses to sync unless it matches its own exactly (they're a locked
+pair). The version *value* also says whether moving the canister between two
+releases keeps its state — following Cargo's 0.x rule while `major` is `0`:
+
+| Change | Bump | Canister switch |
+| --- | --- | --- |
+| **Non-breaking** | patch (`0.1.0 → 0.1.1`) | in-place `upgrade`; `post_upgrade` recovers all state |
+| **Breaking** | minor (`0.1.x → 0.2.0`) | `reinstall`; state is wiped, a fresh sync re-uploads everything |
+
+(From `1.0.0` on, a major bump is the breaking one.) Choosing breaking vs
+non-breaking is a deliberate call — the axis is canister *state* upgradability —
+so bump it by hand:
 
 ```sh
-make tag                 # create the tag for HEAD (prints the push command)
-git push origin <tag>    # triggers .github/workflows/release.yml
+# 1. edit version in [workspace.package] in Cargo.toml, commit
+make tag                 # tags HEAD `v<version>` from Cargo.toml (prints the push command)
+git push origin v<version>   # triggers .github/workflows/release.yml
 ```
 
-The workflow re-derives the tag from the commit and rejects a mismatch, then runs
-`make release ASSETS_BUNDLE_TAG=<tag>` and publishes `dist/canister-release.wasm.gz`
-and `dist/plugin-release.wasm` to a GitHub release. Crate versions stay `0.0.0`;
-the bundle tag is the only release identifier.
+The workflow re-reads the version from `Cargo.toml`, rejects a tag that doesn't
+match, then runs `make release` and publishes `dist/canister-release.wasm.gz`
+and `dist/plugin-release.wasm` to a GitHub release named for the version.
 
 ## Candid interface
 

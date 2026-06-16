@@ -1,14 +1,14 @@
 name: Release
 
-# Triggered by pushing a tag whose name is the bundle tag: the released commit's
-# committer time as YYYYMMDDhhmm in UTC. Create it with `make tag` and push it.
-# The bundle tag is a function of the commit, not of when you tag, so the release
-# is reproducible and the tag equals the integer the `bundle_tag` query returns
-# at runtime.
+# Triggered by pushing a `v<semver>` tag (e.g. v0.1.0) matching the single
+# workspace version in Cargo.toml. Create it with `make tag` and push it. That
+# version is compiled into both modules via CARGO_PKG_VERSION and is what the
+# canister's `version` query returns at runtime, so the tag maps straight to the
+# released artifacts.
 on:
   push:
     tags:
-      - "[0-9]*"
+      - "v[0-9]*"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,15 +30,16 @@ jobs:
           # tagged commit is on main (release provenance).
           fetch-depth: 0
 
-      - name: Validate tag matches the released commit
+      - name: Validate tag matches the workspace version
         run: |
-          # Re-derive the bundle tag from the tagged commit and reject anything
-          # else, so a hand-crafted or stale tag can't ship a mislabelled build.
-          # `git log -1` reads the checked-out tag's commit (shallow clone is fine);
-          # git formats the date identically on every OS.
-          expected=$(TZ=UTC git log -1 --date=format-local:'%Y%m%d%H%M' --format=%cd)
-          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match the released commit's time ($expected, YYYYMMDDhhmm UTC). Create the tag with 'make tag'."
+          # Re-read the workspace version from Cargo.toml and reject a tag that
+          # doesn't match, so a hand-crafted or stale tag can't ship a
+          # mislabelled build. The compiled-in version (CARGO_PKG_VERSION) comes
+          # from this same line, so this keeps tag, artifacts, and the `version`
+          # query in lockstep.
+          expected=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$GITHUB_REF_NAME" != "v$expected" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match the workspace version (expected 'v$expected'). Bump Cargo.toml and create the tag with 'make tag'."
             exit 1
           fi
 
@@ -57,16 +58,14 @@ jobs:
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dfinity/ic-wasm/releases/download/0.9.11/ic-wasm-installer.sh | sh
 
       - name: Build release artifacts
-        run: make release ASSETS_BUNDLE_TAG="${GITHUB_REF_NAME}"
+        run: make release
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Punctuate the YYYYMMDDhhmm tag for the release title (mirrors
-          # wire_types::format_tag) — pure string slicing, no `date` needed.
-          t=$GITHUB_REF_NAME
-          title="${t:0:4}-${t:4:2}-${t:6:2} ${t:8:2}:${t:10:2} UTC"
+          # The release title is just the version tag (e.g. v0.1.0).
+          title="$GITHUB_REF_NAME"
 
           # The full set `make release` produced: each artifact plus its
           # sibling .sha256 (wasm + candid + checksums).

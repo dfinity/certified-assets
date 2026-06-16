@@ -3,7 +3,10 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.0"
+# Single semver for every crate in the workspace; also the release identity the
+# canister and sync plugin share (see crates/wire-types/src/version.rs). Bump it
+# per the breaking/non-breaking rule documented there, then `make tag`.
+version = "0.1.0"
 authors = ["DFINITY Stiftung <sdk@dfinity.org>"]
 edition = "2021"
 repository = "https://github.com/dfinity/certified-assets"
