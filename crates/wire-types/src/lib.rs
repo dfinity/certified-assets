@@ -19,8 +19,8 @@ use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
-mod bundle_tag;
-pub use bundle_tag::{format_tag, BUNDLE_TAG};
+mod version;
+pub use version::{Version, VERSION};
 
 /// Identifies an in-progress sync. Sequential and monotonic across the
 /// canister's whole lifetime, so a session id is never reused — calls carrying

@@ -1,7 +1,7 @@
 use candid::Principal;
 use canister_core::{
     guard_can_sync, guard_is_controller, AssetDetails, ExecuteOperationsArguments, RedirectRule,
-    StartSyncResult, UploadChunksArguments,
+    StartSyncResult, UploadChunksArguments, Version,
     {HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
 };
 use ic_cdk::{post_upgrade, query, update};
@@ -19,8 +19,8 @@ static CERTIFICATE_VERSIONS: [u8; 3] = canister_core::SUPPORTED_CERTIFICATE_VERS
 // Query methods
 
 #[query]
-fn bundle_tag() -> Option<u64> {
-    canister_core::bundle_tag()
+fn version() -> Version {
+    canister_core::version()
 }
 
 #[query]

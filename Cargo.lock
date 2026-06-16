@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "canister"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "candid",
  "candid_parser",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "canister-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "e2e"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "candid",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "sync-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "brotli",
  "candid",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "sync-plugin"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "candid",
  "serde",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "wire-types"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "candid",
  "serde",

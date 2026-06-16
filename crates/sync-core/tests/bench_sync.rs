@@ -81,7 +81,7 @@ impl CanisterCall for BenchMock {
         }
 
         let resp = match method {
-            "bundle_tag" => Encode!(&wire_types::BUNDLE_TAG),
+            "version" => Encode!(&wire_types::VERSION),
             "get_asset_details" => Encode!(&Vec::<AssetDetails>::new()),
             "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
             "start_sync" => Encode!(&StartSyncOk::Started { session_id: 1 }),

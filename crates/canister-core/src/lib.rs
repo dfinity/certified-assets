@@ -27,6 +27,7 @@ use std::cell::RefCell;
 pub use http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken};
 pub use wire_types::{
     AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
+    Version,
 };
 
 pub static SUPPORTED_CERTIFICATE_VERSIONS: [u8; 3] = *b"1,2";
@@ -35,12 +36,12 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
-/// The bundle tag this canister was built with: the build time as a
-/// `YYYYMMDDhhmm` decimal (UTC), or `None` for an unstamped dev build. The sync
-/// plugin checks this against its own tag and refuses to proceed on a mismatch.
-/// See [`wire_types::BUNDLE_TAG`].
-pub fn bundle_tag() -> Option<u64> {
-    wire_types::BUNDLE_TAG
+/// The semver release version this canister was built with. The sync plugin
+/// checks this against its own version and refuses to proceed on a mismatch, and
+/// the value also encodes state-upgradability between releases. See
+/// [`wire_types::VERSION`].
+pub fn version() -> Version {
+    wire_types::VERSION
 }
 
 /// Adds `principal` to the authorized set. Controller-guarded at the endpoint.

@@ -10,8 +10,8 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use crate::canister::{
-    authorize_via_proxy, bundle_tag, can_sync, execute_operations, list_all_assets,
-    list_all_redirect_rules, start_sync, upload_chunks, CanisterCall,
+    authorize_via_proxy, can_sync, execute_operations, list_all_assets, list_all_redirect_rules,
+    start_sync, upload_chunks, version, CanisterCall,
 };
 use crate::content::{encoders_for, Content};
 use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
@@ -104,27 +104,29 @@ pub fn sync<C: CanisterCall>(
     // run fails fast rather than after reading and encoding the whole project.
     ensure_can_sync(canister, identity_principal, proxy_canister_id.is_some())?;
 
-    // The canister and this plugin ship as one bundle and only work as a pair.
-    // Refuse to sync against a canister from a different bundle — most often a
-    // canister that wasn't re-installed after the recipe was bumped. The tag is
-    // Option<YYYYMMDDhhmm> (None = unstamped dev build, ordering before any real
-    // tag), so the numeric compare tells the user which side is stale and
-    // format_tag renders each as a readable UTC timestamp.
-    let canister_tag = bundle_tag(canister)?;
-    let plugin_tag = wire_types::BUNDLE_TAG;
-    if canister_tag != plugin_tag {
-        let hint = if canister_tag < plugin_tag {
-            "the canister is older than this plugin — run `icp canister install` to upgrade it, then re-run sync"
+    // The canister and this plugin ship as one bundle and are upgraded as a
+    // locked pair, so refuse to sync unless the canister reports our exact
+    // version — most often a mismatch means the canister wasn't re-installed
+    // after the recipe was bumped. When they differ, the semver tells the user
+    // both which side is stale and, when the canister is the stale one, whether
+    // the fix is an in-place upgrade (non-breaking) or a reinstall (breaking).
+    let canister_version = version(canister)?;
+    let plugin_version = wire_types::VERSION;
+    if canister_version != plugin_version {
+        let hint = if canister_version < plugin_version {
+            if plugin_version.upgrade_compatible_with(canister_version) {
+                "the canister is behind this plugin (non-breaking): upgrade it in place with `icp canister install --mode upgrade` — state is preserved — then re-run sync"
+            } else {
+                "the canister is behind this plugin (breaking): reinstall it with `icp canister install --mode reinstall`, which wipes its state, then re-run sync to re-upload all assets and redirect rules"
+            }
         } else {
             "the canister is newer than this plugin — update your tooling so the plugin matches, then re-run sync"
         };
         return Err(format!(
-            "assets canister bundle tag mismatch: canister was built {}, this plugin was built {}; {hint}",
-            wire_types::format_tag(canister_tag),
-            wire_types::format_tag(plugin_tag),
+            "assets canister version mismatch: canister is {canister_version}, this plugin is {plugin_version}; {hint}",
         ));
     }
-    println!("bundle_tag: {}", wire_types::format_tag(canister_tag));
+    println!("version: {canister_version}");
 
     let sources = crate::scan::scan(dir)?;
     println!("found {} file(s) from {dir}", sources.len());
@@ -1592,7 +1594,7 @@ mod tests {
         canister_rules.push(not_found::catchall_rule());
 
         let mock = SyncMock::new();
-        mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
+        mock.push_ok("version", wire_types::VERSION);
         mock.push_ok("can_sync", true);
         mock.push_ok("get_asset_details", vec![branded_404_canister_asset(&[])]);
         // Trailing empty page terminates list_all_assets' cursor walk.
@@ -1638,7 +1640,7 @@ mod tests {
         std::fs::write(dir.path().join("_redirects"), b"/old /new 301\n").unwrap();
 
         let mock = SyncMock::new();
-        mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
+        mock.push_ok("version", wire_types::VERSION);
         mock.push_ok("can_sync", true);
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
@@ -2259,7 +2261,7 @@ mod tests {
         let canister_rules = resolve_3xx_rule_headers(&synth, &header_rules);
 
         let mock = SyncMock::new();
-        mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
+        mock.push_ok("version", wire_types::VERSION);
         mock.push_ok("can_sync", true);
         mock.push_ok(
             "get_asset_details",
@@ -2304,7 +2306,7 @@ mod tests {
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
         let mock = SyncMock::new();
-        mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
+        mock.push_ok("version", wire_types::VERSION);
         mock.push_ok("can_sync", true);
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
@@ -2401,7 +2403,7 @@ mod tests {
         canister_rules.push(not_found::catchall_rule());
 
         let mock = SyncMock::new();
-        mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
+        mock.push_ok("version", wire_types::VERSION);
         mock.push_ok("can_sync", true);
         mock.push_ok(
             "get_asset_details",
@@ -2442,7 +2444,7 @@ mod tests {
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
         let mock = SyncMock::new();
-        mock.push_ok("bundle_tag", wire_types::BUNDLE_TAG);
+        mock.push_ok("version", wire_types::VERSION);
         mock.push_ok("can_sync", true);
         // Empty canister → build_operations will produce work → start_sync is called.
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());

@@ -194,10 +194,14 @@ type ExecuteOperationsArguments = record {
 service: {
   // ───────── Canister metadata ─────────
 
-  // Release identity shared by the canister and its paired sync plugin; the
-  // plugin refuses to sync unless this matches its own tag. The build time as a
-  // YYYYMMDDhhmm decimal (UTC), or null for an unstamped dev build.
-  bundle_tag: () -> (opt nat64) query;
+  // Semver release identity shared by the canister and its paired sync plugin.
+  // The two ship and are upgraded as a locked pair, so the plugin refuses to
+  // sync unless this exactly matches its own version. The value also encodes
+  // state-upgradability between releases: while major is 0, a minor change is
+  // breaking (reinstall + re-upload all state) and a patch-only change is
+  // non-breaking (in-place upgrade preserves state); from 1.0.0 the major plays
+  // that role.
+  version: () -> (record { major: nat32; minor: nat32; patch: nat32 }) query;
 
   // ───────── HTTP gateway ─────────
   // Standard canister HTTP interface; see

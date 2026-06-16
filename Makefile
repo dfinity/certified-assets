@@ -26,13 +26,10 @@ PLUGIN_OUT   := target/$(PLUGIN_TARGET)/$(PLUGIN_PROFILE)/sync_plugin.wasm
 # Candid interface attached to the published canister wasm as `candid:service`.
 CANDID := certified-assets.did
 
-# Optional release identity (YYYYMMDDhhmm, UTC) compiled into both modules. The
-# release workflow derives it once from the released commit (see the `tag`
-# target) and passes it here, so the plugin only syncs against its exact
-# counterpart. Left unset for e2e and manual builds, which become unstamped
-# (None) dev builds. wire-types reads it via option_env!, so leaving it unset
-# also keeps those builds out of the recompile-on-tag-change path.
-TAG_ENV := $(if $(ASSETS_BUNDLE_TAG),ASSETS_BUNDLE_TAG=$(ASSETS_BUNDLE_TAG),)
+# The release identity compiled into both modules is the single workspace semver
+# in Cargo.toml, which the crates read at build time via `CARGO_PKG_VERSION` — no
+# env var to plumb here. See crates/wire-types/src/version.rs and the `tag`
+# target.
 
 .PHONY: wasm canister plugin release tag clean
 
@@ -44,12 +41,12 @@ wasm: canister plugin
 # tracking, so we always invoke it (cheap when nothing changed) and let it decide
 # whether a rebuild is needed, then copy the result into dist/.
 canister:
-	$(TAG_ENV) cargo build -p canister --target $(CANISTER_TARGET) --profile $(CANISTER_PROFILE)
+	cargo build -p canister --target $(CANISTER_TARGET) --profile $(CANISTER_PROFILE)
 	@mkdir -p $(DIST)
 	cp $(CANISTER_OUT) $(DIST)/canister.wasm
 
 plugin:
-	$(TAG_ENV) cargo build -p sync-plugin --target $(PLUGIN_TARGET) --profile $(PLUGIN_PROFILE)
+	cargo build -p sync-plugin --target $(PLUGIN_TARGET) --profile $(PLUGIN_PROFILE)
 	@mkdir -p $(DIST)
 	cp $(PLUGIN_OUT) $(DIST)/plugin.wasm
 
@@ -77,16 +74,16 @@ release: wasm
 	  shasum -a 256 "$$f" > "$$f.sha256"; \
 	done
 
-# Create the release tag for HEAD. The tag's name IS the bundle tag — HEAD's
-# committer time as YYYYMMDDhhmm in UTC — so it depends only on the commit, not
-# on when you run this: re-tagging the same commit yields the same value. Push it
-# (`git push origin <tag>`) to trigger the release workflow, which re-derives
-# this value from the commit and rejects a mismatch. We format via git (not
-# `date`) so it behaves identically on macOS and Linux.
+# Create the release tag for HEAD from the workspace version in Cargo.toml: the
+# tag is `v<major>.<minor>.<patch>` (e.g. v0.1.0). Bump the version in
+# [workspace.package] and commit first, then run this and push the tag
+# (`git push origin v<version>`) to trigger the release workflow, which re-reads
+# the version from Cargo.toml and rejects a mismatch. Reading the single `^version`
+# line keeps this deterministic and free of extra tooling.
 tag:
-	@tag=$$(TZ=UTC git log -1 --date=format-local:'%Y%m%d%H%M' --format=%cd); \
-	git tag -a "$$tag" -m "Release $$tag"; \
-	echo "Created tag $$tag — push it with: git push origin $$tag"
+	@version=$$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/'); \
+	git tag -a "v$$version" -m "Release v$$version"; \
+	echo "Created tag v$$version — push it with: git push origin v$$version"
 
 clean:
 	rm -rf $(DIST)
