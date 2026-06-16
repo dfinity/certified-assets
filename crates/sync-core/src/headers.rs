@@ -248,6 +248,13 @@ fn parse_header(stripped: &str) -> Result<ParsedHeader, String> {
             .map_err(|e| format!("invalid `Content-Type` value '{value}': {e}"))?;
         return Ok(ParsedHeader::ContentType(mime));
     }
+    if name.eq_ignore_ascii_case("etag") {
+        return Err(
+            "`ETag` is managed by the canister (it is derived from the content hash); \
+             remove it from `_headers`"
+                .to_string(),
+        );
+    }
     if value.contains(":splat") || value.contains(":placeholder") {
         return Err(format!(
             "':splat' / ':placeholder' substitution in header value ('{value}') \
@@ -486,6 +493,17 @@ mod tests {
             rules[0].content_type.as_ref().unwrap().to_string(),
             "text/markdown; charset=utf-8"
         );
+    }
+
+    #[test]
+    fn rejects_custom_etag() {
+        // `ETag` is canister-managed (derived from the content hash); a custom
+        // one in `_headers` is rejected so there is exactly one, trustworthy
+        // validator on the wire.
+        for line in ["  ETag: \"v1\"\n", "  etag: \"v1\"\n"] {
+            let e = err(&format!("/app.js\n{line}"));
+            assert!(e.message.contains("ETag"), "{}", e.message);
+        }
     }
 
     #[test]

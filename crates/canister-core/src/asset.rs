@@ -57,10 +57,38 @@ pub fn is_html_content_type(content_type: &str) -> bool {
         .eq_ignore_ascii_case("text/html")
 }
 
+/// The canister-managed strong validator for an encoding: the content's
+/// SHA-256 as a quoted hex string, per RFC 7232 §2.3. The canister owns the
+/// `ETag` header outright — a custom `etag` in an asset's `_headers` is rejected
+/// at sync time (see `sync-core`), so the certified header set always carries
+/// exactly this value. That makes `If-None-Match` revalidation correct by
+/// construction: the validator *is* the content hash the 304 logic compares
+/// against.
+pub fn etag_value(sha256: &[u8; 32]) -> String {
+    format!("\"{}\"", hex::encode(sha256))
+}
+
+/// `effective_headers` with the canister-managed `etag` folded in. Any stray
+/// `etag` is stripped first so exactly one — ours — ends up certified and on
+/// the wire.
+fn effective_headers_with_etag(
+    effective_headers: &[(String, String)],
+    sha256: &[u8; 32],
+) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = effective_headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("etag"))
+        .cloned()
+        .collect();
+    headers.push(("etag".to_string(), etag_value(sha256)));
+    headers
+}
+
 /// The certificate expression for an encoding, derived from the response's
 /// effective headers and the encoding name. The certified header set is
 /// `content-type` (implied by the expression template), plus `content-encoding`
-/// for non-identity encodings, plus the effective headers.
+/// for non-identity encodings, the effective headers, and the canister-managed
+/// `etag` (see [`etag_value`]).
 ///
 /// `effective_headers` is [`crate::state::State::effective_headers`]: the asset's
 /// own `_headers`, plus the canister-injected `ic_env` `set-cookie` on
@@ -69,16 +97,18 @@ pub fn is_html_content_type(content_type: &str) -> bool {
 pub fn certificate_expression_for(
     effective_headers: &[(String, String)],
     encoding: Encoding,
+    sha256: &[u8; 32],
 ) -> CertificateExpression {
+    let effective_headers = effective_headers_with_etag(effective_headers, sha256);
     build_ic_certificate_expression_from_headers_and_encoding(
-        effective_headers,
+        &effective_headers,
         encoding.header_name(),
     )
 }
 
 /// The full response header list for an encoding: `content-type`,
-/// `content-encoding` (non-identity), the effective headers, and the
-/// `IC-CertificateExpression` header.
+/// `content-encoding` (non-identity), the effective headers, the canister-managed
+/// `etag`, and the `IC-CertificateExpression` header.
 ///
 /// `effective_headers` (see [`certificate_expression_for`]) carries the asset's
 /// `_headers` **and** the canister-injected `ic_env` `set-cookie` on `text/html`
@@ -87,8 +117,10 @@ pub fn headers_for(
     effective_headers: &[(String, String)],
     content_type: &str,
     encoding: Encoding,
+    sha256: &[u8; 32],
 ) -> Vec<(String, String)> {
-    let cert_expr = certificate_expression_for(effective_headers, encoding);
+    let cert_expr = certificate_expression_for(effective_headers, encoding, sha256);
+    let effective_headers = effective_headers_with_etag(effective_headers, sha256);
     build_headers(
         effective_headers.iter().map(|(k, v)| (k, v)),
         content_type,
@@ -107,6 +139,7 @@ pub fn response_hashes_for(
     cert_expr: &CertificateExpression,
     sha256: &[u8; 32],
 ) -> HashMap<u16, [u8; 32]> {
+    let effective_headers = effective_headers_with_etag(effective_headers, sha256);
     let base_headers: Vec<(String, Value)> = build_headers(
         effective_headers.iter().map(|(k, v)| (k, v)),
         content_type,
