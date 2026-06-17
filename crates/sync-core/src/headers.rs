@@ -255,6 +255,21 @@ fn parse_header(stripped: &str) -> Result<ParsedHeader, String> {
                 .to_string(),
         );
     }
+    // Headers the canister owns, or that are meaningless on a certified asset
+    // served through the IC HTTP gateway. We reject them at parse time (loudly)
+    // rather than silently dropping them at serve time the way some CDNs do —
+    // `docs/headers.md` has the per-header rationale. `Content-Type` and `ETag`
+    // are handled above with their own bespoke messages.
+    if let Some(reason) = reserved_header_reason(name) {
+        return Err(format!(
+            "`{name}` is reserved and cannot be set in `_headers`: {reason}"
+        ));
+    }
+    if name.eq_ignore_ascii_case("location") {
+        return Err(format!(
+            "`{name}` does not redirect from `_headers`; add a rule to `_redirects` instead"
+        ));
+    }
     if value.contains(":splat") || value.contains(":placeholder") {
         return Err(format!(
             "':splat' / ':placeholder' substitution in header value ('{value}') \
@@ -266,6 +281,46 @@ fn parse_header(stripped: &str) -> Result<ParsedHeader, String> {
         .map_err(|e| format!("invalid header name '{name}': {e}"))?;
     HeaderValue::from_str(value).map_err(|e| format!("invalid header value '{value}': {e}"))?;
     Ok(ParsedHeader::Other(name.to_string(), value.to_string()))
+}
+
+/// Response headers a user must not set in `_headers`, mapped to a short reason.
+/// Each is either owned by the canister (it derives the value itself) or has no
+/// meaning for a certified asset served through the IC HTTP gateway. Matched
+/// case-insensitively. `Content-Type` (set it via a bare `Content-Type:` line,
+/// which routes to asset metadata) and `ETag` are handled separately, each with
+/// its own message.
+fn reserved_header_reason(name: &str) -> Option<&'static str> {
+    const RESERVED: &[(&str, &str)] = &[
+        ("content-length", "the canister sets it from the asset body"),
+        (
+            "content-encoding",
+            "the canister negotiates gzip/Brotli/identity per request and sets it itself",
+        ),
+        (
+            "transfer-encoding",
+            "body framing is handled by the HTTP gateway, not the canister",
+        ),
+        (
+            "accept-ranges",
+            "the canister does not serve range (206 Partial Content) responses",
+        ),
+        (
+            "content-range",
+            "the canister does not serve range (206 Partial Content) responses",
+        ),
+        (
+            "ic-certificate",
+            "it carries the canister's response certificate and is canister-managed",
+        ),
+        (
+            "ic-certificateexpression",
+            "it is part of response certification and is canister-managed",
+        ),
+    ];
+    RESERVED
+        .iter()
+        .find(|(h, _)| name.eq_ignore_ascii_case(h))
+        .map(|(_, reason)| *reason)
 }
 
 #[cfg(test)]
@@ -504,6 +559,42 @@ mod tests {
             let e = err(&format!("/app.js\n{line}"));
             assert!(e.message.contains("ETag"), "{}", e.message);
         }
+    }
+
+    #[test]
+    fn rejects_reserved_headers() {
+        // Canister-owned (Content-Length, Content-Encoding), transport
+        // (Transfer-Encoding), range (Accept-Ranges, Content-Range), and
+        // certification (IC-Certificate*) headers are rejected at parse time
+        // rather than silently dropped at serve time.
+        for name in [
+            "Content-Length",
+            "Content-Encoding",
+            "Transfer-Encoding",
+            "Accept-Ranges",
+            "Content-Range",
+            "IC-Certificate",
+            "IC-CertificateExpression",
+        ] {
+            let e = err(&format!("/app.js\n  {name}: x\n"));
+            assert!(e.message.contains("reserved"), "{name}: {}", e.message);
+        }
+    }
+
+    #[test]
+    fn reserved_header_match_is_case_insensitive() {
+        // The exact Cloudflare failure mode: a user sets Content-Encoding and it
+        // is silently ignored. We reject it loudly instead, in any casing.
+        let e = err("/app.js\n  content-encoding: gzip\n");
+        assert!(e.message.contains("reserved"), "{}", e.message);
+    }
+
+    #[test]
+    fn rejects_location_and_points_to_redirects() {
+        // `Location` in `_headers` would be a silent no-op (the status stays
+        // 200) — steer the user to `_redirects`, where 3xx rules live.
+        let e = err("/old\n  Location: /new\n");
+        assert!(e.message.contains("_redirects"), "{}", e.message);
     }
 
     #[test]
