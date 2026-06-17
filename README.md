@@ -2,6 +2,18 @@
 
 An ICP assets canister and `icp-cli` sync plugin for serving certified static assets.
 
+## Documentation
+
+- **Using it** — to deploy a site, see the [user documentation](docs/overview.md):
+  [getting started](docs/overview.md), [routing & clean URLs](docs/routing.md),
+  [redirects](docs/redirects.md), [custom headers](docs/headers.md),
+  [site files](docs/site-files.md), and [how it works](docs/how-it-works.md).
+- **Hacking on it** — see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the crate layout
+  and how the canister and plugin fit together.
+
+The rest of this README covers building, releasing, and the recipe — the mechanics a
+contributor or releaser needs.
+
 ## Building the wasm
 
 ```sh

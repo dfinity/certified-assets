@@ -32,7 +32,7 @@
 //! for `/foo.html` still serves the asset directly with a 200 rather than the
 //! 307 Cloudflare would emit. We synthesise the rules anyway so the ruleset
 //! reflects the full table and self-activates if that precedence ever changes;
-//! `docs/redirects.md` documents the gap for users who care about strict URL
+//! `docs/routing.md` documents the gap for users who care about strict URL
 //! canonicalisation.
 //!
 //! Synthesised rules are prepended **before** the user's `_redirects` (see
