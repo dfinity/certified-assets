@@ -26,8 +26,8 @@ use crate::http::{CallbackFunc, HttpRequest, StreamingStrategy};
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, ExecuteOperationsProgress};
-use candid::Principal;
 use canbench_rs::{bench, bench_fn, BenchResult};
+use candid::Principal;
 use ic_stable_structures::DefaultMemoryImpl;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -224,7 +224,9 @@ fn serve_small_asset() -> BenchResult {
     let state = populate_one("/index.html", "text/html", 1, SMALL_ASSET_BYTES);
     // Sanity (not measured): a broken setup would otherwise measure the 404 path.
     assert_eq!(
-        state.http_request(get("/index.html"), &[], callback()).status_code,
+        state
+            .http_request(get("/index.html"), &[], callback())
+            .status_code,
         200
     );
 
@@ -248,7 +250,9 @@ fn serve_large_asset() -> BenchResult {
         LARGE_CHUNK_BYTES,
     );
     assert_eq!(
-        state.http_request(get("/big.bin"), &[], callback()).status_code,
+        state
+            .http_request(get("/big.bin"), &[], callback())
+            .status_code,
         200
     );
 
