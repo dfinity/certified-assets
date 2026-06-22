@@ -14,6 +14,9 @@ mod url;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "canbench-rs")]
+mod benches;
+
 use crate::{
     http::CallbackFunc,
     runtime::{CanisterEnv, SystemContext},

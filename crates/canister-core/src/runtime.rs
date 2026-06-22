@@ -25,7 +25,7 @@ impl SystemContext {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "canbench-rs"))]
     pub fn new_with_options(current_timestamp_ns: u64) -> Self {
         Self {
             current_timestamp_ns,
