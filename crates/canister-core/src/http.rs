@@ -2,9 +2,8 @@ use crate::certification::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
 };
 use crate::rc_bytes::RcBytes;
-use candid::{define_function, CandidType, Deserialize, Nat};
+use candid::{define_function, CandidType, Deserialize};
 use serde_bytes::ByteBuf;
-use wire_types::Encoding;
 
 pub type HeaderField = (String, String);
 
@@ -28,9 +27,16 @@ pub struct HttpResponse {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct StreamingCallbackToken {
-    pub key: String,
-    pub encoding: Encoding,
-    pub index: Nat,
+    /// Content group to stream from. Carrying it lets the streaming callback
+    /// read chunks straight from the content store, with no `AssetMeta`
+    /// lookup/decode per chunk — the token is fully self-describing.
+    pub content_id: u64,
+    /// Index of the chunk this token requests.
+    pub index: u32,
+    /// Total chunks in the content group; the callback emits a follow-on token
+    /// while `index + 1 < num_chunks`.
+    pub num_chunks: u32,
+    /// Full-asset hash, carried for the HTTP gateway's streamed-response check.
     pub sha256: ByteBuf,
 }
 
@@ -50,21 +56,25 @@ pub struct StreamingCallbackHttpResponse {
 }
 
 impl StreamingCallbackToken {
+    /// Builds the token for the chunk *after* `chunk_index`, or `None` when
+    /// `chunk_index` is the last chunk. Self-contained: it carries
+    /// `content_id`/`num_chunks`/`sha256` so the streaming callback can serve
+    /// the next chunk without ever reloading the asset's `AssetMeta`.
     pub fn create_token(
-        encoding: Encoding,
-        content_chunks_count: usize,
-        content_sha256: [u8; 32],
-        key: &str,
+        content_id: u64,
+        num_chunks: u32,
+        sha256: ByteBuf,
         chunk_index: usize,
     ) -> Option<Self> {
-        if chunk_index + 1 >= content_chunks_count {
+        let next_index = chunk_index + 1;
+        if next_index >= num_chunks as usize {
             None
         } else {
             Some(StreamingCallbackToken {
-                key: key.to_string(),
-                encoding,
-                index: Nat::from(chunk_index + 1),
-                sha256: ByteBuf::from(content_sha256),
+                content_id,
+                index: next_index as u32,
+                num_chunks,
+                sha256,
             })
         }
     }

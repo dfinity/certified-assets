@@ -33,7 +33,6 @@ use ic_certification::{AsHashTree, Hash};
 use ic_representation_independent_hash::Value;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
-use num_traits::ToPrimitive;
 use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -490,7 +489,6 @@ impl State {
             if let Some(response) = self.build_asset_response(
                 &meta,
                 &requested_encodings,
-                path,
                 chunk_index,
                 Some(&cert_header),
                 &callback,
@@ -539,7 +537,6 @@ impl State {
         &self,
         meta: &AssetMeta,
         requested_encodings: &[Encoding],
-        key: &str,
         chunk_index: usize,
         certificate_header: Option<&HeaderField>,
         callback: &CallbackFunc,
@@ -562,7 +559,6 @@ impl State {
             meta,
             encoding,
             enc,
-            key,
             chunk_index,
             certificate_header,
             callback,
@@ -583,7 +579,6 @@ impl State {
         meta: &AssetMeta,
         encoding: Encoding,
         enc: &EncodingMeta,
-        key: &str,
         chunk_index: usize,
         certificate_header: Option<&HeaderField>,
         callback: &CallbackFunc,
@@ -601,10 +596,9 @@ impl State {
         }
 
         let streaming_strategy = StreamingCallbackToken::create_token(
-            encoding,
-            enc.num_chunks as usize,
-            enc.sha256,
-            key,
+            enc.content_id,
+            enc.num_chunks,
+            ByteBuf::from(enc.sha256),
             chunk_index,
         )
         .map(|token| StreamingStrategy::Callback {
@@ -681,7 +675,6 @@ impl State {
                 self.build_asset_response(
                     &meta,
                     requested_encodings,
-                    path,
                     chunk_index,
                     Some(&cert_header),
                     callback,
@@ -738,38 +731,28 @@ impl State {
     pub fn http_request_streaming_callback(
         &self,
         StreamingCallbackToken {
-            key,
-            encoding,
+            content_id,
             index,
+            num_chunks,
             sha256,
         }: StreamingCallbackToken,
-    ) -> Result<StreamingCallbackHttpResponse, String> {
-        let meta = self
-            .metadata
-            .get(&key)
-            .ok_or_else(|| "Invalid token on streaming: key not found.".to_string())?;
-        let enc = meta
-            .encodings
-            .get(&encoding)
-            .ok_or_else(|| "Invalid token on streaming: encoding not found.".to_string())?;
-
-        if sha256 != ByteBuf::from(enc.sha256) {
-            return Err("sha256 mismatch".to_string());
-        }
-
-        // MAX is good enough. This means a chunk would be above 64-bits, which is impossible...
-        let chunk_index = index.0.to_usize().unwrap_or(usize::MAX);
-
-        Ok(StreamingCallbackHttpResponse {
-            body: self.chunk_bytes(enc.content_id, chunk_index),
+    ) -> StreamingCallbackHttpResponse {
+        // The token is self-describing, so the callback needs no `metadata.get`
+        // / `AssetMeta` decode: it reads the requested chunk straight from the
+        // content store and re-derives the next token from the token's own
+        // fields. A forged `content_id`/`index` just misses the content store
+        // and yields an empty body — the gateway's `sha256` check then rejects
+        // the stream, so no uncertified bytes are ever served.
+        let chunk_index = index as usize;
+        StreamingCallbackHttpResponse {
+            body: self.chunk_bytes(content_id, chunk_index),
             token: StreamingCallbackToken::create_token(
-                encoding,
-                enc.num_chunks as usize,
-                enc.sha256,
-                &key,
+                content_id,
+                num_chunks,
+                sha256,
                 chunk_index,
             ),
-        })
+        }
     }
 
     // ---- redirect rules ----

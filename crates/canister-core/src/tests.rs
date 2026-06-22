@@ -7,7 +7,7 @@ use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use candid::{Nat, Principal};
+use candid::Principal;
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
 use ic_http_certification::{Method, StatusCode};
@@ -893,20 +893,7 @@ fn uses_streaming_for_multichunk_assets() {
         .expect("missing streaming strategy");
     assert_eq!(callback, streaming_callback);
 
-    // A token carrying the wrong hash is rejected.
-    assert_eq!(
-        state
-            .http_request_streaming_callback(StreamingCallbackToken {
-                key: "/index.html".to_string(),
-                encoding: Encoding::Identity,
-                index: Nat::from(1_u8),
-                sha256: ByteBuf::from([0u8; 32].as_slice()),
-            })
-            .unwrap_err(),
-        "sha256 mismatch"
-    );
-
-    let streaming_response = state.http_request_streaming_callback(token).unwrap();
+    let streaming_response = state.http_request_streaming_callback(token);
     assert_eq!(streaming_response.body.as_ref(), INDEX_BODY_CHUNK_2);
     assert!(
         streaming_response.token.is_none(),
@@ -948,19 +935,19 @@ fn streams_three_chunks_chaining_continuation_tokens() {
         .streaming_strategy
         .expect("missing streaming strategy");
     assert_eq!(callback, streaming_callback);
-    assert_eq!(token.index, Nat::from(1_u8));
+    assert_eq!(token.index, 1);
 
     // Middle chunk: the callback returns chunk 1 *and* a continuation token for
     // chunk 2 — the branch that never fires with only two chunks.
-    let second = state.http_request_streaming_callback(token).unwrap();
+    let second = state.http_request_streaming_callback(token);
     assert_eq!(second.body.as_ref(), C1);
     let next = second
         .token
         .expect("expected a continuation token for the final chunk");
-    assert_eq!(next.index, Nat::from(2_u8));
+    assert_eq!(next.index, 2);
 
     // Final chunk: body served, token is None to end the stream.
-    let third = state.http_request_streaming_callback(next).unwrap();
+    let third = state.http_request_streaming_callback(next);
     assert_eq!(third.body.as_ref(), C2);
     assert!(
         third.token.is_none(),
@@ -1002,9 +989,8 @@ fn streams_multichunk_non_identity_encoding() {
         .streaming_strategy
         .expect("missing streaming strategy");
     assert_eq!(callback, streaming_callback);
-    assert_eq!(token.encoding, Encoding::Gzip);
 
-    let second = state.http_request_streaming_callback(token).unwrap();
+    let second = state.http_request_streaming_callback(token);
     assert_eq!(second.body.as_ref(), GZIP_CHUNK_2);
     assert!(second.token.is_none(), "stream should end after chunk 2");
 }
@@ -1035,7 +1021,12 @@ fn single_chunk_asset_has_no_streaming_strategy() {
 }
 
 #[test]
-fn streaming_callback_rejects_unknown_key() {
+fn streaming_callback_with_bogus_content_id_serves_empty_body() {
+    // The self-describing token is no longer validated against `AssetMeta`: a
+    // forged `content_id` simply misses the content store and yields an empty
+    // body (rather than trapping). The HTTP gateway's `sha256` check on the
+    // accumulated stream is what rejects such a response, so no uncertified
+    // bytes are served.
     let mut state = State::default();
     let system_context = mock_system_context();
 
@@ -1046,40 +1037,16 @@ fn streaming_callback_rejects_unknown_key() {
             .with_encoding("identity", vec![b"a", b"b"])],
     );
 
-    let err = state
-        .http_request_streaming_callback(StreamingCallbackToken {
-            key: "/does-not-exist.html".to_string(),
-            encoding: Encoding::Identity,
-            index: Nat::from(1_u8),
-            sha256: ByteBuf::from([0u8; 32].as_slice()),
-        })
-        .unwrap_err();
-    assert_eq!(err, "Invalid token on streaming: key not found.");
-}
-
-#[test]
-fn streaming_callback_rejects_unknown_encoding() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    // Asset exists with only an identity encoding; a token naming gzip must be
-    // rejected before the sha256 is even consulted.
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![b"a", b"b"])],
+    let response = state.http_request_streaming_callback(StreamingCallbackToken {
+        content_id: u64::MAX,
+        index: 1,
+        num_chunks: 2,
+        sha256: ByteBuf::from([0u8; 32].as_slice()),
+    });
+    assert!(
+        response.body.as_ref().is_empty(),
+        "a token pointing at a nonexistent content group must serve no bytes"
     );
-
-    let err = state
-        .http_request_streaming_callback(StreamingCallbackToken {
-            key: "/index.html".to_string(),
-            encoding: Encoding::Gzip,
-            index: Nat::from(1_u8),
-            sha256: ByteBuf::from([0u8; 32].as_slice()),
-        })
-        .unwrap_err();
-    assert_eq!(err, "Invalid token on streaming: encoding not found.");
 }
 
 #[test]

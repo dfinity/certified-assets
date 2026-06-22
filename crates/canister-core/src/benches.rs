@@ -266,9 +266,7 @@ fn serve_large_asset() -> BenchResult {
             .streaming_strategy
             .map(|StreamingStrategy::Callback { token, .. }| token);
         while let Some(t) = token {
-            let next = state
-                .http_request_streaming_callback(t)
-                .expect("streaming callback");
+            let next = state.http_request_streaming_callback(t);
             std::hint::black_box(&next.body);
             token = next.token;
         }

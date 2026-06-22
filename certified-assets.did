@@ -28,18 +28,18 @@ type HttpResponse = record {
 // small, closed set (see `wire-types::Encoding`). Carried as a variant
 // (one byte on the wire) rather than a string. `Identity` is the uncompressed
 // form; it is a real stored encoding but never emitted as a `Content-Encoding`
-// header. Defined up here so both the streaming token and the asset types below
-// can reference it.
+// header. Defined up here so the asset types below can reference it.
 type Encoding = variant { Identity; Gzip; Brotli };
 
 // Each canister that uses the streaming feature gets to choose their concrete
 // type; the HTTP Gateway will treat it as an opaque value that is only fed to
-// the callback method. This is the assets canister's concrete token.
-
+// the callback method. This is the assets canister's concrete token — fully
+// self-describing, so the callback serves the next chunk straight from the
+// content store (`content_id`) without reloading any per-asset metadata.
 type StreamingToken = record {
-  key: text;
-  encoding: Encoding;
-  index: nat;
+  content_id: nat64;
+  index: nat32;
+  num_chunks: nat32;
   sha256: blob;
 };
 

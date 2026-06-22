@@ -131,10 +131,7 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
 pub fn http_request_streaming_callback(
     token: StreamingCallbackToken,
 ) -> StreamingCallbackHttpResponse {
-    STATE.with_borrow(|s| {
-        s.http_request_streaming_callback(token)
-            .unwrap_or_else(|msg| trap(&msg))
-    })
+    STATE.with_borrow(|s| s.http_request_streaming_callback(token))
 }
 
 /// Whether the current caller may sync assets: either in the authorized set, or
