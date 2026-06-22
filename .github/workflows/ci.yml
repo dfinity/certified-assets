@@ -102,10 +102,60 @@ jobs:
         run: |
           cargo clippy --tests --benches --keep-going -- -D warnings
 
+  benchmark:
+    name: canbench
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Remove pre-installed Rust stable toolchain
+        run: rustup toolchain remove stable 2>/dev/null || true
+      # No explicit `toolchain` — uses the channel from rust-toolchain.toml,
+      # including the wasm32-unknown-unknown target the benchmark wasm is built for.
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+      # The in-wasm harness `canbench-rs` is pinned to 0.6.0 in Cargo.toml; the
+      # CLI must match so the results-file format and the PocketIC runtime
+      # version line up. Download the prebuilt static (musl) x86_64 Linux binary
+      # from the GitHub release rather than `cargo install`, which would compile
+      # canbench from source on every run.
+      - name: Install canbench
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -fLsS \
+            https://github.com/dfinity/canbench/releases/download/v0.6.0/canbench \
+            -o "$HOME/.local/bin/canbench"
+          chmod +x "$HOME/.local/bin/canbench"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/canbench" --version
+      # canbench downloads a ~100 MB PocketIC runtime into .canbench/ on first
+      # run; cache it so later runs don't re-download. Keyed on the canbench
+      # version, which pins the runtime version.
+      - name: Cache PocketIC runtime
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: crates/canister-core/.canbench
+          key: canbench-pocketic-0.6.0-${{ runner.os }}
+      # Runs the benches and compares against the committed baseline
+      # (crates/canister-core/canbench_results.yml). Fails if any benchmark moved
+      # beyond canbench's noise threshold, or one was added/removed — meaning the
+      # committed baseline is stale and must be re-persisted. Instruction counts
+      # are host-independent (a property of the wasm + PocketIC's deterministic
+      # counter), so the baseline tracks across machines and CI.
+      - name: Run benchmarks and check the committed baseline
+        working-directory: crates/canister-core
+        run: |
+          set -Eeuo pipefail
+          canbench --less-verbose --show-summary | tee /tmp/canbench.txt
+          if grep -qE '\(regressed by|\(improved by|\(new\)|status:[[:space:]]+Regressions|status:[[:space:]]+Improvements|status:[[:space:]]+New[[:space:]]+benchmarks' /tmp/canbench.txt; then
+            echo "::error::canbench_results.yml is out of date: a benchmark changed beyond the noise threshold, or was added/removed. If the change is expected, run 'canbench --persist' in crates/canister-core and commit the updated canbench_results.yml."
+            exit 1
+          fi
+
   aggregate:
     name: ci:required
     if: ${{ always() }}
-    needs: [ test, fmt, clippy ]
+    needs: [ test, fmt, clippy, benchmark ]
     runs-on: ubuntu-24.04
     steps:
       - name: check test result
@@ -116,4 +166,7 @@ jobs:
         run: exit 1
       - name: check clippy result
         if: ${{ needs.clippy.result != 'success' }}
+        run: exit 1
+      - name: check benchmark result
+        if: ${{ needs.benchmark.result != 'success' }}
         run: exit 1

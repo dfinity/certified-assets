@@ -7,8 +7,20 @@ repository.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+# `rlib` for the `canister` crate (and unit tests) to link against; `cdylib` so
+# `canbench` can build this crate directly into a benchmark wasm (see
+# `canbench.yml` and `src/benches.rs`, both gated behind the `canbench-rs` feature).
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Compiles the canbench microbenchmarks (`src/benches.rs`) into the wasm. Off by
+# default, so normal builds and the `canister` crate are unaffected.
+canbench-rs = ["dep:canbench-rs"]
+
 [dependencies]
 wire-types = { path = "../wire-types" }
+canbench-rs = { workspace = true, optional = true }
 base64.workspace = true
 candid.workspace = true
 hex.workspace = true

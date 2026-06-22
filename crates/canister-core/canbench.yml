@@ -1,0 +1,6 @@
+# canbench config for the canister-core instruction microbenchmarks.
+# Run `canbench` from this directory (crates/canister-core). Add `--persist` to
+# write/update canbench_results.yml. See ../../BENCHMARKING.md and src/benches.rs.
+build_cmd: cargo build -p canister-core --release --target wasm32-unknown-unknown --features canbench-rs --locked
+
+wasm_path: ../../target/wasm32-unknown-unknown/release/canister_core.wasm

@@ -1,3 +1,7 @@
 /target
 /dist
 .icp/cache/
+
+# canbench's cached PocketIC runtime binary (~100 MB), downloaded on first run.
+# The committed baseline is canbench_results.yml, not this cache.
+.canbench/
