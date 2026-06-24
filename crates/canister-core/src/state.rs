@@ -26,7 +26,9 @@ use crate::http::{
     CallbackFunc, HeaderField, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
     StreamingCallbackToken, StreamingStrategy,
 };
-use crate::stable_store::{AssetMeta, AuthorizedSet, EncodingMeta, RedirectRules};
+use crate::stable_store::{
+    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, RedirectRules,
+};
 use crate::sync::{Chunk, SyncSession};
 use crate::url::url_decode;
 use candid::Principal;
@@ -94,6 +96,9 @@ const METADATA_MEMORY: MemoryId = MemoryId::new(4);
 const CONTENT_INDEX_MEMORY: MemoryId = MemoryId::new(5);
 /// Raw contiguous chunk bytes managed by the [`BlobStore`] allocator.
 const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(6);
+/// Per-chunk certification data (`ContentChunkKey -> ChunkCert`); read by the
+/// 206 certify/serve paths so neither has to re-hash or fully read content.
+const CHUNK_CERT_MEMORY: MemoryId = MemoryId::new(7);
 
 pub struct State {
     // ---- durable (stable memory) ----
@@ -114,6 +119,11 @@ pub struct State {
     /// `stable64_read`/`write` instead of an overflow-page walk. See
     /// [`crate::blob_store`].
     content: BlobStore<Mem>,
+    /// Per-chunk certification data (length + SHA-256), keyed by the same
+    /// `(content_id, chunk_index)` as the content blob. Lets the 206 certify path
+    /// stay content-free (no re-hash in `post_upgrade`) and the serve path avoid
+    /// reading every chunk to locate a range. Freed alongside its content group.
+    chunk_certs: StableBTreeMap<ContentChunkKey, ChunkCert, Mem>,
 
     // ---- transient heap (lost on upgrade) ----
     /// Chunks staged by `upload_chunks` for the current sync, in upload order:
@@ -169,6 +179,7 @@ impl State {
             next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
             metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
             content: BlobStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
+            chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
             chunks: Vec::new(),
             sync_session: None,
             asset_hashes: CertifiedResponses::default(),
@@ -235,9 +246,18 @@ impl State {
             .unwrap_or_default()
     }
 
-    /// Frees every chunk belonging to a content group.
+    /// Frees every chunk belonging to a content group, including its per-chunk
+    /// certification entries.
     fn delete_content(&mut self, content_id: u64) {
         self.content.delete_group(content_id);
+        let keys: Vec<ContentChunkKey> = self
+            .chunk_certs
+            .range(ContentChunkKey::range(content_id))
+            .map(|e| e.into_pair().0)
+            .collect();
+        for key in keys {
+            self.chunk_certs.remove(&key);
+        }
     }
 
     // ---- asset mutations ----
@@ -317,11 +337,23 @@ impl State {
             self.delete_content(old.content_id);
         }
 
-        // Allocate a fresh content group and write the chunks into it.
+        // Allocate a fresh content group and write the chunks into it, recording
+        // each chunk's length + hash for the 206 cert/serve paths as we go.
+        use sha2::Digest;
         let content_id = self.alloc_content_id();
         let num_chunks = content_chunks.len() as u32;
+        let mut content_len = 0u64;
         for (index, chunk) in content_chunks.iter().enumerate() {
             self.content.insert(content_id, index as u32, chunk);
+            let chunk_sha256: [u8; 32] = sha2::Sha256::digest(chunk).into();
+            self.chunk_certs.insert(
+                ContentChunkKey::new(content_id, index as u32),
+                ChunkCert {
+                    len: chunk.len() as u32,
+                    sha256: chunk_sha256,
+                },
+            );
+            content_len += chunk.len() as u64;
         }
 
         meta.encodings.insert(
@@ -330,6 +362,7 @@ impl State {
                 content_id,
                 num_chunks,
                 sha256,
+                content_len,
             },
         );
         self.recertify_asset(&arg.key, &meta);
@@ -423,29 +456,34 @@ impl State {
                 self.asset_hashes.certify_response_precomputed(&hash_path);
             }
 
-            // Phase 0 spike: certify N×206 for multi-chunk encodings (response-only).
-            // SHORTCUT: reads chunk bytes to hash them, so this is NOT content-free
-            // (the real Phase 1 stores per-chunk hashes to keep `post_upgrade` cheap).
+            // Certify N×206 for multi-chunk encodings (response-only). Content-free:
+            // per-chunk length + hash come from `chunk_certs`, so this stays cheap
+            // even when `post_upgrade` re-certifies every asset.
             if enc.num_chunks > 1 {
-                use sha2::Digest;
-                let chunks: Vec<Vec<u8>> = (0..enc.num_chunks)
-                    .map(|i| self.content.get(enc.content_id, i).unwrap_or_default())
-                    .collect();
-                let total: usize = chunks.iter().map(|c| c.len()).sum();
                 let range_cert_expr =
                     range_certificate_expression_for(&effective_headers, encoding, &enc.sha256);
-                let mut offset = 0usize;
-                for chunk in &chunks {
-                    let len = chunk.len();
+                let total = enc.content_len;
+                // Collect first so the `chunk_certs` borrow is released before we
+                // borrow `asset_hashes` mutably below.
+                let chunk_infos: Vec<(u32, [u8; 32])> = self
+                    .chunk_certs
+                    .range(ContentChunkKey::range(enc.content_id))
+                    .map(|e| {
+                        let cc = e.into_pair().1;
+                        (cc.len, cc.sha256)
+                    })
+                    .collect();
+                let mut offset: u64 = 0;
+                for (len, sha256) in chunk_infos {
+                    let len = len as u64;
                     let content_range = format!("bytes {}-{}/{}", offset, offset + len - 1, total);
-                    let body_hash: [u8; 32] = sha2::Sha256::digest(chunk).into();
                     let resp_hash = range_response_hash(
                         &effective_headers,
                         &meta.content_type,
                         encoding,
                         &enc.sha256,
                         &content_range,
-                        &body_hash,
+                        &sha256,
                     );
                     let hash_path = path.hash_tree_path(
                         &range_cert_expr,
@@ -701,13 +739,12 @@ impl State {
         }
     }
 
-    /// Phase 0 spike: build a certified 206 for the chunk containing byte `start`
-    /// (snapped down to the chunk boundary). Returns `None` (caller falls back to
-    /// the normal 200 path) when the encoding is empty or `start` is past the end.
+    /// Build a certified 206 for the chunk containing byte `start` (snapped down
+    /// to the chunk boundary). Returns `None` (caller falls back to the normal 200
+    /// path) when the encoding is empty or `start` is past the end.
     ///
-    /// SHORTCUT: reads every chunk to compute the total length and locate the
-    /// target. The real serve path keeps this lean (per-chunk lengths from the
-    /// blob index; no full read).
+    /// Lean: locates the target chunk by scanning `chunk_certs` (tiny fixed
+    /// entries, early exit), then reads only that one chunk's bytes.
     fn build_range_response(
         &self,
         meta: &AssetMeta,
@@ -716,39 +753,46 @@ impl State {
         start: usize,
         certificate_header: Option<&HeaderField>,
     ) -> Option<HttpResponse> {
-        let chunks: Vec<Vec<u8>> = (0..enc.num_chunks)
-            .map(|i| self.content.get(enc.content_id, i).unwrap_or_default())
-            .collect();
-        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        let total = enc.content_len as usize;
         if total == 0 || start >= total {
             return None;
         }
+        // Find the chunk whose [offset, offset+len) contains `start`.
         let mut offset = 0usize;
-        for chunk in chunks {
-            let len = chunk.len();
+        let mut target: Option<(u32, usize, usize)> = None; // (chunk_index, chunk_start, len)
+        for entry in self.chunk_certs.range(ContentChunkKey::range(enc.content_id)) {
+            let (key, cc) = entry.into_pair();
+            let len = cc.len as usize;
             if start < offset + len {
-                let content_range = format!("bytes {}-{}/{}", offset, offset + len - 1, total);
-                let mut headers = range_headers_for(
-                    &self.effective_headers(meta),
-                    &meta.content_type,
-                    encoding,
-                    &enc.sha256,
-                    &content_range,
-                );
-                if let Some(head) = certificate_header {
-                    headers.push((head.0.clone(), head.1.clone()));
-                }
-                return Some(HttpResponse {
-                    status_code: 206,
-                    headers,
-                    body: ByteBuf::from(chunk),
-                    upgrade: None,
-                    streaming_strategy: None,
-                });
+                target = Some((key.chunk_index, offset, len));
+                break;
             }
             offset += len;
         }
-        None
+        let (chunk_index, chunk_start, len) = target?;
+
+        let chunk = self
+            .content
+            .get(enc.content_id, chunk_index)
+            .unwrap_or_default();
+        let content_range = format!("bytes {}-{}/{}", chunk_start, chunk_start + len - 1, total);
+        let mut headers = range_headers_for(
+            &self.effective_headers(meta),
+            &meta.content_type,
+            encoding,
+            &enc.sha256,
+            &content_range,
+        );
+        if let Some(head) = certificate_header {
+            headers.push((head.0.clone(), head.1.clone()));
+        }
+        Some(HttpResponse {
+            status_code: 206,
+            headers,
+            body: ByteBuf::from(chunk),
+            upgrade: None,
+            streaming_strategy: None,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
