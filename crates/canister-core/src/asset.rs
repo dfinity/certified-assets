@@ -166,6 +166,66 @@ pub fn response_hashes_for(
     response_hashes
 }
 
+// ---- Phase 0 spike: 206 range-response certification ----
+//
+// A 206's certified header set is the 200's set plus `content-range`. Only the
+// `Content-Range` *value* varies per chunk (it lives in the response hash), so
+// the CEL/expression is the same for every chunk of an encoding. Certification
+// is response-only (`RequestHash::default()`), so an arbitrary client range can
+// be snapped to the containing chunk at serve time. These three helpers are used
+// by both the certify path (`recertify_asset`) and the serve path
+// (`build_range_response`) so the two can never disagree.
+
+/// The certificate expression for a 206 range response: the 200 certified header
+/// set plus `content-range`.
+pub(crate) fn range_certificate_expression_for(
+    effective_headers: &[(String, String)],
+    encoding: Encoding,
+    sha256: &[u8; 32],
+) -> CertificateExpression {
+    let mut headers = effective_headers_with_etag(effective_headers, sha256);
+    // The value is irrelevant to the expression (it lists header *names*).
+    headers.push(("content-range".to_string(), String::new()));
+    build_ic_certificate_expression_from_headers_and_encoding(&headers, encoding.header_name())
+}
+
+/// The full served header list for a 206 range response, including
+/// `content-range` and the `ic-certificateexpression` header.
+pub(crate) fn range_headers_for(
+    effective_headers: &[(String, String)],
+    content_type: &str,
+    encoding: Encoding,
+    sha256: &[u8; 32],
+    content_range: &str,
+) -> Vec<(String, String)> {
+    let cert_expr = range_certificate_expression_for(effective_headers, encoding, sha256);
+    let mut headers = effective_headers_with_etag(effective_headers, sha256);
+    headers.push(("content-range".to_string(), content_range.to_string()));
+    build_headers(
+        headers.iter().map(|(k, v)| (k, v)),
+        content_type,
+        encoding,
+        Some(&cert_expr),
+    )
+}
+
+/// The certified response hash for one 206 range chunk.
+pub(crate) fn range_response_hash(
+    effective_headers: &[(String, String)],
+    content_type: &str,
+    encoding: Encoding,
+    sha256: &[u8; 32],
+    content_range: &str,
+    chunk_body_hash: &[u8; 32],
+) -> [u8; 32] {
+    let base_headers: Vec<(String, Value)> =
+        range_headers_for(effective_headers, content_type, encoding, sha256, content_range)
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect();
+    response_hash(&base_headers, 206, chunk_body_hash).0
+}
+
 fn build_headers(
     effective_headers: impl Iterator<Item = (impl Into<String>, impl Into<String>)>,
     content_type: impl Into<String>,

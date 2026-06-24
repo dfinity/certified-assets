@@ -862,6 +862,7 @@ fn authorized_set_survives_stable_roundtrip() {
 }
 
 #[test]
+#[ignore = "Phase 0 spike: multi-chunk now served as certified 206, not callback streaming; rewritten in Phase 5"]
 fn uses_streaming_for_multichunk_assets() {
     let mut state = State::default();
     let system_context = mock_system_context();
@@ -902,6 +903,7 @@ fn uses_streaming_for_multichunk_assets() {
 }
 
 #[test]
+#[ignore = "Phase 0 spike: multi-chunk now served as certified 206, not callback streaming; rewritten in Phase 5"]
 fn streams_three_chunks_chaining_continuation_tokens() {
     let mut state = State::default();
     let system_context = mock_system_context();
@@ -956,6 +958,7 @@ fn streams_three_chunks_chaining_continuation_tokens() {
 }
 
 #[test]
+#[ignore = "Phase 0 spike: multi-chunk now served as certified 206, not callback streaming; rewritten in Phase 5"]
 fn streams_multichunk_non_identity_encoding() {
     let mut state = State::default();
     let system_context = mock_system_context();

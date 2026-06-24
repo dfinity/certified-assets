@@ -15,7 +15,8 @@
 //! upgrade roundtrip over a shared memory handle).
 
 use crate::asset::{
-    certificate_expression_for, headers_for, response_hashes_for, STATUS_CODES_TO_CERTIFY,
+    certificate_expression_for, headers_for, range_certificate_expression_for, range_headers_for,
+    range_response_hash, response_hashes_for, STATUS_CODES_TO_CERTIFY,
 };
 use crate::blob_store::BlobStore;
 use crate::certification::{
@@ -66,6 +67,19 @@ fn parse_if_none_match(value: &str) -> Vec<Hash> {
             <[u8; 32]>::try_from(bytes.as_slice()).ok()
         })
         .collect()
+}
+
+/// Phase 0 spike: parse the *start* byte of a single `Range: bytes=<start>-[end]`
+/// header. The end is ignored (we serve the containing chunk). Multi-range
+/// (comma) and suffix (`bytes=-N`) forms return `None` → the request is served
+/// as a normal full response.
+fn parse_range_start(value: &str) -> Option<usize> {
+    let spec = value.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start, _end) = spec.split_once('-')?;
+    start.trim().parse::<usize>().ok()
 }
 
 type Mem = VirtualMemory<DefaultMemoryImpl>;
@@ -408,6 +422,40 @@ impl State {
                 );
                 self.asset_hashes.certify_response_precomputed(&hash_path);
             }
+
+            // Phase 0 spike: certify N×206 for multi-chunk encodings (response-only).
+            // SHORTCUT: reads chunk bytes to hash them, so this is NOT content-free
+            // (the real Phase 1 stores per-chunk hashes to keep `post_upgrade` cheap).
+            if enc.num_chunks > 1 {
+                use sha2::Digest;
+                let chunks: Vec<Vec<u8>> = (0..enc.num_chunks)
+                    .map(|i| self.content.get(enc.content_id, i).unwrap_or_default())
+                    .collect();
+                let total: usize = chunks.iter().map(|c| c.len()).sum();
+                let range_cert_expr =
+                    range_certificate_expression_for(&effective_headers, encoding, &enc.sha256);
+                let mut offset = 0usize;
+                for chunk in &chunks {
+                    let len = chunk.len();
+                    let content_range = format!("bytes {}-{}/{}", offset, offset + len - 1, total);
+                    let body_hash: [u8; 32] = sha2::Sha256::digest(chunk).into();
+                    let resp_hash = range_response_hash(
+                        &effective_headers,
+                        &meta.content_type,
+                        encoding,
+                        &enc.sha256,
+                        &content_range,
+                        &body_hash,
+                    );
+                    let hash_path = path.hash_tree_path(
+                        &range_cert_expr,
+                        &RequestHash::default(),
+                        ResponseHash::from(&resp_hash),
+                    );
+                    self.asset_hashes.certify_response_precomputed(&hash_path);
+                    offset += len;
+                }
+            }
         }
     }
 
@@ -480,6 +528,7 @@ impl State {
         chunk_index: usize,
         callback: CallbackFunc,
         etags: Vec<Hash>,
+        range_start: Option<usize>,
     ) -> HttpResponse {
         // Asset at the requested path wins.
         if let Some(meta) = self.metadata.get(&path.to_string()) {
@@ -492,6 +541,7 @@ impl State {
                 &callback,
                 &etags,
                 None,
+                range_start,
             ) {
                 return response;
             }
@@ -531,6 +581,7 @@ impl State {
     /// encoding present in the metadata is certified, so encoding selection is
     /// just preference order.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn build_asset_response(
         &self,
         meta: &AssetMeta,
@@ -540,6 +591,7 @@ impl State {
         callback: &CallbackFunc,
         etags: &[Hash],
         status_override: Option<u16>,
+        range_start: Option<usize>,
     ) -> Option<HttpResponse> {
         // Honour the client's listed order first; if it expressed no acceptable
         // encoding, fall back to our preference order (identity-first).
@@ -562,6 +614,7 @@ impl State {
             callback,
             etags,
             status_override,
+            range_start,
         ))
     }
 
@@ -582,7 +635,22 @@ impl State {
         callback: &CallbackFunc,
         etags: &[Hash],
         status_override: Option<u16>,
+        range_start: Option<usize>,
     ) -> HttpResponse {
+        // Phase 0 spike: serve multi-chunk encodings as certified 206s. A plain
+        // GET (no Range) returns chunk 0 — that is what drives the gateway's Flow B
+        // reassembly into a full 200. A Range request returns the containing chunk
+        // (start snapped down to the chunk boundary). Conditional (304) and
+        // status-override (redirect/error-page) responses keep their normal path.
+        if status_override.is_none() && !etags.contains(&enc.sha256) && enc.num_chunks > 1 {
+            let start = range_start.unwrap_or(0);
+            if let Some(response) =
+                self.build_range_response(meta, encoding, enc, start, certificate_header)
+            {
+                return response;
+            }
+        }
+
         let mut headers = headers_for(
             &self.effective_headers(meta),
             &meta.content_type,
@@ -633,6 +701,56 @@ impl State {
         }
     }
 
+    /// Phase 0 spike: build a certified 206 for the chunk containing byte `start`
+    /// (snapped down to the chunk boundary). Returns `None` (caller falls back to
+    /// the normal 200 path) when the encoding is empty or `start` is past the end.
+    ///
+    /// SHORTCUT: reads every chunk to compute the total length and locate the
+    /// target. The real serve path keeps this lean (per-chunk lengths from the
+    /// blob index; no full read).
+    fn build_range_response(
+        &self,
+        meta: &AssetMeta,
+        encoding: Encoding,
+        enc: &EncodingMeta,
+        start: usize,
+        certificate_header: Option<&HeaderField>,
+    ) -> Option<HttpResponse> {
+        let chunks: Vec<Vec<u8>> = (0..enc.num_chunks)
+            .map(|i| self.content.get(enc.content_id, i).unwrap_or_default())
+            .collect();
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        if total == 0 || start >= total {
+            return None;
+        }
+        let mut offset = 0usize;
+        for chunk in chunks {
+            let len = chunk.len();
+            if start < offset + len {
+                let content_range = format!("bytes {}-{}/{}", offset, offset + len - 1, total);
+                let mut headers = range_headers_for(
+                    &self.effective_headers(meta),
+                    &meta.content_type,
+                    encoding,
+                    &enc.sha256,
+                    &content_range,
+                );
+                if let Some(head) = certificate_header {
+                    headers.push((head.0.clone(), head.1.clone()));
+                }
+                return Some(HttpResponse {
+                    status_code: 206,
+                    headers,
+                    body: ByteBuf::from(chunk),
+                    upgrade: None,
+                    streaming_strategy: None,
+                });
+            }
+            offset += len;
+        }
+        None
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build_redirect_rule_response(
         &self,
@@ -678,6 +796,7 @@ impl State {
                     callback,
                     etags,
                     status_override,
+                    None, // spike: range serving through aliases is Phase 2c, not here
                 )
                 .unwrap_or_else(|| HttpResponse::build_404(cert_header))
             }
@@ -692,11 +811,14 @@ impl State {
     ) -> HttpResponse {
         let mut encodings: Vec<Encoding> = vec![];
         let mut etags: Vec<Hash> = vec![];
+        let mut range_start: Option<usize> = None;
         for (name, value) in req.headers.iter() {
             if name.eq_ignore_ascii_case("Accept-Encoding") {
                 encodings.extend(Encoding::parse_accept_encoding(value));
             } else if name.eq_ignore_ascii_case("If-None-Match") {
                 etags.extend(parse_if_none_match(value));
+            } else if name.eq_ignore_ascii_case("Range") {
+                range_start = parse_range_start(value);
             }
         }
 
@@ -706,7 +828,9 @@ impl State {
         };
 
         match url_decode(path) {
-            Ok(path) => self.build_http_response(certificate, &path, encodings, 0, callback, etags),
+            Ok(path) => {
+                self.build_http_response(certificate, &path, encodings, 0, callback, etags, range_start)
+            }
             // Malformed percent-encoding (invalid UTF-8 once decoded). This 400
             // is intentionally uncertified: the body is per-request (it echoes
             // the bad path), so it can't be pinned to a certified hash, and a

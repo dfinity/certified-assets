@@ -68,3 +68,54 @@ fn streams_large_asset_through_gateway() {
         "streamed body bytes differ from the uploaded asset",
     );
 }
+
+/// Phase 0 spike (Flow A): a client `Range` request returns a **certified** `206`.
+///
+/// The asset is ~5 MB → three 1.9 MB chunks. Byte 2_500_000 falls inside chunk 1
+/// (`[1_900_000, 3_800_000)`). The canister snaps the range start down to that
+/// chunk and returns it as a `206` with `Content-Range: bytes 1900000-3799999/5000000`.
+///
+/// Crucially, `http_fetch_*` goes through the boundary node, which validates the
+/// `IC-Certificate` before returning anything. A `206` with the right bytes
+/// therefore proves the **response-only** certification of the chunk verifies
+/// end-to-end — the central unknown this spike exists to settle.
+#[test]
+fn range_request_returns_certified_206() {
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+
+    let body = incompressible_bytes(5_000_000);
+    fs::write(project.join("dist/large.bin"), &body).expect("write large asset into fixture");
+
+    let _network = LocalNetwork::start(project);
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let response = http_fetch_with_headers(
+        project,
+        "/large.bin",
+        &[("Accept-Encoding", "identity"), ("Range", "bytes=2500000-")],
+    );
+
+    assert_eq!(
+        response.status(),
+        StatusCode::PARTIAL_CONTENT,
+        "expected 206; a non-206 (esp. 500) means the response-only certified \
+         range response failed gateway verification",
+    );
+
+    let content_range = response
+        .headers()
+        .get("content-range")
+        .expect("206 must carry Content-Range")
+        .to_str()
+        .expect("Content-Range is ascii")
+        .to_string();
+    assert_eq!(content_range, "bytes 1900000-3799999/5000000");
+
+    let fetched = response.bytes().expect("read 206 body").to_vec();
+    assert_eq!(
+        fetched,
+        body[1_900_000..3_800_000],
+        "206 body must equal the containing chunk's bytes",
+    );
+}
