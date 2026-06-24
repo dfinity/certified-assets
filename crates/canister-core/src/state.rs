@@ -16,11 +16,12 @@
 
 use crate::asset::{
     certificate_expression_for, headers_for, range_certificate_expression_for, range_headers_for,
-    range_response_hash, response_hashes_for, STATUS_CODES_TO_CERTIFY,
+    range_response_hash, response_hashes_for,
 };
 use crate::blob_store::BlobStore;
 use crate::certification::{
-    response_hash, AssetKey, AssetPath, CertifiedResponses, RequestHash, ResponseHash,
+    response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, RequestHash,
+    ResponseHash,
 };
 use crate::http::{
     CallbackFunc, HeaderField, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
@@ -446,55 +447,79 @@ impl State {
                 &cert_expr,
                 &enc.sha256,
             );
-            for status_code in STATUS_CODES_TO_CERTIFY {
-                let response_hash = response_hashes[&status_code];
-                let hash_path = path.hash_tree_path(
+            // Always certify the 304 (empty body). Certify the full 200 only for
+            // single-chunk encodings — a multi-chunk asset is served as N×206 (the
+            // gateway reassembles them into a 200), so a full 200 is never served
+            // and certifying it would be dead weight in the tree.
+            let hash_304 = path.hash_tree_path(
+                &cert_expr,
+                &RequestHash::default(),
+                ResponseHash::from(&response_hashes[&304]),
+            );
+            self.asset_hashes.certify_response_precomputed(&hash_304);
+            if enc.num_chunks == 1 {
+                let hash_200 = path.hash_tree_path(
                     &cert_expr,
                     &RequestHash::default(),
-                    ResponseHash::from(&response_hash),
+                    ResponseHash::from(&response_hashes[&200]),
                 );
-                self.asset_hashes.certify_response_precomputed(&hash_path);
-            }
-
-            // Certify N×206 for multi-chunk encodings (response-only). Content-free:
-            // per-chunk length + hash come from `chunk_certs`, so this stays cheap
-            // even when `post_upgrade` re-certifies every asset.
-            if enc.num_chunks > 1 {
-                let range_cert_expr =
-                    range_certificate_expression_for(&effective_headers, encoding, &enc.sha256);
-                let total = enc.content_len;
-                // Collect first so the `chunk_certs` borrow is released before we
-                // borrow `asset_hashes` mutably below.
-                let chunk_infos: Vec<(u32, [u8; 32])> = self
-                    .chunk_certs
-                    .range(ContentChunkKey::range(enc.content_id))
-                    .map(|e| {
-                        let cc = e.into_pair().1;
-                        (cc.len, cc.sha256)
-                    })
-                    .collect();
-                let mut offset: u64 = 0;
-                for (len, sha256) in chunk_infos {
-                    let len = len as u64;
-                    let content_range = format!("bytes {}-{}/{}", offset, offset + len - 1, total);
-                    let resp_hash = range_response_hash(
-                        &effective_headers,
-                        &meta.content_type,
-                        encoding,
-                        &enc.sha256,
-                        &content_range,
-                        &sha256,
-                    );
+                self.asset_hashes.certify_response_precomputed(&hash_200);
+            } else {
+                // Multi-chunk: certify one 206 per chunk (response-only).
+                let (range_cert_expr, resp_hashes) =
+                    self.range_response_certs(&effective_headers, &meta.content_type, encoding, enc);
+                for resp_hash in resp_hashes {
                     let hash_path = path.hash_tree_path(
                         &range_cert_expr,
                         &RequestHash::default(),
                         ResponseHash::from(&resp_hash),
                     );
                     self.asset_hashes.certify_response_precomputed(&hash_path);
-                    offset += len;
                 }
             }
         }
+    }
+
+    /// Content-free per-chunk 206 certification data for a multi-chunk encoding:
+    /// the shared range certificate expression plus one response hash per chunk,
+    /// in chunk order. Derived from `chunk_certs` + `content_len`, so it never
+    /// reads chunk bytes. Both the direct-asset path (`recertify_asset`) and the
+    /// alias path (`build_alias_rule_entry`) use it, each placing the resulting
+    /// leaves at its own tree location.
+    fn range_response_certs(
+        &self,
+        effective_headers: &[(String, String)],
+        content_type: &str,
+        encoding: Encoding,
+        enc: &EncodingMeta,
+    ) -> (CertificateExpression, Vec<[u8; 32]>) {
+        let range_cert_expr =
+            range_certificate_expression_for(effective_headers, encoding, &enc.sha256);
+        let total = enc.content_len;
+        let chunk_infos: Vec<(u32, [u8; 32])> = self
+            .chunk_certs
+            .range(ContentChunkKey::range(enc.content_id))
+            .map(|e| {
+                let cc = e.into_pair().1;
+                (cc.len, cc.sha256)
+            })
+            .collect();
+        let mut resp_hashes = Vec::with_capacity(chunk_infos.len());
+        let mut offset: u64 = 0;
+        for (len, sha256) in chunk_infos {
+            let len = len as u64;
+            let content_range = format!("bytes {}-{}/{}", offset, offset + len - 1, total);
+            resp_hashes.push(range_response_hash(
+                effective_headers,
+                content_type,
+                encoding,
+                &enc.sha256,
+                &content_range,
+                &sha256,
+            ));
+            offset += len;
+        }
+        (range_cert_expr, resp_hashes)
     }
 
     // ---- queries ----
@@ -607,6 +632,7 @@ impl State {
                 chunk_index,
                 &callback,
                 &etags,
+                range_start,
             );
         }
 
@@ -806,6 +832,7 @@ impl State {
         chunk_index: usize,
         callback: &CallbackFunc,
         etags: &[Hash],
+        range_start: Option<usize>,
     ) -> HttpResponse {
         let cert_header =
             self.asset_hashes
@@ -840,7 +867,7 @@ impl State {
                     callback,
                     etags,
                     status_override,
-                    None, // spike: range serving through aliases is Phase 2c, not here
+                    range_start,
                 )
                 .unwrap_or_else(|| HttpResponse::build_404(cert_header))
             }
@@ -1026,6 +1053,25 @@ impl State {
         let mut tree_paths = Vec::new();
         for (&encoding, enc) in &meta.encodings {
             let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
+
+            // A 200-rewrite to a multi-chunk target serves N×206 (the gateway
+            // reassembles them into a 200), exactly like a direct hit. Certify
+            // those 206 leaves at the alias location and move on.
+            if status == 200 && enc.num_chunks > 1 {
+                let (range_cert_expr, resp_hashes) =
+                    self.range_response_certs(&effective_headers, &meta.content_type, encoding, enc);
+                for resp_hash in resp_hashes {
+                    let tp = crate::redirect::alias_tree_path(
+                        &location,
+                        range_cert_expr.expression_hash,
+                        resp_hash,
+                    );
+                    self.asset_hashes.certify_response_precomputed(&tp);
+                    tree_paths.push(tp);
+                }
+                continue;
+            }
+
             let resp_hash = if status == 200 {
                 // The encoding's already-certified 200 response hash.
                 response_hashes_for(

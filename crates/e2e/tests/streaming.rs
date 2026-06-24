@@ -119,3 +119,53 @@ fn range_request_returns_certified_206() {
         "206 body must equal the containing chunk's bytes",
     );
 }
+
+/// A 200-rewrite alias (`_redirects`) to a multi-chunk asset serves ranges too.
+///
+/// `/landing` rewrites to a ~5 MB (3-chunk) asset. The alias must certify the
+/// per-chunk 206s at its own tree location: a plain GET reassembles to a
+/// byte-exact 200 (Flow B), and a `Range` request returns a verified 206
+/// (Flow A) — both through the verifying gateway.
+#[test]
+fn range_requests_work_through_a_200_rewrite_alias() {
+    let tmp = setup_project("tests/fixture/basic");
+    let project = tmp.path();
+
+    let body = incompressible_bytes(5_000_000);
+    fs::write(project.join("dist/large.bin"), &body).expect("write large asset into fixture");
+    fs::write(project.join("dist/_redirects"), "/landing  /large.bin  200\n")
+        .expect("write _redirects into fixture");
+
+    let _network = LocalNetwork::start(project);
+    icp_cmd(project).arg("deploy").assert().success();
+
+    // Plain GET of the alias → gateway reassembles the chunk 206s into a full 200.
+    let full = http_fetch_with_headers(project, "/landing", &[("Accept-Encoding", "identity")]);
+    assert_eq!(full.status(), StatusCode::OK);
+    let fetched = full.bytes().expect("read reassembled body").to_vec();
+    assert_eq!(
+        fetched, body,
+        "alias plain GET must reassemble to the exact asset bytes",
+    );
+
+    // Range GET of the alias → certified 206 for the containing chunk.
+    let partial = http_fetch_with_headers(
+        project,
+        "/landing",
+        &[("Accept-Encoding", "identity"), ("Range", "bytes=2500000-")],
+    );
+    assert_eq!(
+        partial.status(),
+        StatusCode::PARTIAL_CONTENT,
+        "alias range request must return a certified 206",
+    );
+    assert_eq!(
+        partial
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok()),
+        Some("bytes 1900000-3799999/5000000"),
+    );
+    let partial_body = partial.bytes().expect("read alias 206 body").to_vec();
+    assert_eq!(partial_body, body[1_900_000..3_800_000]);
+}
