@@ -1,6 +1,4 @@
-use crate::http::{
-    CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
-};
+use crate::http::{HttpRequest, HttpResponse};
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
@@ -27,10 +25,6 @@ const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
 
 fn some_principal() -> Principal {
     Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
-}
-
-fn unused_callback() -> CallbackFunc {
-    CallbackFunc::new(some_principal(), "unused".to_string())
 }
 
 /// Simulates a canister upgrade: drop the live `State` and rebuild a fresh one
@@ -128,7 +122,7 @@ pub fn verify_response(
 }
 
 fn certified_http_request(state: &State, request: HttpRequest) -> HttpResponse {
-    let response = state.http_request(request.clone(), &[], unused_callback());
+    let response = state.http_request(request.clone(), &[]);
     match verify_response(state, &request, &response) {
         Err(err) => {
             panic!("Response verification failed with error {err:?}. Response: {response:#?}")
@@ -790,7 +784,6 @@ fn no_implicit_aliasing_without_rules() {
         let response = state.http_request(
             RequestBuilder::get(*missing).build(),
             &[],
-            unused_callback(),
         );
         assert_eq!(
             response.status_code, 404,
@@ -859,197 +852,6 @@ fn authorized_set_survives_stable_roundtrip() {
     let restored = upgrade(state, memory.clone());
 
     assert!(restored.is_authorized(&p));
-}
-
-#[test]
-#[ignore = "Phase 0 spike: multi-chunk now served as certified 206, not callback streaming; rewritten in Phase 5"]
-fn uses_streaming_for_multichunk_assets() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const INDEX_BODY_CHUNK_1: &[u8] = b"<!DOCTYPE html>";
-    const INDEX_BODY_CHUNK_2: &[u8] = b"<html>Index</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![INDEX_BODY_CHUNK_1, INDEX_BODY_CHUNK_2])],
-    );
-
-    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
-    let response = state.http_request(
-        RequestBuilder::get("/index.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-        &[],
-        streaming_callback.clone(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), INDEX_BODY_CHUNK_1);
-
-    let StreamingStrategy::Callback { callback, token } = response
-        .streaming_strategy
-        .expect("missing streaming strategy");
-    assert_eq!(callback, streaming_callback);
-
-    let streaming_response = state.http_request_streaming_callback(token);
-    assert_eq!(streaming_response.body.as_ref(), INDEX_BODY_CHUNK_2);
-    assert!(
-        streaming_response.token.is_none(),
-        "Unexpected streaming response: {streaming_response:?}"
-    );
-}
-
-#[test]
-#[ignore = "Phase 0 spike: multi-chunk now served as certified 206, not callback streaming; rewritten in Phase 5"]
-fn streams_three_chunks_chaining_continuation_tokens() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    // Three chunks exercise the mid-stream case a 2-chunk asset never reaches:
-    // the callback must itself return a *continuation* token (not a terminator)
-    // for the middle chunk.
-    const C0: &[u8] = b"chunk-zero-";
-    const C1: &[u8] = b"chunk-one--";
-    const C2: &[u8] = b"chunk-two";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/big.html", "text/html").with_encoding("identity", vec![C0, C1, C2])
-        ],
-    );
-
-    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
-    let response = state.http_request(
-        RequestBuilder::get("/big.html").build(),
-        &[],
-        streaming_callback.clone(),
-    );
-
-    // First response: 200 with chunk 0 inline and a strategy pointing at chunk 1.
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), C0);
-    let StreamingStrategy::Callback { callback, token } = response
-        .streaming_strategy
-        .expect("missing streaming strategy");
-    assert_eq!(callback, streaming_callback);
-    assert_eq!(token.index, 1);
-
-    // Middle chunk: the callback returns chunk 1 *and* a continuation token for
-    // chunk 2 — the branch that never fires with only two chunks.
-    let second = state.http_request_streaming_callback(token);
-    assert_eq!(second.body.as_ref(), C1);
-    let next = second
-        .token
-        .expect("expected a continuation token for the final chunk");
-    assert_eq!(next.index, 2);
-
-    // Final chunk: body served, token is None to end the stream.
-    let third = state.http_request_streaming_callback(next);
-    assert_eq!(third.body.as_ref(), C2);
-    assert!(
-        third.token.is_none(),
-        "stream must terminate after the last chunk: {third:?}"
-    );
-}
-
-#[test]
-#[ignore = "Phase 0 spike: multi-chunk now served as certified 206, not callback streaming; rewritten in Phase 5"]
-fn streams_multichunk_non_identity_encoding() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    // A gzip encoding split across two chunks: streaming must work for an
-    // encoding that also emits a `content-encoding` header, not just identity.
-    const GZIP_CHUNK_1: &[u8] = b"\x1f\x8b\x08\x00fake-gzip-bytes-1";
-    const GZIP_CHUNK_2: &[u8] = b"fake-gzip-bytes-2";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/app.js", "text/javascript")
-            .with_encoding("gzip", vec![GZIP_CHUNK_1, GZIP_CHUNK_2])],
-    );
-
-    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
-    let response = state.http_request(
-        RequestBuilder::get("/app.js")
-            .with_header("Accept-Encoding", "gzip")
-            .build(),
-        &[],
-        streaming_callback.clone(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), GZIP_CHUNK_1);
-    assert_eq!(lookup_header(&response, "content-encoding"), Some("gzip"));
-
-    let StreamingStrategy::Callback { callback, token } = response
-        .streaming_strategy
-        .expect("missing streaming strategy");
-    assert_eq!(callback, streaming_callback);
-
-    let second = state.http_request_streaming_callback(token);
-    assert_eq!(second.body.as_ref(), GZIP_CHUNK_2);
-    assert!(second.token.is_none(), "stream should end after chunk 2");
-}
-
-#[test]
-fn single_chunk_asset_has_no_streaming_strategy() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/small.html", "text/html")
-            .with_encoding("identity", vec![b"<html></html>"])],
-    );
-
-    let response = state.http_request(
-        RequestBuilder::get("/small.html").build(),
-        &[],
-        unused_callback(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert!(
-        response.streaming_strategy.is_none(),
-        "a single-chunk asset must not advertise streaming: {response:?}"
-    );
-}
-
-#[test]
-fn streaming_callback_with_bogus_content_id_serves_empty_body() {
-    // The self-describing token is no longer validated against `AssetMeta`: a
-    // forged `content_id` simply misses the content store and yields an empty
-    // body (rather than trapping). The HTTP gateway's `sha256` check on the
-    // accumulated stream is what rejects such a response, so no uncertified
-    // bytes are served.
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![b"a", b"b"])],
-    );
-
-    let response = state.http_request_streaming_callback(StreamingCallbackToken {
-        content_id: u64::MAX,
-        index: 1,
-        num_chunks: 2,
-        sha256: ByteBuf::from([0u8; 32].as_slice()),
-    });
-    assert!(
-        response.body.as_ref().is_empty(),
-        "a token pointing at a nonexistent content group must serve no bytes"
-    );
 }
 
 #[test]
@@ -1357,7 +1159,6 @@ fn rule_aliasing_persists_through_upgrade() {
     let no_alias = state.http_request(
         RequestBuilder::get("/contents").build(),
         &[],
-        unused_callback(),
     );
     assert_eq!(no_alias.status_code, 404);
 
@@ -1369,7 +1170,6 @@ fn rule_aliasing_persists_through_upgrade() {
     let no_alias = state.http_request(
         RequestBuilder::get("/contents").build(),
         &[],
-        unused_callback(),
     );
     assert_eq!(no_alias.status_code, 404);
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
@@ -1729,7 +1529,6 @@ mod certification {
         );
         assert_eq!(not_modified.status_code, 304);
         assert!(not_modified.body.is_empty());
-        assert!(not_modified.streaming_strategy.is_none());
         assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
 
         // A stale etag still serves the full, certified 200.
@@ -2341,7 +2140,7 @@ mod redirect_rules {
             })],
         )
         .unwrap();
-        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[]);
         assert_eq!(inert.status_code, 404);
 
         // Add the asset → rule fires.
@@ -2370,7 +2169,7 @@ mod redirect_rules {
         // Delete the target → rule goes inert again.
         delete_asset_via_batch(&mut state, "/foo.html");
         let after_delete =
-            state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+            state.http_request(RequestBuilder::get("/foo").build(), &[]);
         assert_eq!(after_delete.status_code, 404);
     }
 
@@ -2597,7 +2396,6 @@ mod redirect_rules {
         let inert = state.http_request(
             RequestBuilder::get("/missing").build(),
             &[],
-            unused_callback(),
         );
         assert_eq!(inert.status_code, 404);
         // The body is the built-in "not found", not the (missing) /404.html.

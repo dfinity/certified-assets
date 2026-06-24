@@ -18,16 +18,15 @@ mod tests;
 mod benches;
 
 use crate::{
-    http::CallbackFunc,
     runtime::{CanisterEnv, SystemContext},
     state::State,
     sync::ComputationStatus,
 };
 use candid::Principal;
-use ic_cdk::api::{canister_self, certified_data_set, data_certificate, msg_caller, trap};
+use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, trap};
 use std::cell::RefCell;
 
-pub use http::{HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken};
+pub use http::{HttpRequest, HttpResponse};
 pub use wire_types::{
     AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
     Version,
@@ -116,22 +115,7 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
     }
     let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
 
-    STATE.with_borrow(|s| {
-        s.http_request(
-            req,
-            &certificate,
-            CallbackFunc::new(
-                canister_self(),
-                "http_request_streaming_callback".to_string(),
-            ),
-        )
-    })
-}
-
-pub fn http_request_streaming_callback(
-    token: StreamingCallbackToken,
-) -> StreamingCallbackHttpResponse {
-    STATE.with_borrow(|s| s.http_request_streaming_callback(token))
+    STATE.with_borrow(|s| s.http_request(req, &certificate))
 }
 
 /// Whether the current caller may sync assets: either in the authorized set, or

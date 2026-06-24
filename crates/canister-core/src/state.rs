@@ -23,10 +23,7 @@ use crate::certification::{
     response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, RequestHash,
     ResponseHash,
 };
-use crate::http::{
-    CallbackFunc, HeaderField, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
-    StreamingCallbackToken, StreamingStrategy,
-};
+use crate::http::{HeaderField, HttpRequest, HttpResponse};
 use crate::stable_store::{
     AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, RedirectRules,
 };
@@ -582,14 +579,11 @@ impl State {
 
     // ---- HTTP serving ----
 
-    #[allow(clippy::too_many_arguments)]
     fn build_http_response(
         &self,
         certificate: &[u8],
         path: &str,
         requested_encodings: Vec<Encoding>,
-        chunk_index: usize,
-        callback: CallbackFunc,
         etags: Vec<Hash>,
         range_start: Option<usize>,
     ) -> HttpResponse {
@@ -599,9 +593,7 @@ impl State {
             if let Some(response) = self.build_asset_response(
                 &meta,
                 &requested_encodings,
-                chunk_index,
                 Some(&cert_header),
-                &callback,
                 &etags,
                 None,
                 range_start,
@@ -629,8 +621,6 @@ impl State {
                 path,
                 certificate,
                 &requested_encodings,
-                chunk_index,
-                &callback,
                 &etags,
                 range_start,
             );
@@ -645,37 +635,37 @@ impl State {
     /// encoding present in the metadata is certified, so encoding selection is
     /// just preference order.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn build_asset_response(
         &self,
         meta: &AssetMeta,
         requested_encodings: &[Encoding],
-        chunk_index: usize,
         certificate_header: Option<&HeaderField>,
-        callback: &CallbackFunc,
         etags: &[Hash],
         status_override: Option<u16>,
         range_start: Option<usize>,
     ) -> Option<HttpResponse> {
+        // A status-overridden response (a 4xx custom error page) is served as a
+        // single inline body with that status — there is no way to deliver a
+        // multi-chunk body under a non-200 status now that callback streaming is
+        // gone and 206 reassembly always yields a 200 (see D6). So restrict those
+        // to single-chunk encodings; the certify side does the same.
+        let acceptable = |e: &Encoding| match status_override {
+            Some(_) => meta.encodings.get(e).is_some_and(|enc| enc.num_chunks == 1),
+            None => meta.encodings.contains_key(e),
+        };
         // Honour the client's listed order first; if it expressed no acceptable
         // encoding, fall back to our preference order (identity-first).
         let encoding = requested_encodings
             .iter()
             .copied()
-            .find(|e| meta.encodings.contains_key(e))
-            .or_else(|| {
-                Encoding::PREFERENCE_ORDER
-                    .into_iter()
-                    .find(|e| meta.encodings.contains_key(e))
-            })?;
+            .find(|e| acceptable(e))
+            .or_else(|| Encoding::PREFERENCE_ORDER.into_iter().find(|e| acceptable(e)))?;
         let enc = meta.encodings.get(&encoding)?;
         Some(self.build_ok_http_response(
             meta,
             encoding,
             enc,
-            chunk_index,
             certificate_header,
-            callback,
             etags,
             status_override,
             range_start,
@@ -688,24 +678,22 @@ impl State {
     /// (etag-based not-modified). When it is `Some(s)` — used by redirect rules
     /// that serve a custom error page — the response always carries the body
     /// with status `s`, and the etag / 304 logic is skipped.
-    #[allow(clippy::too_many_arguments)]
     fn build_ok_http_response(
         &self,
         meta: &AssetMeta,
         encoding: Encoding,
         enc: &EncodingMeta,
-        chunk_index: usize,
         certificate_header: Option<&HeaderField>,
-        callback: &CallbackFunc,
         etags: &[Hash],
         status_override: Option<u16>,
         range_start: Option<usize>,
     ) -> HttpResponse {
-        // Phase 0 spike: serve multi-chunk encodings as certified 206s. A plain
-        // GET (no Range) returns chunk 0 — that is what drives the gateway's Flow B
-        // reassembly into a full 200. A Range request returns the containing chunk
-        // (start snapped down to the chunk boundary). Conditional (304) and
-        // status-override (redirect/error-page) responses keep their normal path.
+        // Serve multi-chunk encodings as certified 206s. A plain GET (no Range)
+        // returns chunk 0 — that is what drives the gateway's Flow B reassembly
+        // into a full 200. A Range request returns the containing chunk (start
+        // snapped down to the chunk boundary). Conditional (304) and
+        // status-override (4xx error-page) responses keep their normal path; the
+        // latter only ever reaches here with a single-chunk encoding.
         if status_override.is_none() && !etags.contains(&enc.sha256) && enc.num_chunks > 1 {
             let start = range_start.unwrap_or(0);
             if let Some(response) =
@@ -725,35 +713,18 @@ impl State {
             headers.push((head.0.clone(), head.1.clone()));
         }
 
-        let streaming_strategy = StreamingCallbackToken::create_token(
-            enc.content_id,
-            enc.num_chunks,
-            ByteBuf::from(enc.sha256),
-            chunk_index,
-        )
-        .map(|token| StreamingStrategy::Callback {
-            callback: callback.clone(),
-            token,
-        });
-
-        // The canister-managed `etag` header is already in `headers` (and in the
-        // certified set), so both the 200 and the 304 carry it.
-        let (status_code, body, streaming_strategy) = if let Some(status) = status_override {
-            (
-                status,
-                self.chunk_bytes(enc.content_id, chunk_index),
-                streaming_strategy,
-            )
+        // Reaching here means a single-chunk body — multi-chunk 200s are served as
+        // 206 above, and multi-chunk 4xx error pages are filtered out in
+        // `build_asset_response` — so the whole body is chunk 0. The
+        // canister-managed `etag` header is already in `headers` (and certified),
+        // so both the 200 and the 304 carry it.
+        let (status_code, body) = if let Some(status) = status_override {
+            (status, self.chunk_bytes(enc.content_id, 0))
         } else if etags.contains(&enc.sha256) {
-            // Conditional request matched: serve the certified 304 — empty body,
-            // no streaming. Its response hash is certified alongside the 200.
-            (304, ByteBuf::new(), None)
+            // Conditional request matched: serve the certified 304 (empty body).
+            (304, ByteBuf::new())
         } else {
-            (
-                200,
-                self.chunk_bytes(enc.content_id, chunk_index),
-                streaming_strategy,
-            )
+            (200, self.chunk_bytes(enc.content_id, 0))
         };
 
         HttpResponse {
@@ -761,7 +732,6 @@ impl State {
             headers,
             body,
             upgrade: None,
-            streaming_strategy,
         }
     }
 
@@ -817,7 +787,6 @@ impl State {
             headers,
             body: ByteBuf::from(chunk),
             upgrade: None,
-            streaming_strategy: None,
         })
     }
 
@@ -829,8 +798,6 @@ impl State {
         path: &str,
         certificate: &[u8],
         requested_encodings: &[Encoding],
-        chunk_index: usize,
-        callback: &CallbackFunc,
         etags: &[Hash],
         range_start: Option<usize>,
     ) -> HttpResponse {
@@ -851,7 +818,6 @@ impl State {
                     headers,
                     body: ByteBuf::new(),
                     upgrade: None,
-                    streaming_strategy: None,
                 }
             }
             crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status } => {
@@ -862,9 +828,7 @@ impl State {
                 self.build_asset_response(
                     &meta,
                     requested_encodings,
-                    chunk_index,
                     Some(&cert_header),
-                    callback,
                     etags,
                     status_override,
                     range_start,
@@ -874,12 +838,7 @@ impl State {
         }
     }
 
-    pub fn http_request(
-        &self,
-        req: HttpRequest,
-        certificate: &[u8],
-        callback: CallbackFunc,
-    ) -> HttpResponse {
+    pub fn http_request(&self, req: HttpRequest, certificate: &[u8]) -> HttpResponse {
         let mut encodings: Vec<Encoding> = vec![];
         let mut etags: Vec<Hash> = vec![];
         let mut range_start: Option<usize> = None;
@@ -899,9 +858,7 @@ impl State {
         };
 
         match url_decode(path) {
-            Ok(path) => {
-                self.build_http_response(certificate, &path, encodings, 0, callback, etags, range_start)
-            }
+            Ok(path) => self.build_http_response(certificate, &path, encodings, etags, range_start),
             // Malformed percent-encoding (invalid UTF-8 once decoded). This 400
             // is intentionally uncertified: the body is per-request (it echoes
             // the bad path), so it can't be pinned to a certified hash, and a
@@ -914,35 +871,7 @@ impl State {
                 headers: vec![],
                 body: ByteBuf::from(format!("failed to decode path '{path}': {err}")),
                 upgrade: None,
-                streaming_strategy: None,
             },
-        }
-    }
-
-    pub fn http_request_streaming_callback(
-        &self,
-        StreamingCallbackToken {
-            content_id,
-            index,
-            num_chunks,
-            sha256,
-        }: StreamingCallbackToken,
-    ) -> StreamingCallbackHttpResponse {
-        // The token is self-describing, so the callback needs no `metadata.get`
-        // / `AssetMeta` decode: it reads the requested chunk straight from the
-        // content store and re-derives the next token from the token's own
-        // fields. A forged `content_id`/`index` just misses the content store
-        // and yields an empty body — the gateway's `sha256` check then rejects
-        // the stream, so no uncertified bytes are ever served.
-        let chunk_index = index as usize;
-        StreamingCallbackHttpResponse {
-            body: self.chunk_bytes(content_id, chunk_index),
-            token: StreamingCallbackToken::create_token(
-                content_id,
-                num_chunks,
-                sha256,
-                chunk_index,
-            ),
         }
     }
 
