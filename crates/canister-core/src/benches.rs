@@ -290,6 +290,46 @@ fn sync_commit() -> BenchResult {
     bench_fn(|| run_to_completion(&mut state, &args, &c))
 }
 
+/// Committing a sync of one large multi-chunk asset (8 × 1 MiB). Unlike
+/// `sync_commit` (4 KiB assets, where chunk-write cost is in the noise), this
+/// surfaces the content-write coefficient — the stable write of ~8 MiB of chunk
+/// bytes — alongside the unchanged SHA-256 hashing and recertification.
+#[bench(raw)]
+fn sync_commit_large() -> BenchResult {
+    let mut state = State::default();
+    let c = ctx();
+    let session_id = match state.start_sync(caller(), &c) {
+        StartSyncResult::Started { session_id } => session_id,
+        other => panic!("expected Started, got {other:?}"),
+    };
+    let chunks: Vec<ByteBuf> = (0..LARGE_NUM_CHUNKS)
+        .map(|i| ByteBuf::from(vec![i as u8; LARGE_CHUNK_BYTES]))
+        .collect();
+    let sha256 = sha256_of(&chunks);
+    let chunk_ids: Vec<u64> = (0..LARGE_NUM_CHUNKS as u64).collect();
+    state
+        .upload_chunks(UploadChunksArguments { session_id, chunks }, &c)
+        .unwrap();
+    let args = ExecuteOperationsArguments {
+        session_id,
+        operations: vec![
+            Operation::CreateAsset(CreateAssetArguments {
+                key: "/big.bin".to_string(),
+                content_type: "application/octet-stream".to_string(),
+                headers: vec![],
+            }),
+            Operation::SetAssetContent(SetAssetContentArguments {
+                key: "/big.bin".to_string(),
+                encoding: identity(),
+                chunk_ids,
+                sha256,
+            }),
+        ],
+        is_final: true,
+    };
+    bench_fn(|| run_to_completion(&mut state, &args, &c))
+}
+
 /// The post-upgrade rebuild: a fresh `State` over already-populated stable memory
 /// plus `post_upgrade_rebuild`, which iterates all metadata to reconstruct the
 /// heap certification tree. Cost scales with `REBUILD_NUM_ASSETS` (Risk B).
