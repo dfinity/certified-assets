@@ -1,7 +1,6 @@
 use crate::certification::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
 };
-use crate::rc_bytes::RcBytes;
 use candid::{define_function, CandidType, Deserialize};
 use serde_bytes::ByteBuf;
 
@@ -20,7 +19,7 @@ pub struct HttpRequest {
 pub struct HttpResponse {
     pub status_code: u16,
     pub headers: Vec<HeaderField>,
-    pub body: RcBytes,
+    pub body: ByteBuf,
     pub upgrade: Option<bool>,
     pub streaming_strategy: Option<StreamingStrategy>,
 }
@@ -51,7 +50,7 @@ pub enum StreamingStrategy {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct StreamingCallbackHttpResponse {
-    pub body: RcBytes,
+    pub body: ByteBuf,
     pub token: Option<StreamingCallbackToken>,
 }
 
@@ -108,7 +107,7 @@ impl HttpResponse {
         HttpResponse {
             status_code: 404,
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            body: RcBytes::from(ByteBuf::from("not found")),
+            body: ByteBuf::from("not found"),
             upgrade: None,
             streaming_strategy: None,
         }

@@ -4,7 +4,6 @@ mod blob_store;
 mod certification;
 mod http;
 mod nested_tree;
-mod rc_bytes;
 mod redirect;
 mod runtime;
 mod stable_store;

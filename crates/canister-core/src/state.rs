@@ -25,7 +25,6 @@ use crate::http::{
     CallbackFunc, HeaderField, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
     StreamingCallbackToken, StreamingStrategy,
 };
-use crate::rc_bytes::RcBytes;
 use crate::stable_store::{AssetMeta, AuthorizedSet, EncodingMeta, RedirectRules};
 use crate::sync::{Chunk, SyncSession};
 use crate::url::url_decode;
@@ -212,13 +211,13 @@ impl State {
 
     // ---- chunk store helpers ----
 
-    /// Fetches one chunk's bytes from the content store as `RcBytes`. A missing
+    /// Fetches one chunk's bytes from the content store as `ByteBuf`. A missing
     /// chunk yields empty bytes (callers only request indices the metadata
     /// claims exist).
-    fn chunk_bytes(&self, content_id: u64, chunk_index: usize) -> RcBytes {
+    fn chunk_bytes(&self, content_id: u64, chunk_index: usize) -> ByteBuf {
         self.content
             .get(content_id, chunk_index as u32)
-            .map(|bytes| RcBytes::from(ByteBuf::from(bytes)))
+            .map(ByteBuf::from)
             .unwrap_or_default()
     }
 
@@ -282,7 +281,7 @@ impl State {
     pub fn complete_set_asset_content(
         &mut self,
         arg: SetAssetContentArguments,
-        content_chunks: Vec<RcBytes>,
+        content_chunks: Vec<ByteBuf>,
         sha256: [u8; 32],
     ) -> Result<(), String> {
         let provided_hash: [u8; 32] = arg
@@ -616,7 +615,7 @@ impl State {
         } else if etags.contains(&enc.sha256) {
             // Conditional request matched: serve the certified 304 — empty body,
             // no streaming. Its response hash is certified alongside the 200.
-            (304, RcBytes::default(), None)
+            (304, ByteBuf::new(), None)
         } else {
             (
                 200,
@@ -661,7 +660,7 @@ impl State {
                 HttpResponse {
                     status_code: rule.status,
                     headers,
-                    body: RcBytes::from(ByteBuf::new()),
+                    body: ByteBuf::new(),
                     upgrade: None,
                     streaming_strategy: None,
                 }
@@ -718,9 +717,7 @@ impl State {
             Err(err) => HttpResponse {
                 status_code: 400,
                 headers: vec![],
-                body: RcBytes::from(ByteBuf::from(format!(
-                    "failed to decode path '{path}': {err}"
-                ))),
+                body: ByteBuf::from(format!("failed to decode path '{path}': {err}")),
                 upgrade: None,
                 streaming_strategy: None,
             },
