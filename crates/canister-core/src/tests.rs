@@ -854,6 +854,288 @@ fn authorized_set_survives_stable_roundtrip() {
     assert!(restored.is_authorized(&p));
 }
 
+// ───────── HTTP 206 range serving ─────────
+
+/// A plain GET (no Range) of a multi-chunk asset returns chunk 0 as a 206 — this
+/// is what drives the gateway's reassembly into a full 200.
+#[test]
+fn multichunk_plain_get_serves_206_first_chunk() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"first-chunk-bytes--";
+    const C1: &[u8] = b"second-chunk";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+
+    let resp = state.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C0);
+    let total = C0.len() + C1.len();
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// A Range request whose start is a chunk boundary returns exactly that chunk.
+#[test]
+fn range_request_returns_containing_chunk() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    const C2: &[u8] = b"CCC";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1, C2])],
+    );
+    let total = C0.len() + C1.len() + C2.len();
+
+    let resp = state.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", &format!("bytes={}-", C0.len()))
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C1);
+    let cr = format!("bytes {}-{}/{}", C0.len(), C0.len() + C1.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// A Range start in the middle of a chunk snaps down to that chunk's boundary:
+/// the whole containing chunk is returned (sub-chunk slices can't be certified).
+#[test]
+fn range_request_mid_chunk_snaps_to_chunk_start() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    // Ask for a byte 2 into chunk 1; expect the whole of chunk 1 back.
+    let resp = state.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", &format!("bytes={}-", C0.len() + 2))
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C1);
+    let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// A range that spans multiple chunks returns only the chunk containing its
+/// start; the client (or gateway) fetches the rest with follow-up requests.
+#[test]
+fn range_spanning_chunks_returns_single_chunk() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    // Closed range covering the whole asset → still just chunk 0.
+    let resp = state.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", &format!("bytes=0-{}", total - 1))
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C0);
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// An unsatisfiable range (start past the end) ignores the Range and serves the
+/// asset as a 206 chunk 0 — never a truncated 200.
+#[test]
+fn out_of_range_serves_full_asset_via_206() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    let resp = state.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", &format!("bytes={}-", total + 100))
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C0);
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// A conditional request takes precedence over Range: a matching `If-None-Match`
+/// yields a 304 even when a `Range` header is present.
+#[test]
+fn conditional_request_with_range_returns_304() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+
+    // First request: read the canister-managed etag off the 206.
+    let first = state.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .build(),
+        &[],
+    );
+    let etag = lookup_header(&first, "etag")
+        .expect("206 carries an etag")
+        .to_string();
+
+    let resp = state.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("If-None-Match", &etag)
+            .with_header("Range", "bytes=10-")
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 304);
+    assert!(resp.body.as_ref().is_empty());
+}
+
+/// A single-chunk asset ignores Range and serves the full body as a 200.
+#[test]
+fn single_chunk_asset_ignores_range() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const BODY: &[u8] = b"a small body that fits in one chunk";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/small.txt", "text/plain").with_encoding("identity", vec![BODY])],
+    );
+
+    let resp = state.http_request(
+        RequestBuilder::get("/small.txt")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", "bytes=5-")
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(resp.body.as_ref(), BODY);
+    assert_eq!(lookup_header(&resp, "content-range"), None);
+}
+
+/// Range serving works for a non-identity encoding: the 206 carries
+/// `content-encoding` and ranges over the *encoded* bytes.
+#[test]
+fn range_request_non_identity_encoding() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const G0: &[u8] = b"\x1f\x8b\x08\x00gzip-chunk-0";
+    const G1: &[u8] = b"gzip-chunk-1";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/app.js", "text/javascript")
+            .with_encoding("gzip", vec![G0, G1])],
+    );
+    let total = G0.len() + G1.len();
+
+    let resp = state.http_request(
+        RequestBuilder::get("/app.js")
+            .with_header("Accept-Encoding", "gzip")
+            .with_header("Range", &format!("bytes={}-", G0.len()))
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), G1);
+    assert_eq!(lookup_header(&resp, "content-encoding"), Some("gzip"));
+    let cr = format!("bytes {}-{}/{}", G0.len(), total - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// After an upgrade, multi-chunk assets still serve 206s with correct
+/// `Content-Range` — proof the per-chunk cert data (`chunk_certs` + `content_len`)
+/// is persisted and `post_upgrade_rebuild` re-certifies the 206s content-free.
+#[test]
+fn range_serving_survives_upgrade() {
+    let memory = DefaultMemoryImpl::default();
+    let mut state = State::new(memory.clone());
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    let restored = upgrade(state, memory.clone());
+
+    let resp = restored.http_request(
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", &format!("bytes={}-", C0.len()))
+            .build(),
+        &[],
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C1);
+    let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
 #[test]
 fn supports_cache_control_via_headers() {
     let mut state = State::default();

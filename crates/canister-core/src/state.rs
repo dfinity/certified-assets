@@ -335,22 +335,28 @@ impl State {
             self.delete_content(old.content_id);
         }
 
-        // Allocate a fresh content group and write the chunks into it, recording
-        // each chunk's length + hash for the 206 cert/serve paths as we go.
+        // Allocate a fresh content group and write the chunks into it. Per-chunk
+        // cert data (length + hash) is only needed to serve/certify 206 ranges,
+        // which only happen for multi-chunk encodings — so single-chunk assets
+        // (the common case) skip the extra hash and the `chunk_certs` write, and
+        // reuse the already-verified full `sha256` instead of re-hashing.
         use sha2::Digest;
         let content_id = self.alloc_content_id();
         let num_chunks = content_chunks.len() as u32;
+        let multi_chunk = num_chunks > 1;
         let mut content_len = 0u64;
         for (index, chunk) in content_chunks.iter().enumerate() {
             self.content.insert(content_id, index as u32, chunk);
-            let chunk_sha256: [u8; 32] = sha2::Sha256::digest(chunk).into();
-            self.chunk_certs.insert(
-                ContentChunkKey::new(content_id, index as u32),
-                ChunkCert {
-                    len: chunk.len() as u32,
-                    sha256: chunk_sha256,
-                },
-            );
+            if multi_chunk {
+                let chunk_sha256: [u8; 32] = sha2::Sha256::digest(chunk).into();
+                self.chunk_certs.insert(
+                    ContentChunkKey::new(content_id, index as u32),
+                    ChunkCert {
+                        len: chunk.len() as u32,
+                        sha256: chunk_sha256,
+                    },
+                );
+            }
             content_len += chunk.len() as u64;
         }
 
@@ -750,9 +756,14 @@ impl State {
         certificate_header: Option<&HeaderField>,
     ) -> Option<HttpResponse> {
         let total = enc.content_len as usize;
-        if total == 0 || start >= total {
+        if total == 0 {
             return None;
         }
+        // An out-of-range start (no byte to satisfy) is treated as "ignore the
+        // Range": serve chunk 0, which the gateway reassembles into the full 200.
+        // Returning `None` here would instead fall through to a plain 200 carrying
+        // only chunk 0 — a truncated body for a multi-chunk asset.
+        let start = if start >= total { 0 } else { start };
         // Find the chunk whose [offset, offset+len) contains `start`.
         let mut offset = 0usize;
         let mut target: Option<(u32, usize, usize)> = None; // (chunk_index, chunk_start, len)
