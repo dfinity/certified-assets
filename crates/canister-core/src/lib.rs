@@ -1,5 +1,6 @@
 //! This module declares canister methods expected by the assets canister client.
 mod asset;
+mod blob_store;
 mod certification;
 mod http;
 mod nested_tree;

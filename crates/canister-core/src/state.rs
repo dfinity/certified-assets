@@ -17,6 +17,7 @@
 use crate::asset::{
     certificate_expression_for, headers_for, response_hashes_for, STATUS_CODES_TO_CERTIFY,
 };
+use crate::blob_store::BlobStore;
 use crate::certification::{
     response_hash, AssetKey, AssetPath, CertifiedResponses, RequestHash, ResponseHash,
 };
@@ -25,7 +26,7 @@ use crate::http::{
     StreamingCallbackToken, StreamingStrategy,
 };
 use crate::rc_bytes::RcBytes;
-use crate::stable_store::{AssetMeta, AuthorizedSet, ContentChunkKey, EncodingMeta, RedirectRules};
+use crate::stable_store::{AssetMeta, AuthorizedSet, EncodingMeta, RedirectRules};
 use crate::sync::{Chunk, SyncSession};
 use crate::url::url_decode;
 use candid::Principal;
@@ -75,7 +76,11 @@ const REDIRECT_RULES_MEMORY: MemoryId = MemoryId::new(1);
 const NEXT_SESSION_ID_MEMORY: MemoryId = MemoryId::new(2);
 const NEXT_CONTENT_ID_MEMORY: MemoryId = MemoryId::new(3);
 const METADATA_MEMORY: MemoryId = MemoryId::new(4);
-const CONTENT_MEMORY: MemoryId = MemoryId::new(5);
+/// Content chunk index (`ContentChunkKey -> BlobRef`); the bytes live in
+/// `CONTENT_DATA_MEMORY`. See [`crate::blob_store`].
+const CONTENT_INDEX_MEMORY: MemoryId = MemoryId::new(5);
+/// Raw contiguous chunk bytes managed by the [`BlobStore`] allocator.
+const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(6);
 
 pub struct State {
     // ---- durable (stable memory) ----
@@ -91,8 +96,11 @@ pub struct State {
     /// Per-asset metadata, ordered by key so `get_asset_details` can page with a
     /// key cursor (a `range` seek) instead of sorting the keyspace per query.
     metadata: StableBTreeMap<AssetKey, AssetMeta, Mem>,
-    /// Raw content bytes, one entry per chunk, keyed by `(content_id, index)`.
-    content: StableBTreeMap<ContentChunkKey, Vec<u8>, Mem>,
+    /// Raw content bytes, one chunk per `(content_id, index)`, stored contiguously
+    /// in a stable region (not inline in a BTree) so reads/writes are a single
+    /// `stable64_read`/`write` instead of an overflow-page walk. See
+    /// [`crate::blob_store`].
+    content: BlobStore<Mem>,
 
     // ---- transient heap (lost on upgrade) ----
     /// Chunks staged by `upload_chunks` for the current sync, in upload order:
@@ -147,7 +155,7 @@ impl State {
             next_session_id: StableCell::init(mm.get(NEXT_SESSION_ID_MEMORY), 0),
             next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
             metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
-            content: StableBTreeMap::init(mm.get(CONTENT_MEMORY)),
+            content: BlobStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
             chunks: Vec::new(),
             sync_session: None,
             asset_hashes: CertifiedResponses::default(),
@@ -209,20 +217,14 @@ impl State {
     /// claims exist).
     fn chunk_bytes(&self, content_id: u64, chunk_index: usize) -> RcBytes {
         self.content
-            .get(&ContentChunkKey::new(content_id, chunk_index as u32))
+            .get(content_id, chunk_index as u32)
             .map(|bytes| RcBytes::from(ByteBuf::from(bytes)))
             .unwrap_or_default()
     }
 
-    /// Range-deletes every chunk belonging to a content group.
+    /// Frees every chunk belonging to a content group.
     fn delete_content(&mut self, content_id: u64) {
-        let keys: Vec<ContentChunkKey> = self
-            .content
-            .keys_range(ContentChunkKey::range(content_id))
-            .collect();
-        for key in keys {
-            self.content.remove(&key);
-        }
+        self.content.delete_group(content_id);
     }
 
     // ---- asset mutations ----
@@ -306,10 +308,7 @@ impl State {
         let content_id = self.alloc_content_id();
         let num_chunks = content_chunks.len() as u32;
         for (index, chunk) in content_chunks.iter().enumerate() {
-            self.content.insert(
-                ContentChunkKey::new(content_id, index as u32),
-                chunk.to_vec(),
-            );
+            self.content.insert(content_id, index as u32, chunk);
         }
 
         meta.encodings.insert(
