@@ -10,11 +10,11 @@
 //! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
 
-use crate::rc_bytes::RcBytes;
 use crate::redirect;
 use crate::runtime::SystemContext;
 use crate::state::State;
 use candid::Principal;
+use serde_bytes::ByteBuf;
 use sha2::Digest;
 use wire_types::{
     ExecuteOperationsArguments, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
@@ -30,7 +30,7 @@ pub const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 /// A single chunk of content staged under a sync, before it is stitched into an
 /// asset encoding. Just the bytes: a chunk's id is its slot index in
 /// [`State::chunks`](crate::state::State), not anything stored here.
-pub type Chunk = RcBytes;
+pub type Chunk = ByteBuf;
 
 /// The single in-progress sync. The canister holds at most one at a time;
 /// `start_sync` rejects a second caller while this is present and non-stale.
@@ -77,7 +77,7 @@ pub enum ExecuteOperationsProgress {
     HashingChunks {
         operation_index: usize,
         set_asset_content_arg: SetAssetContentArguments,
-        content_chunks: Vec<RcBytes>,
+        content_chunks: Vec<ByteBuf>,
         chunk_index: usize,
         hasher: sha2::Sha256,
     },
@@ -153,7 +153,7 @@ impl State {
         self.touch_session(session_id, system_context.current_timestamp_ns)?;
 
         for chunk in chunks {
-            self.chunks.push(Some(Chunk::from(chunk)));
+            self.chunks.push(Some(chunk));
         }
 
         Ok(())
