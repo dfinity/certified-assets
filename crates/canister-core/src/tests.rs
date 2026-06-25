@@ -2696,6 +2696,141 @@ mod redirect_rules {
     }
 
     #[test]
+    fn rejects_4xx_rule_to_existing_multichunk_target() {
+        // A 404/410 custom error page is served as a single inline body, so a
+        // multi-chunk target can't carry it. Setting such a rule when the target
+        // already exists and is multi-chunk must fail the whole op (which traps
+        // at the canister boundary).
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+        );
+        for status in [404u16, 410] {
+            let err = commit(
+                &mut state,
+                vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: "/404.html".into(),
+                        status,
+                        headers: vec![],
+                    }],
+                })],
+            )
+            .unwrap_err();
+            assert!(err.contains("multi-chunk asset"), "status {status}: {err}");
+        }
+    }
+
+    #[test]
+    fn allows_200_rule_to_existing_multichunk_target() {
+        // The 4xx guard must not reject a 200 rewrite to a multi-chunk asset —
+        // that path is served as N×206 and is fully supported.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/large.bin", "application/octet-stream")
+                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+        );
+        commit(
+            &mut state,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/landing".into()),
+                    to: "/large.bin".into(),
+                    status: 200,
+                    headers: vec![],
+                }],
+            })],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn alias_200_to_multichunk_target_serves_certified_206() {
+        // Unit-level coverage of the 200-rewrite → multi-chunk path (otherwise
+        // only exercised by the e2e suite): both a plain GET (chunk 0) and a
+        // Range request must return a *certified* 206 at the alias location.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/large.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+        commit(
+            &mut state,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/landing".into()),
+                    to: "/large.bin".into(),
+                    status: 200,
+                    headers: vec![],
+                }],
+            })],
+        )
+        .unwrap();
+
+        let plain = certified_http_request(
+            &state,
+            RequestBuilder::get("/landing")
+                .with_header("Accept-Encoding", "identity")
+                .build(),
+        );
+        assert_eq!(plain.status_code, 206);
+        assert_eq!(plain.body.as_ref(), C0);
+
+        let ranged = certified_http_request(
+            &state,
+            RequestBuilder::get("/landing")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", &format!("bytes={}-", C0.len()))
+                .build(),
+        );
+        assert_eq!(ranged.status_code, 206);
+        assert_eq!(ranged.body.as_ref(), C1);
+    }
+
+    #[test]
+    fn alias_4xx_to_multichunk_target_degrades_to_certified_builtin_404() {
+        // Defense in depth: even if a 4xx rule pointing at a multi-chunk target
+        // slips past the op guard (e.g. the target grew multi-chunk after the
+        // rule was set), the rule must go inert rather than emit an
+        // unverifiable response. `build_alias_rule_entry` skips multi-chunk
+        // encodings for non-200 status, so the path falls through to the
+        // built-in certified 404.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+        );
+        // Install the rule directly via state (bypassing the op guard) to model
+        // the "target grew multi-chunk later" ordering.
+        state.set_redirect_rules(vec![RedirectRule {
+            from: RulePattern::Subtree("/legacy/".into()),
+            to: "/404.html".into(),
+            status: 404,
+            headers: vec![],
+        }]);
+
+        let resp = certified_http_request(&state, RequestBuilder::get("/legacy/x").build());
+        assert_eq!(resp.status_code, 404);
+        assert_eq!(resp.body.as_ref(), b"not found");
+    }
+
+    #[test]
     fn custom_4xx_target_updates_refresh_the_rule() {
         let mut state = State::default();
         let system_context = mock_system_context();

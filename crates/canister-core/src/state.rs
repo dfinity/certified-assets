@@ -208,6 +208,16 @@ impl State {
         self.metadata.contains_key(key)
     }
 
+    /// Whether the asset at `key` exists and stores any encoding as more than one
+    /// chunk. A 4xx custom-error-page rule can only serve a single-chunk target
+    /// (see [`State::build_alias_rule_entry`]), so the sync op guard rejects 4xx
+    /// rules whose target is already multi-chunk.
+    pub fn target_is_multichunk(&self, key: &str) -> bool {
+        self.metadata
+            .get(&key.to_string())
+            .is_some_and(|meta| meta.encodings.values().any(|e| e.num_chunks > 1))
+    }
+
     pub fn authorize(&mut self, principal: Principal) {
         let mut authorized = self.authorized.get().clone();
         authorized.0.insert(principal);
@@ -992,6 +1002,19 @@ impl State {
         let location = crate::redirect::tree_location(rule);
         let mut tree_paths = Vec::new();
         for (&encoding, enc) in &meta.encodings {
+            // A 4xx custom error page is served as a single inline body with the
+            // override status — 206 reassembly always yields a 200, so a
+            // multi-chunk encoding can't carry it. Mirror the serve-side
+            // `acceptable` filter and skip such encodings; certifying them here
+            // would leave an unservable leaf the serve path never reproduces (it
+            // falls back to the built-in 404), so the gateway would reject the
+            // mismatched response. If *every* encoding is multi-chunk the rule
+            // gets no leaves and goes inert (built-in 404 fallthrough). The sync
+            // op guard rejects this combination up front; this keeps the
+            // certified tree sound even if some other caller slips it through.
+            if status != 200 && enc.num_chunks > 1 {
+                continue;
+            }
             let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
 
             // A 200-rewrite to a multi-chunk target serves N×206 (the gateway
