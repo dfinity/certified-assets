@@ -133,8 +133,11 @@ fn range_requests_work_through_a_200_rewrite_alias() {
 
     let body = incompressible_bytes(5_000_000);
     fs::write(project.join("dist/large.bin"), &body).expect("write large asset into fixture");
-    fs::write(project.join("dist/_redirects"), "/landing  /large.bin  200\n")
-        .expect("write _redirects into fixture");
+    fs::write(
+        project.join("dist/_redirects"),
+        "/landing  /large.bin  200\n",
+    )
+    .expect("write _redirects into fixture");
 
     let _network = LocalNetwork::start(project);
     icp_cmd(project).arg("deploy").assert().success();

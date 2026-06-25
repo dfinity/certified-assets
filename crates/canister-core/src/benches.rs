@@ -98,7 +98,8 @@ fn get(url: &str) -> HttpRequest {
 /// when fetching a subsequent chunk of a large asset during 206 reassembly.
 fn get_range(url: &str, start: usize) -> HttpRequest {
     let mut req = get(url);
-    req.headers.push(("Range".to_string(), format!("bytes={start}-")));
+    req.headers
+        .push(("Range".to_string(), format!("bytes={start}-")));
     req
 }
 

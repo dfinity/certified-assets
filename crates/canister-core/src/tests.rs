@@ -781,10 +781,7 @@ fn no_implicit_aliasing_without_rules() {
     );
 
     for missing in &["/foo", "/foo/", "/blog", "/blog/"] {
-        let response = state.http_request(
-            RequestBuilder::get(*missing).build(),
-            &[],
-        );
+        let response = state.http_request(RequestBuilder::get(*missing).build(), &[]);
         assert_eq!(
             response.status_code, 404,
             "expected 404 for {missing}, got {}",
@@ -1082,8 +1079,7 @@ fn range_request_non_identity_encoding() {
     create_assets(
         &mut state,
         &ctx,
-        vec![AssetBuilder::new("/app.js", "text/javascript")
-            .with_encoding("gzip", vec![G0, G1])],
+        vec![AssetBuilder::new("/app.js", "text/javascript").with_encoding("gzip", vec![G0, G1])],
     );
     let total = G0.len() + G1.len();
 
@@ -1523,10 +1519,7 @@ fn rule_aliasing_persists_through_upgrade() {
     // "aliasing disabled" path); still install one for the subdirectory.
     set_exact_rewrite_rule(&mut state, "/subdirectory", "/subdirectory/index.html");
 
-    let no_alias = state.http_request(
-        RequestBuilder::get("/contents").build(),
-        &[],
-    );
+    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[]);
     assert_eq!(no_alias.status_code, 404);
 
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
@@ -1534,10 +1527,7 @@ fn rule_aliasing_persists_through_upgrade() {
 
     let state = upgrade(state, memory.clone());
 
-    let no_alias = state.http_request(
-        RequestBuilder::get("/contents").build(),
-        &[],
-    );
+    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[]);
     assert_eq!(no_alias.status_code, 404);
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
     assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
@@ -2535,8 +2525,7 @@ mod redirect_rules {
 
         // Delete the target → rule goes inert again.
         delete_asset_via_batch(&mut state, "/foo.html");
-        let after_delete =
-            state.http_request(RequestBuilder::get("/foo").build(), &[]);
+        let after_delete = state.http_request(RequestBuilder::get("/foo").build(), &[]);
         assert_eq!(after_delete.status_code, 404);
     }
 
@@ -2760,10 +2749,7 @@ mod redirect_rules {
         )
         .unwrap();
         // Target doesn't exist → rule inert → built-in fall-through 404.
-        let inert = state.http_request(
-            RequestBuilder::get("/missing").build(),
-            &[],
-        );
+        let inert = state.http_request(RequestBuilder::get("/missing").build(), &[]);
         assert_eq!(inert.status_code, 404);
         // The body is the built-in "not found", not the (missing) /404.html.
         assert_eq!(inert.body.as_ref(), b"not found");

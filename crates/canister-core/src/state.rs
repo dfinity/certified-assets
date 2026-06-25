@@ -479,8 +479,12 @@ impl State {
                 self.asset_hashes.certify_response_precomputed(&hash_200);
             } else {
                 // Multi-chunk: certify one 206 per chunk (response-only).
-                let (range_cert_expr, resp_hashes) =
-                    self.range_response_certs(&effective_headers, &meta.content_type, encoding, enc);
+                let (range_cert_expr, resp_hashes) = self.range_response_certs(
+                    &effective_headers,
+                    &meta.content_type,
+                    encoding,
+                    enc,
+                );
                 for resp_hash in resp_hashes {
                     let hash_path = path.hash_tree_path(
                         &range_cert_expr,
@@ -675,7 +679,11 @@ impl State {
             .iter()
             .copied()
             .find(|e| acceptable(e))
-            .or_else(|| Encoding::PREFERENCE_ORDER.into_iter().find(|e| acceptable(e)))?;
+            .or_else(|| {
+                Encoding::PREFERENCE_ORDER
+                    .into_iter()
+                    .find(|e| acceptable(e))
+            })?;
         let enc = meta.encodings.get(&encoding)?;
         Some(self.build_ok_http_response(
             meta,
@@ -778,7 +786,10 @@ impl State {
         // Find the chunk whose [offset, offset+len) contains `start`.
         let mut offset = 0usize;
         let mut target: Option<(u32, usize, usize)> = None; // (chunk_index, chunk_start, len)
-        for entry in self.chunk_certs.range(ContentChunkKey::range(enc.content_id)) {
+        for entry in self
+            .chunk_certs
+            .range(ContentChunkKey::range(enc.content_id))
+        {
             let (key, cc) = entry.into_pair();
             let len = cc.len as usize;
             if start < offset + len {
@@ -1022,8 +1033,12 @@ impl State {
             // reassembles them into a 200), exactly like a direct hit. Certify
             // those 206 leaves at the alias location and move on.
             if status == 200 && enc.num_chunks > 1 {
-                let (range_cert_expr, resp_hashes) =
-                    self.range_response_certs(&effective_headers, &meta.content_type, encoding, enc);
+                let (range_cert_expr, resp_hashes) = self.range_response_certs(
+                    &effective_headers,
+                    &meta.content_type,
+                    encoding,
+                    enc,
+                );
                 for resp_hash in resp_hashes {
                     let tp = crate::redirect::alias_tree_path(
                         &location,

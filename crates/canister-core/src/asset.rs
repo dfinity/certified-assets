@@ -218,11 +218,16 @@ pub(crate) fn range_response_hash(
     content_range: &str,
     chunk_body_hash: &[u8; 32],
 ) -> [u8; 32] {
-    let base_headers: Vec<(String, Value)> =
-        range_headers_for(effective_headers, content_type, encoding, sha256, content_range)
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect();
+    let base_headers: Vec<(String, Value)> = range_headers_for(
+        effective_headers,
+        content_type,
+        encoding,
+        sha256,
+        content_range,
+    )
+    .into_iter()
+    .map(|(k, v)| (k, Value::String(v)))
+    .collect();
     response_hash(&base_headers, 206, chunk_body_hash).0
 }
 
