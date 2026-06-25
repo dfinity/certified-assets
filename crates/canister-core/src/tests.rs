@@ -871,11 +871,11 @@ fn multichunk_plain_get_serves_206_first_chunk() {
             .with_encoding("identity", vec![C0, C1])],
     );
 
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 206);
@@ -901,12 +901,12 @@ fn range_request_returns_containing_chunk() {
     );
     let total = C0.len() + C1.len() + C2.len();
 
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .with_header("Range", &format!("bytes={}-", C0.len()))
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 206);
@@ -932,12 +932,12 @@ fn range_request_mid_chunk_snaps_to_chunk_start() {
     let total = C0.len() + C1.len();
 
     // Ask for a byte 2 into chunk 1; expect the whole of chunk 1 back.
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .with_header("Range", &format!("bytes={}-", C0.len() + 2))
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 206);
@@ -963,12 +963,12 @@ fn range_spanning_chunks_returns_single_chunk() {
     let total = C0.len() + C1.len();
 
     // Closed range covering the whole asset → still just chunk 0.
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .with_header("Range", &format!("bytes=0-{}", total - 1))
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 206);
@@ -993,12 +993,12 @@ fn out_of_range_serves_full_asset_via_206() {
     );
     let total = C0.len() + C1.len();
 
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .with_header("Range", &format!("bytes={}-", total + 100))
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 206);
@@ -1023,23 +1023,23 @@ fn conditional_request_with_range_returns_304() {
     );
 
     // First request: read the canister-managed etag off the 206.
-    let first = state.http_request(
+    let first = certified_http_request(
+        &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .build(),
-        &[],
     );
     let etag = lookup_header(&first, "etag")
         .expect("206 carries an etag")
         .to_string();
 
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .with_header("If-None-Match", &etag)
             .with_header("Range", "bytes=10-")
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 304);
@@ -1058,12 +1058,12 @@ fn single_chunk_asset_ignores_range() {
         vec![AssetBuilder::new("/small.txt", "text/plain").with_encoding("identity", vec![BODY])],
     );
 
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/small.txt")
             .with_header("Accept-Encoding", "identity")
             .with_header("Range", "bytes=5-")
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 200);
@@ -1087,12 +1087,12 @@ fn range_request_non_identity_encoding() {
     );
     let total = G0.len() + G1.len();
 
-    let resp = state.http_request(
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/app.js")
             .with_header("Accept-Encoding", "gzip")
             .with_header("Range", &format!("bytes={}-", G0.len()))
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 206);
@@ -1122,18 +1122,103 @@ fn range_serving_survives_upgrade() {
 
     let restored = upgrade(state, memory.clone());
 
-    let resp = restored.http_request(
+    let resp = certified_http_request(
+        &restored,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
             .with_header("Range", &format!("bytes={}-", C0.len()))
             .build(),
-        &[],
     );
 
     assert_eq!(resp.status_code, 206);
     assert_eq!(resp.body.as_ref(), C1);
     let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
     assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// Range forms the canister doesn't honour — a suffix range (`bytes=-N`), a
+/// multi-range list, and a syntactically broken spec — all parse to "no range"
+/// and serve the asset as a certified 206 chunk 0 (never a truncated 200), which
+/// the gateway reassembles into the full 200.
+#[test]
+fn unhonoured_range_forms_serve_certified_206_chunk_0() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+
+    for range in ["bytes=-500", "bytes=0-1,5-6", "bytes=abc-", "kingdoms=0-"] {
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", range)
+                .build(),
+        );
+        assert_eq!(resp.status_code, 206, "range {range:?}");
+        assert_eq!(resp.body.as_ref(), C0, "range {range:?}");
+        assert_eq!(
+            lookup_header(&resp, "content-range"),
+            Some(cr.as_str()),
+            "range {range:?}"
+        );
+    }
+}
+
+/// Range/chunk behaviour follows the *selected* encoding, not the asset. A file
+/// stored as a 2-chunk identity plus a 1-chunk (compressed-below-threshold) gzip
+/// serves a 206 when identity is chosen but a plain 200 when gzip is chosen —
+/// both certified.
+#[test]
+fn range_follows_selected_encoding_chunk_count() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const I0: &[u8] = b"identity-chunk-0--";
+    const I1: &[u8] = b"identity-chunk-1";
+    const GZ: &[u8] = b"\x1f\x8b\x08\x00small-gzip";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/app.js", "text/javascript")
+            .with_encoding("identity", vec![I0, I1])
+            .with_encoding("gzip", vec![GZ])],
+    );
+
+    // gzip is single-chunk → Range ignored, full 200.
+    let gz = certified_http_request(
+        &state,
+        RequestBuilder::get("/app.js")
+            .with_header("Accept-Encoding", "gzip")
+            .with_header("Range", "bytes=4-")
+            .build(),
+    );
+    assert_eq!(gz.status_code, 200);
+    assert_eq!(gz.body.as_ref(), GZ);
+    assert_eq!(lookup_header(&gz, "content-encoding"), Some("gzip"));
+    assert_eq!(lookup_header(&gz, "content-range"), None);
+
+    // identity is two chunks → Range honoured, certified 206.
+    let id = certified_http_request(
+        &state,
+        RequestBuilder::get("/app.js")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", &format!("bytes={}-", I0.len()))
+            .build(),
+    );
+    assert_eq!(id.status_code, 206);
+    assert_eq!(id.body.as_ref(), I1);
+    assert_eq!(lookup_header(&id, "content-encoding"), None);
+    let total = I0.len() + I1.len();
+    let cr = format!("bytes {}-{}/{}", I0.len(), total - 1, total);
+    assert_eq!(lookup_header(&id, "content-range"), Some(cr.as_str()));
 }
 
 #[test]
