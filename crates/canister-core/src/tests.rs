@@ -905,7 +905,7 @@ fn range_request_returns_containing_chunk() {
         &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
-            .with_header("Range", &format!("bytes={}-", C0.len()))
+            .with_header("Range", format!("bytes={}-", C0.len()))
             .build(),
     );
 
@@ -936,7 +936,7 @@ fn range_request_mid_chunk_snaps_to_chunk_start() {
         &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
-            .with_header("Range", &format!("bytes={}-", C0.len() + 2))
+            .with_header("Range", format!("bytes={}-", C0.len() + 2))
             .build(),
     );
 
@@ -967,7 +967,7 @@ fn range_spanning_chunks_returns_single_chunk() {
         &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
-            .with_header("Range", &format!("bytes=0-{}", total - 1))
+            .with_header("Range", format!("bytes=0-{}", total - 1))
             .build(),
     );
 
@@ -997,7 +997,7 @@ fn out_of_range_serves_full_asset_via_206() {
         &state,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
-            .with_header("Range", &format!("bytes={}-", total + 100))
+            .with_header("Range", format!("bytes={}-", total + 100))
             .build(),
     );
 
@@ -1091,7 +1091,7 @@ fn range_request_non_identity_encoding() {
         &state,
         RequestBuilder::get("/app.js")
             .with_header("Accept-Encoding", "gzip")
-            .with_header("Range", &format!("bytes={}-", G0.len()))
+            .with_header("Range", format!("bytes={}-", G0.len()))
             .build(),
     );
 
@@ -1126,7 +1126,7 @@ fn range_serving_survives_upgrade() {
         &restored,
         RequestBuilder::get("/big.bin")
             .with_header("Accept-Encoding", "identity")
-            .with_header("Range", &format!("bytes={}-", C0.len()))
+            .with_header("Range", format!("bytes={}-", C0.len()))
             .build(),
     );
 
@@ -1210,7 +1210,7 @@ fn range_follows_selected_encoding_chunk_count() {
         &state,
         RequestBuilder::get("/app.js")
             .with_header("Accept-Encoding", "identity")
-            .with_header("Range", &format!("bytes={}-", I0.len()))
+            .with_header("Range", format!("bytes={}-", I0.len()))
             .build(),
     );
     assert_eq!(id.status_code, 206);
@@ -2878,7 +2878,7 @@ mod redirect_rules {
             &state,
             RequestBuilder::get("/landing")
                 .with_header("Accept-Encoding", "identity")
-                .with_header("Range", &format!("bytes={}-", C0.len()))
+                .with_header("Range", format!("bytes={}-", C0.len()))
                 .build(),
         );
         assert_eq!(ranged.status_code, 206);

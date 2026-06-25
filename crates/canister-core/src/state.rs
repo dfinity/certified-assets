@@ -694,6 +694,7 @@ impl State {
     /// (etag-based not-modified). When it is `Some(s)` — used by redirect rules
     /// that serve a custom error page — the response always carries the body
     /// with status `s`, and the etag / 304 logic is skipped.
+    #[allow(clippy::too_many_arguments)]
     fn build_ok_http_response(
         &self,
         meta: &AssetMeta,
