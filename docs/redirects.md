@@ -39,6 +39,12 @@ lines and lines starting with `#` are ignored.
 | `404` | Serve the `to` file as a not-found page. |
 | `410` | Serve the `to` file, signalling the resource is permanently gone. |
 
+A `404` or `410` error page must be a **small, single-chunk file** (under ~1.9 MB).
+Large files are served as [`206` range responses](how-it-works.md#serving-large-assets)
+that the gateway reassembles into a `200`, which can't carry a 4xx status — so the sync
+plugin rejects a 4xx rule pointing at a multi-chunk asset at deploy time, naming the
+offending rule. (A `200` rewrite to a large file is fine.)
+
 ## Examples
 
 ```

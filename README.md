@@ -126,10 +126,10 @@ in [`crates/canister/src/lib.rs`](crates/canister/src/lib.rs) checks the
 Rust-exported service against this file (via `service_equal`), so the two stay in
 lockstep.
 
-The HTTP types (`HeaderField`, `HttpRequest`, `HttpResponse`, `StreamingToken`,
-`StreamingStrategy`, `StreamingCallbackHttpResponse`) come from the official
-[IC HTTP Gateway specification](https://docs.internetcomputer.org/references/http-gateway-protocol-spec/),
-kept as published except for `StreamingToken`: the spec defines it as an opaque
-placeholder each canister fills in with its own concrete type, and
-`certified-assets.did` fills it in with the assets canister's concrete token. The file is self-contained
-(no `import`) so it can be attached to the canister wasm as Candid metadata.
+The HTTP types (`HeaderField`, `HttpRequest`, `HttpResponse`) come from the official
+[IC HTTP Gateway specification](https://docs.internetcomputer.org/references/http-gateway-protocol-spec/).
+This canister doesn't use the streaming-callback strategy — large assets are served as
+certified `206` range responses the gateway reassembles into a full `200` — so
+`HttpResponse` carries no `streaming_strategy` field and there is no streaming-callback
+token, strategy, or method. The file is self-contained (no `import`) so it can be
+attached to the canister wasm as Candid metadata.
