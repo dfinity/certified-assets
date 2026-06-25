@@ -15,17 +15,18 @@
 //! upgrade roundtrip over a shared memory handle).
 
 use crate::asset::{
-    certificate_expression_for, headers_for, response_hashes_for, STATUS_CODES_TO_CERTIFY,
+    certificate_expression_for, headers_for, range_certificate_expression_for, range_headers_for,
+    range_response_hash, response_hashes_for,
 };
 use crate::blob_store::BlobStore;
 use crate::certification::{
-    response_hash, AssetKey, AssetPath, CertifiedResponses, RequestHash, ResponseHash,
+    response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, RequestHash,
+    ResponseHash,
 };
-use crate::http::{
-    CallbackFunc, HeaderField, HttpRequest, HttpResponse, StreamingCallbackHttpResponse,
-    StreamingCallbackToken, StreamingStrategy,
+use crate::http::{HeaderField, HttpRequest, HttpResponse};
+use crate::stable_store::{
+    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, RedirectRules,
 };
-use crate::stable_store::{AssetMeta, AuthorizedSet, EncodingMeta, RedirectRules};
 use crate::sync::{Chunk, SyncSession};
 use crate::url::url_decode;
 use candid::Principal;
@@ -68,6 +69,19 @@ fn parse_if_none_match(value: &str) -> Vec<Hash> {
         .collect()
 }
 
+/// Phase 0 spike: parse the *start* byte of a single `Range: bytes=<start>-[end]`
+/// header. The end is ignored (we serve the containing chunk). Multi-range
+/// (comma) and suffix (`bytes=-N`) forms return `None` → the request is served
+/// as a normal full response.
+fn parse_range_start(value: &str) -> Option<usize> {
+    let spec = value.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start, _end) = spec.split_once('-')?;
+    start.trim().parse::<usize>().ok()
+}
+
 type Mem = VirtualMemory<DefaultMemoryImpl>;
 
 const AUTHORIZED_MEMORY: MemoryId = MemoryId::new(0);
@@ -80,6 +94,9 @@ const METADATA_MEMORY: MemoryId = MemoryId::new(4);
 const CONTENT_INDEX_MEMORY: MemoryId = MemoryId::new(5);
 /// Raw contiguous chunk bytes managed by the [`BlobStore`] allocator.
 const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(6);
+/// Per-chunk certification data (`ContentChunkKey -> ChunkCert`); read by the
+/// 206 certify/serve paths so neither has to re-hash or fully read content.
+const CHUNK_CERT_MEMORY: MemoryId = MemoryId::new(7);
 
 pub struct State {
     // ---- durable (stable memory) ----
@@ -100,6 +117,11 @@ pub struct State {
     /// `stable64_read`/`write` instead of an overflow-page walk. See
     /// [`crate::blob_store`].
     content: BlobStore<Mem>,
+    /// Per-chunk certification data (length + SHA-256), keyed by the same
+    /// `(content_id, chunk_index)` as the content blob. Lets the 206 certify path
+    /// stay content-free (no re-hash in `post_upgrade`) and the serve path avoid
+    /// reading every chunk to locate a range. Freed alongside its content group.
+    chunk_certs: StableBTreeMap<ContentChunkKey, ChunkCert, Mem>,
 
     // ---- transient heap (lost on upgrade) ----
     /// Chunks staged by `upload_chunks` for the current sync, in upload order:
@@ -155,6 +177,7 @@ impl State {
             next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
             metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
             content: BlobStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
+            chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
             chunks: Vec::new(),
             sync_session: None,
             asset_hashes: CertifiedResponses::default(),
@@ -183,6 +206,16 @@ impl State {
     /// Whether an asset exists at `key`.
     pub fn contains_asset(&self, key: &AssetKey) -> bool {
         self.metadata.contains_key(key)
+    }
+
+    /// Whether the asset at `key` exists and stores any encoding as more than one
+    /// chunk. A 4xx custom-error-page rule can only serve a single-chunk target
+    /// (see [`State::build_alias_rule_entry`]), so the sync op guard rejects 4xx
+    /// rules whose target is already multi-chunk.
+    pub fn target_is_multichunk(&self, key: &str) -> bool {
+        self.metadata
+            .get(&key.to_string())
+            .is_some_and(|meta| meta.encodings.values().any(|e| e.num_chunks > 1))
     }
 
     pub fn authorize(&mut self, principal: Principal) {
@@ -221,9 +254,18 @@ impl State {
             .unwrap_or_default()
     }
 
-    /// Frees every chunk belonging to a content group.
+    /// Frees every chunk belonging to a content group, including its per-chunk
+    /// certification entries.
     fn delete_content(&mut self, content_id: u64) {
         self.content.delete_group(content_id);
+        let keys: Vec<ContentChunkKey> = self
+            .chunk_certs
+            .range(ContentChunkKey::range(content_id))
+            .map(|e| e.into_pair().0)
+            .collect();
+        for key in keys {
+            self.chunk_certs.remove(&key);
+        }
     }
 
     // ---- asset mutations ----
@@ -303,11 +345,29 @@ impl State {
             self.delete_content(old.content_id);
         }
 
-        // Allocate a fresh content group and write the chunks into it.
+        // Allocate a fresh content group and write the chunks into it. Per-chunk
+        // cert data (length + hash) is only needed to serve/certify 206 ranges,
+        // which only happen for multi-chunk encodings — so single-chunk assets
+        // (the common case) skip the extra hash and the `chunk_certs` write, and
+        // reuse the already-verified full `sha256` instead of re-hashing.
+        use sha2::Digest;
         let content_id = self.alloc_content_id();
         let num_chunks = content_chunks.len() as u32;
+        let multi_chunk = num_chunks > 1;
+        let mut content_len = 0u64;
         for (index, chunk) in content_chunks.iter().enumerate() {
             self.content.insert(content_id, index as u32, chunk);
+            if multi_chunk {
+                let chunk_sha256: [u8; 32] = sha2::Sha256::digest(chunk).into();
+                self.chunk_certs.insert(
+                    ContentChunkKey::new(content_id, index as u32),
+                    ChunkCert {
+                        len: chunk.len() as u32,
+                        sha256: chunk_sha256,
+                    },
+                );
+            }
+            content_len += chunk.len() as u64;
         }
 
         meta.encodings.insert(
@@ -316,6 +376,7 @@ impl State {
                 content_id,
                 num_chunks,
                 sha256,
+                content_len,
             },
         );
         self.recertify_asset(&arg.key, &meta);
@@ -399,16 +460,83 @@ impl State {
                 &cert_expr,
                 &enc.sha256,
             );
-            for status_code in STATUS_CODES_TO_CERTIFY {
-                let response_hash = response_hashes[&status_code];
-                let hash_path = path.hash_tree_path(
+            // Always certify the 304 (empty body). Certify the full 200 only for
+            // single-chunk encodings — a multi-chunk asset is served as N×206 (the
+            // gateway reassembles them into a 200), so a full 200 is never served
+            // and certifying it would be dead weight in the tree.
+            let hash_304 = path.hash_tree_path(
+                &cert_expr,
+                &RequestHash::default(),
+                ResponseHash::from(&response_hashes[&304]),
+            );
+            self.asset_hashes.certify_response_precomputed(&hash_304);
+            if enc.num_chunks == 1 {
+                let hash_200 = path.hash_tree_path(
                     &cert_expr,
                     &RequestHash::default(),
-                    ResponseHash::from(&response_hash),
+                    ResponseHash::from(&response_hashes[&200]),
                 );
-                self.asset_hashes.certify_response_precomputed(&hash_path);
+                self.asset_hashes.certify_response_precomputed(&hash_200);
+            } else {
+                // Multi-chunk: certify one 206 per chunk (response-only).
+                let (range_cert_expr, resp_hashes) = self.range_response_certs(
+                    &effective_headers,
+                    &meta.content_type,
+                    encoding,
+                    enc,
+                );
+                for resp_hash in resp_hashes {
+                    let hash_path = path.hash_tree_path(
+                        &range_cert_expr,
+                        &RequestHash::default(),
+                        ResponseHash::from(&resp_hash),
+                    );
+                    self.asset_hashes.certify_response_precomputed(&hash_path);
+                }
             }
         }
+    }
+
+    /// Content-free per-chunk 206 certification data for a multi-chunk encoding:
+    /// the shared range certificate expression plus one response hash per chunk,
+    /// in chunk order. Derived from `chunk_certs` + `content_len`, so it never
+    /// reads chunk bytes. Both the direct-asset path (`recertify_asset`) and the
+    /// alias path (`build_alias_rule_entry`) use it, each placing the resulting
+    /// leaves at its own tree location.
+    fn range_response_certs(
+        &self,
+        effective_headers: &[(String, String)],
+        content_type: &str,
+        encoding: Encoding,
+        enc: &EncodingMeta,
+    ) -> (CertificateExpression, Vec<[u8; 32]>) {
+        let range_cert_expr =
+            range_certificate_expression_for(effective_headers, encoding, &enc.sha256);
+        let total = enc.content_len;
+        let chunk_infos: Vec<(u32, [u8; 32])> = self
+            .chunk_certs
+            .range(ContentChunkKey::range(enc.content_id))
+            .map(|e| {
+                let cc = e.into_pair().1;
+                (cc.len, cc.sha256)
+            })
+            .collect();
+        let mut resp_hashes = Vec::with_capacity(chunk_infos.len());
+        let mut offset: u64 = 0;
+        for (len, sha256) in chunk_infos {
+            let len = len as u64;
+            let content_range = format!("bytes {}-{}/{}", offset, offset + len - 1, total);
+            resp_hashes.push(range_response_hash(
+                effective_headers,
+                content_type,
+                encoding,
+                &enc.sha256,
+                &content_range,
+                &sha256,
+            ));
+            offset += len;
+        }
+        (range_cert_expr, resp_hashes)
     }
 
     // ---- queries ----
@@ -471,15 +599,13 @@ impl State {
 
     // ---- HTTP serving ----
 
-    #[allow(clippy::too_many_arguments)]
     fn build_http_response(
         &self,
         certificate: &[u8],
         path: &str,
         requested_encodings: Vec<Encoding>,
-        chunk_index: usize,
-        callback: CallbackFunc,
         etags: Vec<Hash>,
+        range_start: Option<usize>,
     ) -> HttpResponse {
         // Asset at the requested path wins.
         if let Some(meta) = self.metadata.get(&path.to_string()) {
@@ -487,11 +613,10 @@ impl State {
             if let Some(response) = self.build_asset_response(
                 &meta,
                 &requested_encodings,
-                chunk_index,
                 Some(&cert_header),
-                &callback,
                 &etags,
                 None,
+                range_start,
             ) {
                 return response;
             }
@@ -516,9 +641,8 @@ impl State {
                 path,
                 certificate,
                 &requested_encodings,
-                chunk_index,
-                &callback,
                 &etags,
+                range_start,
             );
         }
 
@@ -535,33 +659,40 @@ impl State {
         &self,
         meta: &AssetMeta,
         requested_encodings: &[Encoding],
-        chunk_index: usize,
         certificate_header: Option<&HeaderField>,
-        callback: &CallbackFunc,
         etags: &[Hash],
         status_override: Option<u16>,
+        range_start: Option<usize>,
     ) -> Option<HttpResponse> {
+        // A status-overridden response (a 4xx custom error page) is served as a
+        // single inline body with that status — there is no way to deliver a
+        // multi-chunk body under a non-200 status now that callback streaming is
+        // gone and 206 reassembly always yields a 200 (see D6). So restrict those
+        // to single-chunk encodings; the certify side does the same.
+        let acceptable = |e: &Encoding| match status_override {
+            Some(_) => meta.encodings.get(e).is_some_and(|enc| enc.num_chunks == 1),
+            None => meta.encodings.contains_key(e),
+        };
         // Honour the client's listed order first; if it expressed no acceptable
         // encoding, fall back to our preference order (identity-first).
         let encoding = requested_encodings
             .iter()
             .copied()
-            .find(|e| meta.encodings.contains_key(e))
+            .find(|e| acceptable(e))
             .or_else(|| {
                 Encoding::PREFERENCE_ORDER
                     .into_iter()
-                    .find(|e| meta.encodings.contains_key(e))
+                    .find(|e| acceptable(e))
             })?;
         let enc = meta.encodings.get(&encoding)?;
         Some(self.build_ok_http_response(
             meta,
             encoding,
             enc,
-            chunk_index,
             certificate_header,
-            callback,
             etags,
             status_override,
+            range_start,
         ))
     }
 
@@ -577,12 +708,26 @@ impl State {
         meta: &AssetMeta,
         encoding: Encoding,
         enc: &EncodingMeta,
-        chunk_index: usize,
         certificate_header: Option<&HeaderField>,
-        callback: &CallbackFunc,
         etags: &[Hash],
         status_override: Option<u16>,
+        range_start: Option<usize>,
     ) -> HttpResponse {
+        // Serve multi-chunk encodings as certified 206s. A plain GET (no Range)
+        // returns chunk 0 — that is what drives the gateway's Flow B reassembly
+        // into a full 200. A Range request returns the containing chunk (start
+        // snapped down to the chunk boundary). Conditional (304) and
+        // status-override (4xx error-page) responses keep their normal path; the
+        // latter only ever reaches here with a single-chunk encoding.
+        if status_override.is_none() && !etags.contains(&enc.sha256) && enc.num_chunks > 1 {
+            let start = range_start.unwrap_or(0);
+            if let Some(response) =
+                self.build_range_response(meta, encoding, enc, start, certificate_header)
+            {
+                return response;
+            }
+        }
+
         let mut headers = headers_for(
             &self.effective_headers(meta),
             &meta.content_type,
@@ -593,35 +738,18 @@ impl State {
             headers.push((head.0.clone(), head.1.clone()));
         }
 
-        let streaming_strategy = StreamingCallbackToken::create_token(
-            enc.content_id,
-            enc.num_chunks,
-            ByteBuf::from(enc.sha256),
-            chunk_index,
-        )
-        .map(|token| StreamingStrategy::Callback {
-            callback: callback.clone(),
-            token,
-        });
-
-        // The canister-managed `etag` header is already in `headers` (and in the
-        // certified set), so both the 200 and the 304 carry it.
-        let (status_code, body, streaming_strategy) = if let Some(status) = status_override {
-            (
-                status,
-                self.chunk_bytes(enc.content_id, chunk_index),
-                streaming_strategy,
-            )
+        // Reaching here means a single-chunk body — multi-chunk 200s are served as
+        // 206 above, and multi-chunk 4xx error pages are filtered out in
+        // `build_asset_response` — so the whole body is chunk 0. The
+        // canister-managed `etag` header is already in `headers` (and certified),
+        // so both the 200 and the 304 carry it.
+        let (status_code, body) = if let Some(status) = status_override {
+            (status, self.chunk_bytes(enc.content_id, 0))
         } else if etags.contains(&enc.sha256) {
-            // Conditional request matched: serve the certified 304 — empty body,
-            // no streaming. Its response hash is certified alongside the 200.
-            (304, ByteBuf::new(), None)
+            // Conditional request matched: serve the certified 304 (empty body).
+            (304, ByteBuf::new())
         } else {
-            (
-                200,
-                self.chunk_bytes(enc.content_id, chunk_index),
-                streaming_strategy,
-            )
+            (200, self.chunk_bytes(enc.content_id, 0))
         };
 
         HttpResponse {
@@ -629,8 +757,70 @@ impl State {
             headers,
             body,
             upgrade: None,
-            streaming_strategy,
         }
+    }
+
+    /// Build a certified 206 for the chunk containing byte `start` (snapped down
+    /// to the chunk boundary). Returns `None` (caller falls back to the normal 200
+    /// path) when the encoding is empty or `start` is past the end.
+    ///
+    /// Lean: locates the target chunk by scanning `chunk_certs` (tiny fixed
+    /// entries, early exit), then reads only that one chunk's bytes.
+    fn build_range_response(
+        &self,
+        meta: &AssetMeta,
+        encoding: Encoding,
+        enc: &EncodingMeta,
+        start: usize,
+        certificate_header: Option<&HeaderField>,
+    ) -> Option<HttpResponse> {
+        let total = enc.content_len as usize;
+        if total == 0 {
+            return None;
+        }
+        // An out-of-range start (no byte to satisfy) is treated as "ignore the
+        // Range": serve chunk 0, which the gateway reassembles into the full 200.
+        // Returning `None` here would instead fall through to a plain 200 carrying
+        // only chunk 0 — a truncated body for a multi-chunk asset.
+        let start = if start >= total { 0 } else { start };
+        // Find the chunk whose [offset, offset+len) contains `start`.
+        let mut offset = 0usize;
+        let mut target: Option<(u32, usize, usize)> = None; // (chunk_index, chunk_start, len)
+        for entry in self
+            .chunk_certs
+            .range(ContentChunkKey::range(enc.content_id))
+        {
+            let (key, cc) = entry.into_pair();
+            let len = cc.len as usize;
+            if start < offset + len {
+                target = Some((key.chunk_index, offset, len));
+                break;
+            }
+            offset += len;
+        }
+        let (chunk_index, chunk_start, len) = target?;
+
+        let chunk = self
+            .content
+            .get(enc.content_id, chunk_index)
+            .unwrap_or_default();
+        let content_range = format!("bytes {}-{}/{}", chunk_start, chunk_start + len - 1, total);
+        let mut headers = range_headers_for(
+            &self.effective_headers(meta),
+            &meta.content_type,
+            encoding,
+            &enc.sha256,
+            &content_range,
+        );
+        if let Some(head) = certificate_header {
+            headers.push((head.0.clone(), head.1.clone()));
+        }
+        Some(HttpResponse {
+            status_code: 206,
+            headers,
+            body: ByteBuf::from(chunk),
+            upgrade: None,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -641,9 +831,8 @@ impl State {
         path: &str,
         certificate: &[u8],
         requested_encodings: &[Encoding],
-        chunk_index: usize,
-        callback: &CallbackFunc,
         etags: &[Hash],
+        range_start: Option<usize>,
     ) -> HttpResponse {
         let cert_header =
             self.asset_hashes
@@ -662,7 +851,6 @@ impl State {
                     headers,
                     body: ByteBuf::new(),
                     upgrade: None,
-                    streaming_strategy: None,
                 }
             }
             crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status } => {
@@ -673,30 +861,27 @@ impl State {
                 self.build_asset_response(
                     &meta,
                     requested_encodings,
-                    chunk_index,
                     Some(&cert_header),
-                    callback,
                     etags,
                     status_override,
+                    range_start,
                 )
                 .unwrap_or_else(|| HttpResponse::build_404(cert_header))
             }
         }
     }
 
-    pub fn http_request(
-        &self,
-        req: HttpRequest,
-        certificate: &[u8],
-        callback: CallbackFunc,
-    ) -> HttpResponse {
+    pub fn http_request(&self, req: HttpRequest, certificate: &[u8]) -> HttpResponse {
         let mut encodings: Vec<Encoding> = vec![];
         let mut etags: Vec<Hash> = vec![];
+        let mut range_start: Option<usize> = None;
         for (name, value) in req.headers.iter() {
             if name.eq_ignore_ascii_case("Accept-Encoding") {
                 encodings.extend(Encoding::parse_accept_encoding(value));
             } else if name.eq_ignore_ascii_case("If-None-Match") {
                 etags.extend(parse_if_none_match(value));
+            } else if name.eq_ignore_ascii_case("Range") {
+                range_start = parse_range_start(value);
             }
         }
 
@@ -706,7 +891,7 @@ impl State {
         };
 
         match url_decode(path) {
-            Ok(path) => self.build_http_response(certificate, &path, encodings, 0, callback, etags),
+            Ok(path) => self.build_http_response(certificate, &path, encodings, etags, range_start),
             // Malformed percent-encoding (invalid UTF-8 once decoded). This 400
             // is intentionally uncertified: the body is per-request (it echoes
             // the bad path), so it can't be pinned to a certified hash, and a
@@ -719,35 +904,7 @@ impl State {
                 headers: vec![],
                 body: ByteBuf::from(format!("failed to decode path '{path}': {err}")),
                 upgrade: None,
-                streaming_strategy: None,
             },
-        }
-    }
-
-    pub fn http_request_streaming_callback(
-        &self,
-        StreamingCallbackToken {
-            content_id,
-            index,
-            num_chunks,
-            sha256,
-        }: StreamingCallbackToken,
-    ) -> StreamingCallbackHttpResponse {
-        // The token is self-describing, so the callback needs no `metadata.get`
-        // / `AssetMeta` decode: it reads the requested chunk straight from the
-        // content store and re-derives the next token from the token's own
-        // fields. A forged `content_id`/`index` just misses the content store
-        // and yields an empty body — the gateway's `sha256` check then rejects
-        // the stream, so no uncertified bytes are ever served.
-        let chunk_index = index as usize;
-        StreamingCallbackHttpResponse {
-            body: self.chunk_bytes(content_id, chunk_index),
-            token: StreamingCallbackToken::create_token(
-                content_id,
-                num_chunks,
-                sha256,
-                chunk_index,
-            ),
         }
     }
 
@@ -857,7 +1014,43 @@ impl State {
         let location = crate::redirect::tree_location(rule);
         let mut tree_paths = Vec::new();
         for (&encoding, enc) in &meta.encodings {
+            // A 4xx custom error page is served as a single inline body with the
+            // override status — 206 reassembly always yields a 200, so a
+            // multi-chunk encoding can't carry it. Mirror the serve-side
+            // `acceptable` filter and skip such encodings; certifying them here
+            // would leave an unservable leaf the serve path never reproduces (it
+            // falls back to the built-in 404), so the gateway would reject the
+            // mismatched response. If *every* encoding is multi-chunk the rule
+            // gets no leaves and goes inert (built-in 404 fallthrough). The sync
+            // op guard rejects this combination up front; this keeps the
+            // certified tree sound even if some other caller slips it through.
+            if status != 200 && enc.num_chunks > 1 {
+                continue;
+            }
             let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
+
+            // A 200-rewrite to a multi-chunk target serves N×206 (the gateway
+            // reassembles them into a 200), exactly like a direct hit. Certify
+            // those 206 leaves at the alias location and move on.
+            if status == 200 && enc.num_chunks > 1 {
+                let (range_cert_expr, resp_hashes) = self.range_response_certs(
+                    &effective_headers,
+                    &meta.content_type,
+                    encoding,
+                    enc,
+                );
+                for resp_hash in resp_hashes {
+                    let tp = crate::redirect::alias_tree_path(
+                        &location,
+                        range_cert_expr.expression_hash,
+                        resp_hash,
+                    );
+                    self.asset_hashes.certify_response_precomputed(&tp);
+                    tree_paths.push(tp);
+                }
+                continue;
+            }
+
             let resp_hash = if status == 200 {
                 // The encoding's already-certified 200 response hash.
                 response_hashes_for(

@@ -60,6 +60,46 @@ pub struct EncodingMeta {
     /// Number of chunks, so streaming tokens can be built without a range scan.
     pub num_chunks: u32,
     pub sha256: [u8; 32],
+    /// Total encoded length, i.e. the sum of all chunk lengths. Used as the
+    /// `/total` in a 206 `Content-Range` and to reject out-of-range requests,
+    /// without re-reading the chunks.
+    pub content_len: u64,
+}
+
+/// Per-chunk certification data, stored in its own region keyed by the same
+/// `(content_id, chunk_index)` as the content blob. Holds exactly what the 206
+/// certify path and serve path need *without* reading chunk bytes: the chunk's
+/// length (for `Content-Range`/offset math) and its SHA-256 (the 206 body hash).
+/// Keeping this out of [`AssetMeta`] keeps the per-request metadata decode small.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkCert {
+    pub len: u32,
+    pub sha256: [u8; 32],
+}
+
+impl Storable for ChunkCert {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = [0u8; 36];
+        buf[..4].copy_from_slice(&self.len.to_le_bytes());
+        buf[4..].copy_from_slice(&self.sha256);
+        Cow::Owned(buf.to_vec())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_bytes().into_owned()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let len = u32::from_le_bytes(bytes[..4].try_into().expect("36-byte ChunkCert"));
+        let mut sha256 = [0u8; 32];
+        sha256.copy_from_slice(&bytes[4..36]);
+        Self { len, sha256 }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 36,
+        is_fixed_size: true,
+    };
 }
 
 /// Key into the content chunk store, encoded big-endian (`content_id` then

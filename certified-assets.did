@@ -2,9 +2,13 @@
 //
 // The IC HTTP Gateway interface types, from the official specification:
 // https://docs.internetcomputer.org/references/http-gateway-protocol-spec/
-// Kept as published except for `StreamingToken`: the spec defines it as an
-// opaque placeholder that each canister fills in with its own concrete type,
-// and the record below is the assets canister's concrete token.
+//
+// This canister does not use the streaming-callback strategy: large assets are
+// served as certified HTTP 206 range responses, which the gateway reassembles
+// into a full 200 (and which also satisfy client `Range` requests). So
+// `HttpResponse` carries no `streaming_strategy` and there is no streaming
+// callback method. The gateway's own `HttpResponse` type keeps `streaming_strategy`
+// as an optional field, which decodes to null when absent.
 
 type HeaderField = record { text; text; };
 
@@ -21,7 +25,6 @@ type HttpResponse = record {
   headers: vec HeaderField;
   body: blob;
   upgrade : opt bool;
-  streaming_strategy: opt StreamingStrategy;
 };
 
 // The content encodings the canister and sync plugin support — a deliberately
@@ -30,30 +33,6 @@ type HttpResponse = record {
 // form; it is a real stored encoding but never emitted as a `Content-Encoding`
 // header. Defined up here so the asset types below can reference it.
 type Encoding = variant { Identity; Gzip; Brotli };
-
-// Each canister that uses the streaming feature gets to choose their concrete
-// type; the HTTP Gateway will treat it as an opaque value that is only fed to
-// the callback method. This is the assets canister's concrete token — fully
-// self-describing, so the callback serves the next chunk straight from the
-// content store (`content_id`) without reloading any per-asset metadata.
-type StreamingToken = record {
-  content_id: nat64;
-  index: nat32;
-  num_chunks: nat32;
-  sha256: blob;
-};
-
-type StreamingCallbackHttpResponse = record {
-  body: blob;
-  token: opt StreamingToken;
-};
-
-type StreamingStrategy = variant {
-  Callback: record {
-    callback: func (StreamingToken) -> (StreamingCallbackHttpResponse) query;
-    token: StreamingToken;
-  };
-};
 
 // ───────── Shared aliases ─────────
 
@@ -208,7 +187,6 @@ service: {
   // https://docs.internetcomputer.org/references/http-gateway-protocol-spec/
 
   http_request: (request: HttpRequest) -> (HttpResponse) query;
-  http_request_streaming_callback: (token: StreamingToken) -> (StreamingCallbackHttpResponse) query;
 
   // ───────── Asset queries ─────────
 

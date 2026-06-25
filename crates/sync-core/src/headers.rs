@@ -302,11 +302,11 @@ fn reserved_header_reason(name: &str) -> Option<&'static str> {
         ),
         (
             "accept-ranges",
-            "the canister does not serve range (206 Partial Content) responses",
+            "range handling for large assets is managed by the canister",
         ),
         (
             "content-range",
-            "the canister does not serve range (206 Partial Content) responses",
+            "the canister sets it on the certified 206 range responses it serves for large assets",
         ),
         (
             "ic-certificate",

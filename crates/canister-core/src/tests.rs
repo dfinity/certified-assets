@@ -1,6 +1,4 @@
-use crate::http::{
-    CallbackFunc, HttpRequest, HttpResponse, StreamingCallbackToken, StreamingStrategy,
-};
+use crate::http::{HttpRequest, HttpResponse};
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
@@ -27,10 +25,6 @@ const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
 
 fn some_principal() -> Principal {
     Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
-}
-
-fn unused_callback() -> CallbackFunc {
-    CallbackFunc::new(some_principal(), "unused".to_string())
 }
 
 /// Simulates a canister upgrade: drop the live `State` and rebuild a fresh one
@@ -128,7 +122,7 @@ pub fn verify_response(
 }
 
 fn certified_http_request(state: &State, request: HttpRequest) -> HttpResponse {
-    let response = state.http_request(request.clone(), &[], unused_callback());
+    let response = state.http_request(request.clone(), &[]);
     match verify_response(state, &request, &response) {
         Err(err) => {
             panic!("Response verification failed with error {err:?}. Response: {response:#?}")
@@ -787,11 +781,7 @@ fn no_implicit_aliasing_without_rules() {
     );
 
     for missing in &["/foo", "/foo/", "/blog", "/blog/"] {
-        let response = state.http_request(
-            RequestBuilder::get(*missing).build(),
-            &[],
-            unused_callback(),
-        );
+        let response = state.http_request(RequestBuilder::get(*missing).build(), &[]);
         assert_eq!(
             response.status_code, 404,
             "expected 404 for {missing}, got {}",
@@ -861,192 +851,370 @@ fn authorized_set_survives_stable_roundtrip() {
     assert!(restored.is_authorized(&p));
 }
 
+// ───────── HTTP 206 range serving ─────────
+
+/// A plain GET (no Range) of a multi-chunk asset returns chunk 0 as a 206 — this
+/// is what drives the gateway's reassembly into a full 200.
 #[test]
-fn uses_streaming_for_multichunk_assets() {
+fn multichunk_plain_get_serves_206_first_chunk() {
     let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const INDEX_BODY_CHUNK_1: &[u8] = b"<!DOCTYPE html>";
-    const INDEX_BODY_CHUNK_2: &[u8] = b"<html>Index</html>";
-
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"first-chunk-bytes--";
+    const C1: &[u8] = b"second-chunk";
     create_assets(
         &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![INDEX_BODY_CHUNK_1, INDEX_BODY_CHUNK_2])],
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
     );
 
-    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
-    let response = state.http_request(
-        RequestBuilder::get("/index.html")
-            .with_header("Accept-Encoding", "gzip,identity")
+    let resp = certified_http_request(
+        &state,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
             .build(),
-        &[],
-        streaming_callback.clone(),
     );
 
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), INDEX_BODY_CHUNK_1);
-
-    let StreamingStrategy::Callback { callback, token } = response
-        .streaming_strategy
-        .expect("missing streaming strategy");
-    assert_eq!(callback, streaming_callback);
-
-    let streaming_response = state.http_request_streaming_callback(token);
-    assert_eq!(streaming_response.body.as_ref(), INDEX_BODY_CHUNK_2);
-    assert!(
-        streaming_response.token.is_none(),
-        "Unexpected streaming response: {streaming_response:?}"
-    );
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C0);
+    let total = C0.len() + C1.len();
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
 }
 
+/// A Range request whose start is a chunk boundary returns exactly that chunk.
 #[test]
-fn streams_three_chunks_chaining_continuation_tokens() {
+fn range_request_returns_containing_chunk() {
     let mut state = State::default();
-    let system_context = mock_system_context();
-
-    // Three chunks exercise the mid-stream case a 2-chunk asset never reaches:
-    // the callback must itself return a *continuation* token (not a terminator)
-    // for the middle chunk.
-    const C0: &[u8] = b"chunk-zero-";
-    const C1: &[u8] = b"chunk-one--";
-    const C2: &[u8] = b"chunk-two";
-
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    const C2: &[u8] = b"CCC";
     create_assets(
         &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/big.html", "text/html").with_encoding("identity", vec![C0, C1, C2])
-        ],
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1, C2])],
+    );
+    let total = C0.len() + C1.len() + C2.len();
+
+    let resp = certified_http_request(
+        &state,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", format!("bytes={}-", C0.len()))
+            .build(),
     );
 
-    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
-    let response = state.http_request(
-        RequestBuilder::get("/big.html").build(),
-        &[],
-        streaming_callback.clone(),
-    );
-
-    // First response: 200 with chunk 0 inline and a strategy pointing at chunk 1.
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), C0);
-    let StreamingStrategy::Callback { callback, token } = response
-        .streaming_strategy
-        .expect("missing streaming strategy");
-    assert_eq!(callback, streaming_callback);
-    assert_eq!(token.index, 1);
-
-    // Middle chunk: the callback returns chunk 1 *and* a continuation token for
-    // chunk 2 — the branch that never fires with only two chunks.
-    let second = state.http_request_streaming_callback(token);
-    assert_eq!(second.body.as_ref(), C1);
-    let next = second
-        .token
-        .expect("expected a continuation token for the final chunk");
-    assert_eq!(next.index, 2);
-
-    // Final chunk: body served, token is None to end the stream.
-    let third = state.http_request_streaming_callback(next);
-    assert_eq!(third.body.as_ref(), C2);
-    assert!(
-        third.token.is_none(),
-        "stream must terminate after the last chunk: {third:?}"
-    );
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C1);
+    let cr = format!("bytes {}-{}/{}", C0.len(), C0.len() + C1.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
 }
 
+/// A Range start in the middle of a chunk snaps down to that chunk's boundary:
+/// the whole containing chunk is returned (sub-chunk slices can't be certified).
 #[test]
-fn streams_multichunk_non_identity_encoding() {
+fn range_request_mid_chunk_snaps_to_chunk_start() {
     let mut state = State::default();
-    let system_context = mock_system_context();
-
-    // A gzip encoding split across two chunks: streaming must work for an
-    // encoding that also emits a `content-encoding` header, not just identity.
-    const GZIP_CHUNK_1: &[u8] = b"\x1f\x8b\x08\x00fake-gzip-bytes-1";
-    const GZIP_CHUNK_2: &[u8] = b"fake-gzip-bytes-2";
-
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
     create_assets(
         &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/app.js", "text/javascript")
-            .with_encoding("gzip", vec![GZIP_CHUNK_1, GZIP_CHUNK_2])],
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    // Ask for a byte 2 into chunk 1; expect the whole of chunk 1 back.
+    let resp = certified_http_request(
+        &state,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", format!("bytes={}-", C0.len() + 2))
+            .build(),
     );
 
-    let streaming_callback = CallbackFunc::new(some_principal(), "stream".to_string());
-    let response = state.http_request(
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C1);
+    let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// A range that spans multiple chunks returns only the chunk containing its
+/// start; the client (or gateway) fetches the rest with follow-up requests.
+#[test]
+fn range_spanning_chunks_returns_single_chunk() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    // Closed range covering the whole asset → still just chunk 0.
+    let resp = certified_http_request(
+        &state,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", format!("bytes=0-{}", total - 1))
+            .build(),
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C0);
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// An unsatisfiable range (start past the end) ignores the Range and serves the
+/// asset as a 206 chunk 0 — never a truncated 200.
+#[test]
+fn out_of_range_serves_full_asset_via_206() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    let resp = certified_http_request(
+        &state,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", format!("bytes={}-", total + 100))
+            .build(),
+    );
+
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C0);
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+}
+
+/// A conditional request takes precedence over Range: a matching `If-None-Match`
+/// yields a 304 even when a `Range` header is present.
+#[test]
+fn conditional_request_with_range_returns_304() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+
+    // First request: read the canister-managed etag off the 206.
+    let first = certified_http_request(
+        &state,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .build(),
+    );
+    let etag = lookup_header(&first, "etag")
+        .expect("206 carries an etag")
+        .to_string();
+
+    let resp = certified_http_request(
+        &state,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("If-None-Match", &etag)
+            .with_header("Range", "bytes=10-")
+            .build(),
+    );
+
+    assert_eq!(resp.status_code, 304);
+    assert!(resp.body.as_ref().is_empty());
+}
+
+/// A single-chunk asset ignores Range and serves the full body as a 200.
+#[test]
+fn single_chunk_asset_ignores_range() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const BODY: &[u8] = b"a small body that fits in one chunk";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/small.txt", "text/plain").with_encoding("identity", vec![BODY])],
+    );
+
+    let resp = certified_http_request(
+        &state,
+        RequestBuilder::get("/small.txt")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", "bytes=5-")
+            .build(),
+    );
+
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(resp.body.as_ref(), BODY);
+    assert_eq!(lookup_header(&resp, "content-range"), None);
+}
+
+/// Range serving works for a non-identity encoding: the 206 carries
+/// `content-encoding` and ranges over the *encoded* bytes.
+#[test]
+fn range_request_non_identity_encoding() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const G0: &[u8] = b"\x1f\x8b\x08\x00gzip-chunk-0";
+    const G1: &[u8] = b"gzip-chunk-1";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/app.js", "text/javascript").with_encoding("gzip", vec![G0, G1])],
+    );
+    let total = G0.len() + G1.len();
+
+    let resp = certified_http_request(
+        &state,
         RequestBuilder::get("/app.js")
             .with_header("Accept-Encoding", "gzip")
+            .with_header("Range", format!("bytes={}-", G0.len()))
             .build(),
-        &[],
-        streaming_callback.clone(),
     );
 
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), GZIP_CHUNK_1);
-    assert_eq!(lookup_header(&response, "content-encoding"), Some("gzip"));
-
-    let StreamingStrategy::Callback { callback, token } = response
-        .streaming_strategy
-        .expect("missing streaming strategy");
-    assert_eq!(callback, streaming_callback);
-
-    let second = state.http_request_streaming_callback(token);
-    assert_eq!(second.body.as_ref(), GZIP_CHUNK_2);
-    assert!(second.token.is_none(), "stream should end after chunk 2");
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), G1);
+    assert_eq!(lookup_header(&resp, "content-encoding"), Some("gzip"));
+    let cr = format!("bytes {}-{}/{}", G0.len(), total - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
 }
 
+/// After an upgrade, multi-chunk assets still serve 206s with correct
+/// `Content-Range` — proof the per-chunk cert data (`chunk_certs` + `content_len`)
+/// is persisted and `post_upgrade_rebuild` re-certifies the 206s content-free.
 #[test]
-fn single_chunk_asset_has_no_streaming_strategy() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
+fn range_serving_survives_upgrade() {
+    let memory = DefaultMemoryImpl::default();
+    let mut state = State::new(memory.clone());
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
     create_assets(
         &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/small.html", "text/html")
-            .with_encoding("identity", vec![b"<html></html>"])],
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+
+    let restored = upgrade(state, memory.clone());
+
+    let resp = certified_http_request(
+        &restored,
+        RequestBuilder::get("/big.bin")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", format!("bytes={}-", C0.len()))
+            .build(),
     );
 
-    let response = state.http_request(
-        RequestBuilder::get("/small.html").build(),
-        &[],
-        unused_callback(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert!(
-        response.streaming_strategy.is_none(),
-        "a single-chunk asset must not advertise streaming: {response:?}"
-    );
+    assert_eq!(resp.status_code, 206);
+    assert_eq!(resp.body.as_ref(), C1);
+    let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
+    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
 }
 
+/// Range forms the canister doesn't honour — a suffix range (`bytes=-N`), a
+/// multi-range list, and a syntactically broken spec — all parse to "no range"
+/// and serve the asset as a certified 206 chunk 0 (never a truncated 200), which
+/// the gateway reassembles into the full 200.
 #[test]
-fn streaming_callback_with_bogus_content_id_serves_empty_body() {
-    // The self-describing token is no longer validated against `AssetMeta`: a
-    // forged `content_id` simply misses the content store and yields an empty
-    // body (rather than trapping). The HTTP gateway's `sha256` check on the
-    // accumulated stream is what rejects such a response, so no uncertified
-    // bytes are served.
+fn unhonoured_range_forms_serve_certified_206_chunk_0() {
     let mut state = State::default();
-    let system_context = mock_system_context();
-
+    let ctx = mock_system_context();
+    const C0: &[u8] = b"AAAAAAAAAA";
+    const C1: &[u8] = b"BBBBBBB";
     create_assets(
         &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![b"a", b"b"])],
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+    let total = C0.len() + C1.len();
+    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+
+    for range in ["bytes=-500", "bytes=0-1,5-6", "bytes=abc-", "kingdoms=0-"] {
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", range)
+                .build(),
+        );
+        assert_eq!(resp.status_code, 206, "range {range:?}");
+        assert_eq!(resp.body.as_ref(), C0, "range {range:?}");
+        assert_eq!(
+            lookup_header(&resp, "content-range"),
+            Some(cr.as_str()),
+            "range {range:?}"
+        );
+    }
+}
+
+/// Range/chunk behaviour follows the *selected* encoding, not the asset. A file
+/// stored as a 2-chunk identity plus a 1-chunk (compressed-below-threshold) gzip
+/// serves a 206 when identity is chosen but a plain 200 when gzip is chosen —
+/// both certified.
+#[test]
+fn range_follows_selected_encoding_chunk_count() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    const I0: &[u8] = b"identity-chunk-0--";
+    const I1: &[u8] = b"identity-chunk-1";
+    const GZ: &[u8] = b"\x1f\x8b\x08\x00small-gzip";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/app.js", "text/javascript")
+            .with_encoding("identity", vec![I0, I1])
+            .with_encoding("gzip", vec![GZ])],
     );
 
-    let response = state.http_request_streaming_callback(StreamingCallbackToken {
-        content_id: u64::MAX,
-        index: 1,
-        num_chunks: 2,
-        sha256: ByteBuf::from([0u8; 32].as_slice()),
-    });
-    assert!(
-        response.body.as_ref().is_empty(),
-        "a token pointing at a nonexistent content group must serve no bytes"
+    // gzip is single-chunk → Range ignored, full 200.
+    let gz = certified_http_request(
+        &state,
+        RequestBuilder::get("/app.js")
+            .with_header("Accept-Encoding", "gzip")
+            .with_header("Range", "bytes=4-")
+            .build(),
     );
+    assert_eq!(gz.status_code, 200);
+    assert_eq!(gz.body.as_ref(), GZ);
+    assert_eq!(lookup_header(&gz, "content-encoding"), Some("gzip"));
+    assert_eq!(lookup_header(&gz, "content-range"), None);
+
+    // identity is two chunks → Range honoured, certified 206.
+    let id = certified_http_request(
+        &state,
+        RequestBuilder::get("/app.js")
+            .with_header("Accept-Encoding", "identity")
+            .with_header("Range", format!("bytes={}-", I0.len()))
+            .build(),
+    );
+    assert_eq!(id.status_code, 206);
+    assert_eq!(id.body.as_ref(), I1);
+    assert_eq!(lookup_header(&id, "content-encoding"), None);
+    let total = I0.len() + I1.len();
+    let cr = format!("bytes {}-{}/{}", I0.len(), total - 1, total);
+    assert_eq!(lookup_header(&id, "content-range"), Some(cr.as_str()));
 }
 
 #[test]
@@ -1351,11 +1519,7 @@ fn rule_aliasing_persists_through_upgrade() {
     // "aliasing disabled" path); still install one for the subdirectory.
     set_exact_rewrite_rule(&mut state, "/subdirectory", "/subdirectory/index.html");
 
-    let no_alias = state.http_request(
-        RequestBuilder::get("/contents").build(),
-        &[],
-        unused_callback(),
-    );
+    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[]);
     assert_eq!(no_alias.status_code, 404);
 
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
@@ -1363,11 +1527,7 @@ fn rule_aliasing_persists_through_upgrade() {
 
     let state = upgrade(state, memory.clone());
 
-    let no_alias = state.http_request(
-        RequestBuilder::get("/contents").build(),
-        &[],
-        unused_callback(),
-    );
+    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[]);
     assert_eq!(no_alias.status_code, 404);
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
     assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
@@ -1726,7 +1886,6 @@ mod certification {
         );
         assert_eq!(not_modified.status_code, 304);
         assert!(not_modified.body.is_empty());
-        assert!(not_modified.streaming_strategy.is_none());
         assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
 
         // A stale etag still serves the full, certified 200.
@@ -2338,7 +2497,7 @@ mod redirect_rules {
             })],
         )
         .unwrap();
-        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[]);
         assert_eq!(inert.status_code, 404);
 
         // Add the asset → rule fires.
@@ -2366,8 +2525,7 @@ mod redirect_rules {
 
         // Delete the target → rule goes inert again.
         delete_asset_via_batch(&mut state, "/foo.html");
-        let after_delete =
-            state.http_request(RequestBuilder::get("/foo").build(), &[], unused_callback());
+        let after_delete = state.http_request(RequestBuilder::get("/foo").build(), &[]);
         assert_eq!(after_delete.status_code, 404);
     }
 
@@ -2591,11 +2749,7 @@ mod redirect_rules {
         )
         .unwrap();
         // Target doesn't exist → rule inert → built-in fall-through 404.
-        let inert = state.http_request(
-            RequestBuilder::get("/missing").build(),
-            &[],
-            unused_callback(),
-        );
+        let inert = state.http_request(RequestBuilder::get("/missing").build(), &[]);
         assert_eq!(inert.status_code, 404);
         // The body is the built-in "not found", not the (missing) /404.html.
         assert_eq!(inert.body.as_ref(), b"not found");
@@ -2610,6 +2764,141 @@ mod redirect_rules {
         let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
         assert_eq!(response.status_code, 404);
         assert_eq!(response.body.as_ref(), PAGE);
+    }
+
+    #[test]
+    fn rejects_4xx_rule_to_existing_multichunk_target() {
+        // A 404/410 custom error page is served as a single inline body, so a
+        // multi-chunk target can't carry it. Setting such a rule when the target
+        // already exists and is multi-chunk must fail the whole op (which traps
+        // at the canister boundary).
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+        );
+        for status in [404u16, 410] {
+            let err = commit(
+                &mut state,
+                vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                    rules: vec![RedirectRule {
+                        from: RulePattern::Exact("/missing".into()),
+                        to: "/404.html".into(),
+                        status,
+                        headers: vec![],
+                    }],
+                })],
+            )
+            .unwrap_err();
+            assert!(err.contains("multi-chunk asset"), "status {status}: {err}");
+        }
+    }
+
+    #[test]
+    fn allows_200_rule_to_existing_multichunk_target() {
+        // The 4xx guard must not reject a 200 rewrite to a multi-chunk asset —
+        // that path is served as N×206 and is fully supported.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/large.bin", "application/octet-stream")
+                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+        );
+        commit(
+            &mut state,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/landing".into()),
+                    to: "/large.bin".into(),
+                    status: 200,
+                    headers: vec![],
+                }],
+            })],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn alias_200_to_multichunk_target_serves_certified_206() {
+        // Unit-level coverage of the 200-rewrite → multi-chunk path (otherwise
+        // only exercised by the e2e suite): both a plain GET (chunk 0) and a
+        // Range request must return a *certified* 206 at the alias location.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/large.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+        commit(
+            &mut state,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/landing".into()),
+                    to: "/large.bin".into(),
+                    status: 200,
+                    headers: vec![],
+                }],
+            })],
+        )
+        .unwrap();
+
+        let plain = certified_http_request(
+            &state,
+            RequestBuilder::get("/landing")
+                .with_header("Accept-Encoding", "identity")
+                .build(),
+        );
+        assert_eq!(plain.status_code, 206);
+        assert_eq!(plain.body.as_ref(), C0);
+
+        let ranged = certified_http_request(
+            &state,
+            RequestBuilder::get("/landing")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", format!("bytes={}-", C0.len()))
+                .build(),
+        );
+        assert_eq!(ranged.status_code, 206);
+        assert_eq!(ranged.body.as_ref(), C1);
+    }
+
+    #[test]
+    fn alias_4xx_to_multichunk_target_degrades_to_certified_builtin_404() {
+        // Defense in depth: even if a 4xx rule pointing at a multi-chunk target
+        // slips past the op guard (e.g. the target grew multi-chunk after the
+        // rule was set), the rule must go inert rather than emit an
+        // unverifiable response. `build_alias_rule_entry` skips multi-chunk
+        // encodings for non-200 status, so the path falls through to the
+        // built-in certified 404.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/404.html", "text/html")
+                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+        );
+        // Install the rule directly via state (bypassing the op guard) to model
+        // the "target grew multi-chunk later" ordering.
+        state.set_redirect_rules(vec![RedirectRule {
+            from: RulePattern::Subtree("/legacy/".into()),
+            to: "/404.html".into(),
+            status: 404,
+            headers: vec![],
+        }]);
+
+        let resp = certified_http_request(&state, RequestBuilder::get("/legacy/x").build());
+        assert_eq!(resp.status_code, 404);
+        assert_eq!(resp.body.as_ref(), b"not found");
     }
 
     #[test]

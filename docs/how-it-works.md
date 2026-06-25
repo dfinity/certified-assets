@@ -24,14 +24,16 @@ This is also why [redirects](redirects.md#what-isnt-supported-dynamic-rules) and
 [headers](headers.md#reserved-headers) are constrained to what can be enumerated and
 certified ahead of time.
 
-## Streaming large assets
+## Serving large assets
 
-A single canister response has a bounded message size, so large files can't be
-returned in one shot. The canister instead returns the first chunk plus a
-**streaming token**; the gateway calls back repeatedly to fetch the remaining chunks
-and reassembles them into the full response for the browser. Each chunk is certified,
-so streaming a large file is as tamper-proof as a small one — and it's all transparent
-to the client.
+A single canister response has a bounded message size, so a large file can't be
+returned in one shot. The canister splits it into chunks and serves each chunk as a
+certified **`206 Partial Content`** response carrying a `Content-Range`. For an
+ordinary request the **[HTTP gateway](https://docs.internetcomputer.org/references/http-gateway-protocol-spec/)**
+fetches the chunks and reassembles them into the full `200` the browser sees; a client
+that sends a `Range` header gets back the chunk covering the bytes it asked for. Either
+way every chunk is certified, so a large file is exactly as tamper-proof as a small one
+— and it's all transparent to the client.
 
 ## The sync plugin and its sandbox
 

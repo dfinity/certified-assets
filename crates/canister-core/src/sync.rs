@@ -254,6 +254,25 @@ impl State {
                                 validation = Err(e);
                                 break;
                             }
+                            // A 404/410 custom error page is served as a single
+                            // inline body, so its target must be single-chunk
+                            // (see `State::build_alias_rule_entry`). Reject up
+                            // front when the target already exists and is
+                            // multi-chunk. A target that doesn't exist yet is
+                            // allowed — the rule stays inert until it does. The
+                            // sync-plugin enforces the same cross-check at deploy
+                            // time; this guards against other callers.
+                            if matches!(rule.status, 404 | 410)
+                                && self.target_is_multichunk(&rule.to)
+                            {
+                                validation = Err(format!(
+                                    "redirect rule to '{}' with status {} points to a \
+                                     multi-chunk asset; 404/410 error pages must be small \
+                                     enough to serve as a single chunk (< ~1.9 MB)",
+                                    rule.to, rule.status
+                                ));
+                                break;
+                            }
                         }
                         validation.map(|_| self.set_redirect_rules(arg.rules.clone()))
                     }

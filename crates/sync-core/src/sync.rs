@@ -43,6 +43,52 @@ struct ProjectAsset {
     encodings: HashMap<Encoding, ProjectAssetEncoding>,
 }
 
+impl ProjectAsset {
+    /// Whether any encoding will be stored as more than one chunk. Only
+    /// encodings staged for upload carry their bytes here; an encoding already
+    /// in place on the canister has its `data` cleared, so this under-reports
+    /// for unchanged assets — the canister's `SetRedirectRules` guard backstops
+    /// that case. Used to reject 4xx error-page rules whose target is too large
+    /// to serve as a single inline body (see [`validate_error_page_targets`]).
+    fn is_multichunk(&self) -> bool {
+        self.encodings
+            .values()
+            .any(|e| e.data.len() > MAX_CHUNK_SIZE)
+    }
+}
+
+/// Rejects 404/410 rules whose target asset will be multi-chunk. A custom error
+/// page is served as a single inline body with the override status (the gateway
+/// only reassembles 206 chunks into a *200*), so a target larger than one chunk
+/// can't carry it — the canister would fall back to its built-in 404 and the
+/// response would fail certification. Catching it here points the user at the
+/// offending `_redirects` rule before any sync starts.
+fn validate_error_page_targets(
+    rules: &[RedirectRule],
+    project_assets: &HashMap<String, ProjectAsset>,
+) -> Result<(), String> {
+    for rule in rules {
+        if !matches!(rule.status, 404 | 410) {
+            continue;
+        }
+        if project_assets
+            .get(&rule.to)
+            .is_some_and(ProjectAsset::is_multichunk)
+        {
+            let from = match &rule.from {
+                RulePattern::Exact(p) | RulePattern::Subtree(p) => p,
+            };
+            return Err(format!(
+                "_redirects: rule `{} {} {}` points to a multi-chunk asset; \
+                 404/410 error pages must be small enough to serve as a single \
+                 chunk (< {} bytes). Shrink `{}`, or use a 3xx redirect instead.",
+                from, rule.to, rule.status, MAX_CHUNK_SIZE, rule.to
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Ensures the signing identity can sync assets, before any expensive scanning
 /// or diffing work happens — so an unauthorized run fails fast instead of after
 /// reading and encoding the whole project.
@@ -217,6 +263,9 @@ pub fn sync<C: CanisterCall>(
         let asset = prepare_branded_404(&canister_assets)?;
         project_assets.insert(asset.source.key.clone(), asset);
     }
+
+    // Reject oversized 4xx error-page targets before starting a sync.
+    validate_error_page_targets(&project_rules, &project_assets)?;
 
     if build_operations(
         &project_assets,
@@ -929,6 +978,62 @@ mod tests {
                 encodings: enc_map,
             },
         )
+    }
+
+    fn err_page_rule(from: &str, to: &str, status: u16) -> RedirectRule {
+        RedirectRule {
+            from: RulePattern::Exact(from.to_string()),
+            to: to.to_string(),
+            status,
+            headers: vec![],
+        }
+    }
+
+    #[test]
+    fn validate_rejects_4xx_rule_to_multichunk_target() {
+        let assets = HashMap::from([mk_pending_asset(
+            "/404.html",
+            "identity",
+            vec![0u8; MAX_CHUNK_SIZE + 1], // 2 chunks
+        )]);
+        for status in [404, 410] {
+            let rules = vec![err_page_rule("/missing", "/404.html", status)];
+            let err = validate_error_page_targets(&rules, &assets).unwrap_err();
+            assert!(err.contains("multi-chunk asset"), "got: {err}");
+            assert!(err.contains("/404.html"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_4xx_rule_to_single_chunk_target() {
+        let assets = HashMap::from([mk_pending_asset(
+            "/404.html",
+            "identity",
+            vec![0u8; MAX_CHUNK_SIZE], // exactly 1 chunk
+        )]);
+        let rules = vec![err_page_rule("/missing", "/404.html", 404)];
+        validate_error_page_targets(&rules, &assets).unwrap();
+    }
+
+    #[test]
+    fn validate_ignores_non_4xx_rules_to_multichunk_target() {
+        // A 200 rewrite to a multi-chunk target is fine (served as N×206).
+        let assets = HashMap::from([mk_pending_asset(
+            "/large.bin",
+            "identity",
+            vec![0u8; MAX_CHUNK_SIZE + 1],
+        )]);
+        let rules = vec![err_page_rule("/landing", "/large.bin", 200)];
+        validate_error_page_targets(&rules, &assets).unwrap();
+    }
+
+    #[test]
+    fn validate_ignores_4xx_rule_to_absent_target() {
+        // Target not in the project (doesn't exist yet) → the plugin can't size
+        // it; the canister guard backstops it. No error here.
+        let assets: HashMap<String, ProjectAsset> = HashMap::new();
+        let rules = vec![err_page_rule("/missing", "/404.html", 404)];
+        validate_error_page_targets(&rules, &assets).unwrap();
     }
 
     #[test]

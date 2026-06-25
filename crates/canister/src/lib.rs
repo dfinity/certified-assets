@@ -1,8 +1,7 @@
 use candid::Principal;
 use canister_core::{
-    guard_can_sync, guard_is_controller, AssetDetails, ExecuteOperationsArguments, RedirectRule,
-    StartSyncResult, UploadChunksArguments, Version,
-    {HttpRequest, HttpResponse, StreamingCallbackHttpResponse, StreamingCallbackToken},
+    guard_can_sync, guard_is_controller, AssetDetails, ExecuteOperationsArguments, HttpRequest,
+    HttpResponse, RedirectRule, StartSyncResult, UploadChunksArguments, Version,
 };
 use ic_cdk::{post_upgrade, query, update};
 
@@ -31,11 +30,6 @@ fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     canister_core::http_request(req)
-}
-
-#[query]
-fn http_request_streaming_callback(token: StreamingCallbackToken) -> StreamingCallbackHttpResponse {
-    canister_core::http_request_streaming_callback(token)
 }
 
 #[query]

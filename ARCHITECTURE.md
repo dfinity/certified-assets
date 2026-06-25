@@ -23,7 +23,7 @@ the wasm build target. All crates live under [`crates/`](crates/):
 
 | Crate | Kind | Role |
 |-------|------|------|
-| [`canister-core`](crates/canister-core/) | library | Asset storage, certification (response verification), streaming, and access control. Can also be embedded in other canisters. |
+| [`canister-core`](crates/canister-core/) | library | Asset storage, certification (response verification), large-asset range serving, and access control. Can also be embedded in other canisters. |
 | [`canister`](crates/canister/) | `cdylib`, `wasm32-unknown-unknown` | Thin wrapper that exposes `canister-core` as the deployable ICP assets canister. |
 | [`sync-core`](crates/sync-core/) | library | Platform-agnostic sync logic: directory scanning, MIME detection, content encoding, `_headers`/`_redirects` parsing, canister diffing, and the `CanisterCall` trait that abstracts the transport layer. |
 | [`sync-plugin`](crates/sync-plugin/) | `cdylib`, `wasm32-wasip2` | Thin `icp-cli` sync plugin that wraps `sync-core`. |
@@ -39,8 +39,8 @@ target — `canister` wraps `canister-core`, `sync-plugin` wraps `sync-core`.
    call to the canister.
 2. The canister picks the best stored encoding for the client's `Accept-Encoding`,
    handles conditional requests (`If-None-Match` → `304`), and returns a response
-   carrying its certificate. Large bodies are returned in chunks via a streaming
-   callback.
+   carrying its certificate. Large bodies are split into chunks, each served as a
+   certified `206` range response that the gateway reassembles into the full `200`.
 3. The gateway verifies the certificate against the canister's certified data before
    forwarding the response, so the browser only ever sees content the canister has
    provably committed to.

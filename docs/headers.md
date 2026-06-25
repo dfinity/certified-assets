@@ -60,8 +60,9 @@ Unlike other headers, `Content-Type` is single-valued and first-match-wins.
 The canister applies **no default headers** — no `Cache-Control`, no security headers,
 no CSP. If you want them, declare them in `_headers`. The only response headers the
 canister manages on its own are the ones tied to how it serves and certifies content:
-`Content-Type`, `Content-Encoding`, `ETag`, the certification headers, and (on HTML
-responses) its own `ic_env` cookie.
+`Content-Type`, `Content-Encoding`, `ETag`, `Content-Range` (on large-asset
+[range responses](how-it-works.md#serving-large-assets)), the certification headers,
+and (on HTML responses) its own `ic_env` cookie.
 
 A useful baseline to copy and adapt:
 
@@ -100,7 +101,7 @@ immediately.
 | `Content-Encoding` | The canister negotiates gzip/Brotli/identity per request and sets it itself. |
 | `ETag` | Derived from the content hash, so there is exactly one trustworthy validator. |
 | `Transfer-Encoding` | Body framing is handled by the HTTP gateway, not the canister. |
-| `Accept-Ranges`, `Content-Range` | The canister doesn't serve range (`206 Partial Content`) responses. |
+| `Accept-Ranges`, `Content-Range` | Range handling is canister-managed: large assets are served as certified `206 Partial Content` responses with a canister-set `Content-Range`. |
 | `IC-Certificate`, `IC-CertificateExpression` | These carry the response certificate and are canister-managed. |
 | `Location` | A `Location` here wouldn't redirect (the status stays `200`). Use [`_redirects`](redirects.md) instead. |
 

@@ -22,7 +22,7 @@
 //! `#[bench(raw)]` + [`bench_fn`] measures only the closure; the setup before it
 //! (building state, syncing assets) is excluded.
 
-use crate::http::{CallbackFunc, HttpRequest, StreamingStrategy};
+use crate::http::HttpRequest;
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, ExecuteOperationsProgress};
@@ -45,8 +45,9 @@ use wire_types::{
 /// A small single-chunk asset (typical HTML page).
 const SMALL_ASSET_BYTES: usize = 10 * 1024;
 
-/// A large multi-chunk asset. 8 × 1 MiB ⇒ 7 streaming callbacks, each of which
-/// re-fetches the asset metadata — this is where Risk A would show up.
+/// A large multi-chunk asset. 8 × 1 MiB ⇒ eight certified 206 responses, one per
+/// chunk, each re-resolving the asset from its URL (metadata read + chunk-cert
+/// scan + chunk read + witness) — this is where the per-chunk serve cost shows up.
 const LARGE_CHUNK_BYTES: usize = 1024 * 1024;
 const LARGE_NUM_CHUNKS: usize = 8;
 
@@ -70,10 +71,6 @@ fn caller() -> Principal {
     Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
 }
 
-fn callback() -> CallbackFunc {
-    CallbackFunc::new(caller(), "http_request_streaming_callback".to_string())
-}
-
 fn identity() -> Encoding {
     Encoding::from_token("identity").expect("identity is a supported encoding")
 }
@@ -95,6 +92,15 @@ fn get(url: &str) -> HttpRequest {
         body: ByteBuf::new(),
         certificate_version: Some(2),
     }
+}
+
+/// Like [`get`], but with an open-ended `Range` header — what the gateway sends
+/// when fetching a subsequent chunk of a large asset during 206 reassembly.
+fn get_range(url: &str, start: usize) -> HttpRequest {
+    let mut req = get(url);
+    req.headers
+        .push(("Range".to_string(), format!("bytes={start}-")));
+    req
 }
 
 /// Drives `execute_operations` to completion synchronously. Mirrors the
@@ -223,24 +229,19 @@ fn populate_one(key: &str, content_type: &str, num_chunks: usize, chunk_bytes: u
 fn serve_small_asset() -> BenchResult {
     let state = populate_one("/index.html", "text/html", 1, SMALL_ASSET_BYTES);
     // Sanity (not measured): a broken setup would otherwise measure the 404 path.
-    assert_eq!(
-        state
-            .http_request(get("/index.html"), &[], callback())
-            .status_code,
-        200
-    );
+    assert_eq!(state.http_request(get("/index.html"), &[]).status_code, 200);
 
     let req = get("/index.html");
-    let cb = callback();
     bench_fn(|| {
-        std::hint::black_box(state.http_request(req, &[], cb));
+        std::hint::black_box(state.http_request(req, &[]));
     })
 }
 
-/// Serving a large multi-chunk asset end to end: the first `http_request` plus
-/// every streaming callback. Each callback re-fetches and deserializes the asset
-/// metadata, so this is the bench that surfaces Risk A — its cost scales with
-/// `LARGE_NUM_CHUNKS`.
+/// Serving a large multi-chunk asset end to end the way the gateway does it: a
+/// plain GET returns chunk 0 as a 206, then one `Range` request per remaining
+/// chunk. Each call re-resolves the asset from its URL (metadata read +
+/// chunk-cert scan + chunk read + witness), so this is the bench that surfaces
+/// the per-chunk serve cost; it scales with `LARGE_NUM_CHUNKS`.
 #[bench(raw)]
 fn serve_large_asset() -> BenchResult {
     let state = populate_one(
@@ -249,26 +250,20 @@ fn serve_large_asset() -> BenchResult {
         LARGE_NUM_CHUNKS,
         LARGE_CHUNK_BYTES,
     );
-    assert_eq!(
-        state
-            .http_request(get("/big.bin"), &[], callback())
-            .status_code,
-        200
-    );
+    // Sanity (not measured): a plain GET of a multi-chunk asset is a 206 chunk 0.
+    assert_eq!(state.http_request(get("/big.bin"), &[]).status_code, 206);
 
-    let req = get("/big.bin");
-    let cb = callback();
     bench_fn(|| {
-        let resp = state.http_request(req, &[], cb);
-        std::hint::black_box(&resp.body);
-        // Walk the streaming callbacks to the last chunk.
-        let mut token = resp
-            .streaming_strategy
-            .map(|StreamingStrategy::Callback { token, .. }| token);
-        while let Some(t) = token {
-            let next = state.http_request_streaming_callback(t);
-            std::hint::black_box(&next.body);
-            token = next.token;
+        // Chunks are uniform `LARGE_CHUNK_BYTES`, so chunk `i` begins at
+        // `i * LARGE_CHUNK_BYTES`. The gateway sends the first chunk's request
+        // without a Range header and each subsequent one with `bytes={start}-`.
+        for i in 0..LARGE_NUM_CHUNKS {
+            let req = if i == 0 {
+                get("/big.bin")
+            } else {
+                get_range("/big.bin", i * LARGE_CHUNK_BYTES)
+            };
+            std::hint::black_box(state.http_request(req, &[]));
         }
     })
 }
