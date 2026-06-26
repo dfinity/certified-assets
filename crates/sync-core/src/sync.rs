@@ -487,10 +487,7 @@ fn pack_and_upload_chunks<C: CanisterCall>(
             };
             // Hash each chunk here, on the client, so the canister never has to:
             // it trusts these for multi-chunk 206 range certification.
-            enc.chunk_sha256 = chunks
-                .iter()
-                .map(|c| Sha256::digest(c).to_vec())
-                .collect();
+            enc.chunk_sha256 = chunks.iter().map(|c| Sha256::digest(c).to_vec()).collect();
             enc.chunk_ids = vec![0u64; chunks.len()];
             for (i, chunk) in chunks.into_iter().enumerate() {
                 pending.push(PendingChunk {

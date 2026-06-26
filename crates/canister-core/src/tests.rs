@@ -2074,8 +2074,7 @@ mod set_asset_content_sha256_trust {
         let system_context = mock_system_context();
         const CONTENT: &[u8] = b"Hello, World!";
         let hash = sha2::Sha256::digest(CONTENT);
-        let chunk_ids =
-            create_and_stage(&mut state, &system_context, vec![ByteBuf::from(CONTENT)]);
+        let chunk_ids = create_and_stage(&mut state, &system_context, vec![ByteBuf::from(CONTENT)]);
 
         state
             .set_asset_content(SetAssetContentArguments {
@@ -2098,8 +2097,7 @@ mod set_asset_content_sha256_trust {
         let system_context = mock_system_context();
         const CONTENT: &[u8] = b"Hello, World!";
         let wrong = sha2::Sha256::digest(b"Different content");
-        let chunk_ids =
-            create_and_stage(&mut state, &system_context, vec![ByteBuf::from(CONTENT)]);
+        let chunk_ids = create_and_stage(&mut state, &system_context, vec![ByteBuf::from(CONTENT)]);
 
         let result = state.set_asset_content(SetAssetContentArguments {
             key: "/test.txt".to_string(),
