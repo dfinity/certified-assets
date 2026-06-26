@@ -5,3 +5,6 @@
 # canbench's cached PocketIC runtime binary (~100 MB), downloaded on first run.
 # The committed baseline is canbench_results.yml, not this cache.
 .canbench/
+
+# Local working/planning doc, not a repo artifact (was committed by accident).
+BENCHMARKING.md

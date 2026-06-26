@@ -7,6 +7,7 @@
 use candid::Principal;
 use mime::Mime;
 use serde_bytes::ByteBuf;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 use crate::canister::{
@@ -32,6 +33,11 @@ const MAX_CHUNK_SIZE: usize = 1_900_000;
 struct ProjectAssetEncoding {
     chunk_ids: Vec<u64>,
     sha256: Vec<u8>,
+    // SHA-256 of each chunk, parallel to `chunk_ids`. Computed while slicing the
+    // encoded bytes in `pack_and_upload_chunks` and sent to the canister, which
+    // trusts it for multi-chunk 206 range certification (see
+    // `SetAssetContentArguments`). Empty until the chunks are packed.
+    chunk_sha256: Vec<Vec<u8>>,
     already_in_place: bool,
     // Encoded bytes held until upload; empty when already_in_place or after upload.
     data: Vec<u8>,
@@ -390,6 +396,7 @@ fn prepare_content_asset(
             ProjectAssetEncoding {
                 chunk_ids: Vec::new(),
                 sha256,
+                chunk_sha256: Vec::new(),
                 already_in_place,
                 data: if already_in_place {
                     Vec::new()
@@ -478,6 +485,9 @@ fn pack_and_upload_chunks<C: CanisterCall>(
             } else {
                 data.chunks(MAX_CHUNK_SIZE).map(|c| c.to_vec()).collect()
             };
+            // Hash each chunk here, on the client, so the canister never has to:
+            // it trusts these for multi-chunk 206 range certification.
+            enc.chunk_sha256 = chunks.iter().map(|c| Sha256::digest(c).to_vec()).collect();
             enc.chunk_ids = vec![0u64; chunks.len()];
             for (i, chunk) in chunks.into_iter().enumerate() {
                 pending.push(PendingChunk {
@@ -747,6 +757,11 @@ fn build_operations(
                 encoding,
                 chunk_ids: enc.chunk_ids.clone(),
                 sha256: ByteBuf::from(enc.sha256.clone()),
+                chunk_sha256: enc
+                    .chunk_sha256
+                    .iter()
+                    .map(|h| ByteBuf::from(h.clone()))
+                    .collect(),
             }));
         }
     }
@@ -963,6 +978,7 @@ mod tests {
             ProjectAssetEncoding {
                 chunk_ids: Vec::new(),
                 sha256: vec![0; 32],
+                chunk_sha256: Vec::new(),
                 already_in_place: false,
                 data,
             },
@@ -1075,6 +1091,34 @@ mod tests {
     }
 
     #[test]
+    fn pack_computes_per_chunk_sha256_matching_each_slice() {
+        // Two full chunks plus a partial third, with position-dependent bytes so
+        // a misaligned, duplicated, or whole-asset hash would be caught.
+        let data: Vec<u8> = (0..MAX_CHUNK_SIZE * 2 + 7).map(|i| i as u8).collect();
+        let mut assets = HashMap::from([mk_pending_asset("/big", "identity", data.clone())]);
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
+
+        let enc = &assets["/big"].encodings[&Encoding::Identity];
+        let expected: Vec<Vec<u8>> = data
+            .chunks(MAX_CHUNK_SIZE)
+            .map(|c| Sha256::digest(c).to_vec())
+            .collect();
+        assert_eq!(enc.chunk_sha256, expected);
+        // One hash per chunk id, in the same order.
+        assert_eq!(enc.chunk_sha256.len(), enc.chunk_ids.len());
+    }
+
+    #[test]
+    fn pack_empty_encoding_hashes_its_single_empty_chunk() {
+        let mut assets = HashMap::from([mk_pending_asset("/empty", "identity", vec![])]);
+        let mock = ChunkBatchRecorder::new();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
+        let enc = &assets["/empty"].encodings[&Encoding::Identity];
+        assert_eq!(enc.chunk_sha256, vec![Sha256::digest(b"").to_vec()]);
+    }
+
+    #[test]
     fn pack_collapses_many_small_chunks_into_one_call() {
         // 100 × 1KB chunks fit comfortably under MAX_CHUNK_SIZE (~1.9 MB) →
         // one call carrying all 100 chunks. This is the optimisation.
@@ -1183,6 +1227,7 @@ mod tests {
             encoding: Encoding::Identity,
             chunk_ids: vec![0u64],
             sha256: serde_bytes::ByteBuf::from(vec![0u8; 32]),
+            chunk_sha256: vec![serde_bytes::ByteBuf::from(vec![0u8; 32])],
         })
     }
 
@@ -1386,6 +1431,7 @@ mod tests {
                 ProjectAssetEncoding {
                     chunk_ids,
                     sha256: sha.clone(),
+                    chunk_sha256: Vec::new(),
                     already_in_place: *already_in_place,
                     data: vec![],
                 },

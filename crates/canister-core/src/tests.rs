@@ -295,6 +295,12 @@ fn assemble_create_assets_and_set_contents_operations(
                 hasher.update(chunk);
             }
             let sha256 = ByteBuf::from(hasher.finalize().to_vec());
+            // The canister trusts client-supplied hashes, so the helper plays the
+            // plugin's role: hash the whole encoding and each chunk before upload.
+            let chunk_sha256: Vec<ByteBuf> = chunks
+                .iter()
+                .map(|c| ByteBuf::from(sha2::Sha256::digest(c).to_vec()))
+                .collect();
             state
                 .upload_chunks(UploadChunksArguments { session_id, chunks }, system_context)
                 .unwrap();
@@ -305,6 +311,7 @@ fn assemble_create_assets_and_set_contents_operations(
                     encoding: enc,
                     chunk_ids,
                     sha256,
+                    chunk_sha256,
                 }
             }));
         }
@@ -2014,18 +2021,22 @@ mod get_asset_details {
 }
 
 #[cfg(test)]
-mod set_asset_content_sha256_verification {
+mod set_asset_content_sha256_trust {
     use super::*;
 
-    #[test]
-    fn verifies_correct_sha256() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
+    // The canister no longer recomputes the content hash on commit — it trusts
+    // the client-supplied `sha256` / `chunk_sha256` and certifies them directly.
+    // (The HTTP gateway re-verifies the body hash end-to-end, so a wrong hash
+    // only makes the asset unservable; it can never serve forged content.) These
+    // tests pin that trust behaviour and the shape validation that remains.
 
-        const CONTENT: &[u8] = b"Hello, World!";
-        let correct_hash = sha2::Sha256::digest(CONTENT);
-
-        // Create asset first
+    /// Creates `/test.txt` and stages `chunks` under a fresh session, returning
+    /// the chunk ids the canister assigned (0-based, since staging starts empty).
+    fn create_and_stage(
+        state: &mut State,
+        system_context: &SystemContext,
+        chunks: Vec<ByteBuf>,
+    ) -> Vec<u64> {
         state
             .create_asset(CreateAssetArguments {
                 key: "/test.txt".to_string(),
@@ -2033,108 +2044,18 @@ mod set_asset_content_sha256_verification {
                 headers: vec![],
             })
             .unwrap();
-
-        // Create batch and chunk
-        let session_id = start_session(&mut state, &system_context);
-        let chunks = vec![ByteBuf::from(CONTENT)];
+        let session_id = start_session(state, system_context);
         let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
         state
-            .upload_chunks(
-                UploadChunksArguments { session_id, chunks },
-                &system_context,
-            )
+            .upload_chunks(UploadChunksArguments { session_id, chunks }, system_context)
             .unwrap();
-
-        // set_asset_content with correct hash should succeed
-        let result = state.set_asset_content(SetAssetContentArguments {
-            key: "/test.txt".to_string(),
-            encoding: Encoding::Identity,
-            chunk_ids,
-            sha256: ByteBuf::from(correct_hash.as_slice()),
-        });
-
-        assert!(result.is_ok());
+        chunk_ids
     }
 
-    #[test]
-    fn rejects_incorrect_sha256() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const CONTENT: &[u8] = b"Hello, World!";
-        let incorrect_hash = sha2::Sha256::digest(b"Different content");
-
-        // Create asset first
+    /// The identity encoding's stored sha256, as the details query reports it.
+    fn stored_sha256(state: &State) -> Vec<u8> {
         state
-            .create_asset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: vec![],
-            })
-            .unwrap();
-
-        // Create batch and chunk
-        let session_id = start_session(&mut state, &system_context);
-        let chunks = vec![ByteBuf::from(CONTENT)];
-        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
-        state
-            .upload_chunks(
-                UploadChunksArguments { session_id, chunks },
-                &system_context,
-            )
-            .unwrap();
-
-        // set_asset_content with incorrect hash should fail
-        let result = state.set_asset_content(SetAssetContentArguments {
-            key: "/test.txt".to_string(),
-            encoding: Encoding::Identity,
-            chunk_ids,
-            sha256: ByteBuf::from(incorrect_hash.as_slice()),
-        });
-
-        assert_eq!(result.unwrap_err(), "sha256 mismatch");
-    }
-
-    #[test]
-    fn stores_computed_sha256() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const CONTENT: &[u8] = b"Hello, World!";
-        let expected_hash = sha2::Sha256::digest(CONTENT);
-
-        // Create asset first
-        state
-            .create_asset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: vec![],
-            })
-            .unwrap();
-
-        // Create batch and chunk
-        let session_id = start_session(&mut state, &system_context);
-        let chunks = vec![ByteBuf::from(CONTENT)];
-        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
-        state
-            .upload_chunks(
-                UploadChunksArguments { session_id, chunks },
-                &system_context,
-            )
-            .unwrap();
-
-        let result = state.set_asset_content(SetAssetContentArguments {
-            key: "/test.txt".to_string(),
-            encoding: Encoding::Identity,
-            chunk_ids,
-            sha256: ByteBuf::from(expected_hash.as_slice()),
-        });
-
-        assert!(result.is_ok());
-
-        // Verify the hash was computed correctly by inspecting the listed encoding.
-        let details = state.get_asset_details(None);
-        let encoding = details
+            .get_asset_details(None)
             .iter()
             .find(|a| a.key == "/test.txt")
             .and_then(|a| {
@@ -2142,51 +2063,110 @@ mod set_asset_content_sha256_verification {
                     .iter()
                     .find(|e| e.encoding == Encoding::Identity)
             })
-            .expect("identity encoding should be listed");
-        assert_eq!(encoding.sha256.as_ref(), expected_hash.as_slice());
+            .expect("identity encoding should be listed")
+            .sha256
+            .to_vec()
     }
 
     #[test]
-    fn verifies_sha256_with_multiple_chunks() {
+    fn stores_provided_sha256_verbatim() {
         let mut state = State::default();
         let system_context = mock_system_context();
+        const CONTENT: &[u8] = b"Hello, World!";
+        let hash = sha2::Sha256::digest(CONTENT);
+        let chunk_ids = create_and_stage(&mut state, &system_context, vec![ByteBuf::from(CONTENT)]);
 
+        state
+            .set_asset_content(SetAssetContentArguments {
+                key: "/test.txt".to_string(),
+                encoding: Encoding::Identity,
+                chunk_ids,
+                sha256: ByteBuf::from(hash.as_slice()),
+                chunk_sha256: vec![ByteBuf::from(hash.as_slice())],
+            })
+            .unwrap();
+
+        assert_eq!(stored_sha256(&state), hash.as_slice());
+    }
+
+    #[test]
+    fn trusts_sha256_without_recomputing() {
+        // A hash that does NOT match the content is accepted and stored as-is:
+        // the canister does no verification (the gateway does, end-to-end).
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const CONTENT: &[u8] = b"Hello, World!";
+        let wrong = sha2::Sha256::digest(b"Different content");
+        let chunk_ids = create_and_stage(&mut state, &system_context, vec![ByteBuf::from(CONTENT)]);
+
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            encoding: Encoding::Identity,
+            chunk_ids,
+            sha256: ByteBuf::from(wrong.as_slice()),
+            chunk_sha256: vec![ByteBuf::from(wrong.as_slice())],
+        });
+
+        assert!(result.is_ok(), "a wrong hash is trusted, not rejected");
+        assert_eq!(stored_sha256(&state), wrong.as_slice());
+    }
+
+    #[test]
+    fn multi_chunk_stores_provided_hashes() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
         const CHUNK_1: &[u8] = b"Hello, ";
         const CHUNK_2: &[u8] = b"World!";
         let mut hasher = sha2::Sha256::new();
         hasher.update(CHUNK_1);
         hasher.update(CHUNK_2);
-        let correct_hash = hasher.finalize();
+        let full = hasher.finalize();
+        let chunk_ids = create_and_stage(
+            &mut state,
+            &system_context,
+            vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
+        );
 
-        // Create asset first
-        state
-            .create_asset(CreateAssetArguments {
-                key: "/test.txt".to_string(),
-                content_type: "text/plain".to_string(),
-                headers: vec![],
-            })
-            .unwrap();
-
-        // Create batch and chunks
-        let session_id = start_session(&mut state, &system_context);
-        let chunks = vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)];
-        let chunk_ids: Vec<u64> = (0..chunks.len() as u64).collect();
-        state
-            .upload_chunks(
-                UploadChunksArguments { session_id, chunks },
-                &system_context,
-            )
-            .unwrap();
-
-        // set_asset_content with correct hash for combined chunks should succeed
         let result = state.set_asset_content(SetAssetContentArguments {
             key: "/test.txt".to_string(),
             encoding: Encoding::Identity,
             chunk_ids,
-            sha256: ByteBuf::from(correct_hash.as_slice()),
+            sha256: ByteBuf::from(full.as_slice()),
+            chunk_sha256: vec![
+                ByteBuf::from(sha2::Sha256::digest(CHUNK_1).as_slice()),
+                ByteBuf::from(sha2::Sha256::digest(CHUNK_2).as_slice()),
+            ],
         });
 
         assert!(result.is_ok());
+        assert_eq!(stored_sha256(&state), full.as_slice());
+    }
+
+    #[test]
+    fn rejects_chunk_sha256_length_mismatch() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const CHUNK_1: &[u8] = b"Hello, ";
+        const CHUNK_2: &[u8] = b"World!";
+        let chunk_ids = create_and_stage(
+            &mut state,
+            &system_context,
+            vec![ByteBuf::from(CHUNK_1), ByteBuf::from(CHUNK_2)],
+        );
+
+        // Two chunks, but only one per-chunk hash supplied.
+        let result = state.set_asset_content(SetAssetContentArguments {
+            key: "/test.txt".to_string(),
+            encoding: Encoding::Identity,
+            chunk_ids,
+            sha256: ByteBuf::from(vec![0u8; 32]),
+            chunk_sha256: vec![ByteBuf::from(sha2::Sha256::digest(CHUNK_1).as_slice())],
+        });
+
+        assert_eq!(
+            result.unwrap_err(),
+            "chunk_sha256 length must match chunk_ids"
+        );
     }
 }
 
