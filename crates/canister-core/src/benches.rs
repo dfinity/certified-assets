@@ -83,6 +83,15 @@ fn sha256_of(chunks: &[ByteBuf]) -> ByteBuf {
     ByteBuf::from(hasher.finalize().to_vec())
 }
 
+/// Per-chunk hashes the plugin would supply alongside `chunk_ids`. The canister
+/// trusts these, so the commit benches must provide them just like a real sync.
+fn chunk_sha256_of(chunks: &[ByteBuf]) -> Vec<ByteBuf> {
+    chunks
+        .iter()
+        .map(|c| ByteBuf::from(Sha256::digest(c).to_vec()))
+        .collect()
+}
+
 /// A `GET` request that accepts the identity encoding (what the benches store).
 fn get(url: &str) -> HttpRequest {
     HttpRequest {
@@ -136,6 +145,7 @@ fn stage_assets(
         let key = format!("/asset-{i}.bin");
         let chunk = ByteBuf::from(vec![i as u8; chunk_bytes]);
         let sha256 = sha256_of(std::slice::from_ref(&chunk));
+        let chunk_sha256 = chunk_sha256_of(std::slice::from_ref(&chunk));
         // Chunk ids are the staging slot indices the canister assigns in upload
         // order; one chunk per asset means the next id is the current length.
         let chunk_id = state.chunks.len() as u64;
@@ -158,6 +168,7 @@ fn stage_assets(
             encoding: identity(),
             chunk_ids: vec![chunk_id],
             sha256,
+            chunk_sha256,
         }));
     }
     (session_id, ops)
@@ -193,6 +204,7 @@ fn populate_one(key: &str, content_type: &str, num_chunks: usize, chunk_bytes: u
         .map(|i| ByteBuf::from(vec![i as u8; chunk_bytes]))
         .collect();
     let sha256 = sha256_of(&chunks);
+    let chunk_sha256 = chunk_sha256_of(&chunks);
     let chunk_ids: Vec<u64> = (0..num_chunks as u64).collect();
     state
         .upload_chunks(UploadChunksArguments { session_id, chunks }, &c)
@@ -208,6 +220,7 @@ fn populate_one(key: &str, content_type: &str, num_chunks: usize, chunk_bytes: u
             encoding: identity(),
             chunk_ids,
             sha256,
+            chunk_sha256,
         }),
     ];
     run_to_completion(
@@ -269,8 +282,9 @@ fn serve_large_asset() -> BenchResult {
 }
 
 /// Committing a sync of many small assets: the `execute_operations` commit, where
-/// chunk hashing, the stable-memory writes (metadata + content), and heap
-/// recertification happen. Setup stages the chunks and assembles the ops (not
+/// the stable-memory writes (metadata + content) and heap recertification happen.
+/// Content is no longer hashed here — the client supplies the hashes and the
+/// canister trusts them. Setup stages the chunks and assembles the ops (not
 /// measured). Divide the result by `COMMIT_NUM_ASSETS` for a per-asset figure.
 #[bench(raw)]
 fn sync_commit() -> BenchResult {
@@ -288,7 +302,9 @@ fn sync_commit() -> BenchResult {
 /// Committing a sync of one large multi-chunk asset (8 × 1 MiB). Unlike
 /// `sync_commit` (4 KiB assets, where chunk-write cost is in the noise), this
 /// surfaces the content-write coefficient — the stable write of ~8 MiB of chunk
-/// bytes — alongside the unchanged SHA-256 hashing and recertification.
+/// bytes — plus recertification. With content hashing now offloaded to the
+/// client, this write+cert cost is essentially all that's left (~15 M, down from
+/// ~1.3 B when the canister re-hashed every byte).
 #[bench(raw)]
 fn sync_commit_large() -> BenchResult {
     let mut state = State::default();
@@ -301,6 +317,7 @@ fn sync_commit_large() -> BenchResult {
         .map(|i| ByteBuf::from(vec![i as u8; LARGE_CHUNK_BYTES]))
         .collect();
     let sha256 = sha256_of(&chunks);
+    let chunk_sha256 = chunk_sha256_of(&chunks);
     let chunk_ids: Vec<u64> = (0..LARGE_NUM_CHUNKS as u64).collect();
     state
         .upload_chunks(UploadChunksArguments { session_id, chunks }, &c)
@@ -318,6 +335,7 @@ fn sync_commit_large() -> BenchResult {
                 encoding: identity(),
                 chunk_ids,
                 sha256,
+                chunk_sha256,
             }),
         ],
         is_final: true,

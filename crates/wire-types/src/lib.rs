@@ -133,12 +133,28 @@ pub struct CreateAssetArguments {
 }
 
 /// Add or change content for an asset, by content encoding.
+///
+/// Both hash fields are computed by the client (the sync plugin) and trusted by
+/// the canister — it stores them verbatim into the certified tree instead of
+/// re-hashing the uploaded bytes. This is safe because certification is verified
+/// end-to-end at the HTTP gateway: it recomputes the hash of the bytes it
+/// receives and rejects any response that doesn't match the certified hash, so a
+/// wrong hash only makes the asset unservable (a self-inflicted, immediately
+/// visible deploy error) — it can never serve forged content. Re-hashing on the
+/// canister was pure overhead: ~99% of a large asset's commit instructions.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct SetAssetContentArguments {
     pub key: String,
     pub encoding: Encoding,
     pub chunk_ids: Vec<ChunkId>,
+    /// SHA-256 of the whole encoding (all chunks concatenated). Certified as the
+    /// body hash of the single-chunk 200, and used as the encoding's identity
+    /// for sync change-detection.
     pub sha256: ByteBuf,
+    /// SHA-256 of each chunk, one entry per `chunk_ids` entry and in the same
+    /// order. Certified as the per-chunk body hash of multi-chunk 206 range
+    /// responses; ignored for single-chunk encodings (which reuse `sha256`).
+    pub chunk_sha256: Vec<ByteBuf>,
 }
 
 /// Remove content for an asset, by content encoding.

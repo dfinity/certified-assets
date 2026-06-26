@@ -286,12 +286,11 @@ impl State {
         Ok(())
     }
 
-    /// Test/helper entry point that hashes the staged chunks itself. The live
-    /// sync path hashes incrementally in `execute_operations` and calls
-    /// `complete_set_asset_content` directly.
+    /// Test/helper entry point that collects the staged chunks and delegates to
+    /// [`Self::complete_set_asset_content`]. The live sync path collects chunks
+    /// in `execute_operations` and calls that method directly.
     #[cfg(test)]
     pub fn set_asset_content(&mut self, arg: SetAssetContentArguments) -> Result<(), String> {
-        use sha2::Digest;
         if arg.chunk_ids.is_empty() {
             return Err("encoding must have at least one chunk".to_string());
         }
@@ -309,31 +308,51 @@ impl State {
             content_chunks.push(chunk);
         }
 
-        let mut hasher = sha2::Sha256::new();
-        for chunk in content_chunks.iter() {
-            hasher.update(chunk);
-        }
-        let sha256: [u8; 32] = hasher.finalize().into();
-
-        self.complete_set_asset_content(arg, content_chunks, sha256)
+        self.complete_set_asset_content(arg, content_chunks)
     }
 
     /// Writes an encoding's content into the chunk store and re-certifies the
     /// asset. Replacing an existing encoding frees the old content group first.
+    ///
+    /// The hashes in `arg` (`sha256` for the whole encoding, `chunk_sha256` per
+    /// chunk) are **trusted, not recomputed** — see [`SetAssetContentArguments`]
+    /// for why that's safe. The canister therefore does no content hashing on the
+    /// commit path; it only validates the hashes' shape before storing them.
     pub fn complete_set_asset_content(
         &mut self,
         arg: SetAssetContentArguments,
         content_chunks: Vec<ByteBuf>,
-        sha256: [u8; 32],
     ) -> Result<(), String> {
-        let provided_hash: [u8; 32] = arg
+        let sha256: [u8; 32] = arg
             .sha256
-            .into_vec()
+            .as_ref()
             .try_into()
             .map_err(|_| "invalid SHA-256".to_string())?;
-        if sha256 != provided_hash {
-            return Err("sha256 mismatch".to_string());
-        }
+
+        let num_chunks = content_chunks.len() as u32;
+        let multi_chunk = num_chunks > 1;
+
+        // Per-chunk cert data (length + hash) is only needed to serve/certify 206
+        // ranges, which only happen for multi-chunk encodings — so single-chunk
+        // assets (the common case) skip the `chunk_certs` write and reuse the
+        // whole-encoding `sha256`. For multi-chunk assets we trust the client's
+        // per-chunk hashes; parse them up front so a malformed or wrong-length
+        // list fails before any state mutation.
+        let chunk_hashes: Vec<[u8; 32]> = if multi_chunk {
+            if arg.chunk_sha256.len() != content_chunks.len() {
+                return Err("chunk_sha256 length must match chunk_ids".to_string());
+            }
+            arg.chunk_sha256
+                .iter()
+                .map(|h| {
+                    h.as_ref()
+                        .try_into()
+                        .map_err(|_| "invalid chunk SHA-256".to_string())
+                })
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
 
         let mut meta = self
             .metadata
@@ -345,25 +364,16 @@ impl State {
             self.delete_content(old.content_id);
         }
 
-        // Allocate a fresh content group and write the chunks into it. Per-chunk
-        // cert data (length + hash) is only needed to serve/certify 206 ranges,
-        // which only happen for multi-chunk encodings — so single-chunk assets
-        // (the common case) skip the extra hash and the `chunk_certs` write, and
-        // reuse the already-verified full `sha256` instead of re-hashing.
-        use sha2::Digest;
         let content_id = self.alloc_content_id();
-        let num_chunks = content_chunks.len() as u32;
-        let multi_chunk = num_chunks > 1;
         let mut content_len = 0u64;
         for (index, chunk) in content_chunks.iter().enumerate() {
             self.content.insert(content_id, index as u32, chunk);
             if multi_chunk {
-                let chunk_sha256: [u8; 32] = sha2::Sha256::digest(chunk).into();
                 self.chunk_certs.insert(
                     ContentChunkKey::new(content_id, index as u32),
                     ChunkCert {
                         len: chunk.len() as u32,
-                        sha256: chunk_sha256,
+                        sha256: chunk_hashes[index],
                     },
                 );
             }

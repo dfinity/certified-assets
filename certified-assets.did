@@ -101,13 +101,20 @@ type CreateAssetArguments = record {
 };
 
 // Add or change content for an asset, by content encoding. `chunk_ids`
-// reference chunks previously staged with `upload_chunks`, in order; `sha256`
-// must match the hash of those chunks concatenated.
+// reference chunks previously staged with `upload_chunks`, in order. Both hashes
+// are computed by the client and trusted by the canister (stored into the
+// certified tree without re-hashing): a wrong hash only makes the asset
+// unservable, since the HTTP gateway re-verifies the body hash end-to-end, so it
+// can never serve forged content.
 type SetAssetContentArguments = record {
   key: Key;
   encoding: Encoding;
   chunk_ids: vec ChunkId;
+  // SHA-256 of the whole encoding (all chunks concatenated).
   sha256: blob;
+  // SHA-256 of each chunk, parallel to chunk_ids. Used for multi-chunk 206 range
+  // certification; ignored for single-chunk encodings (which reuse `sha256`).
+  chunk_sha256: vec blob;
 };
 
 // Remove one content encoding from an asset. The asset itself remains as long as

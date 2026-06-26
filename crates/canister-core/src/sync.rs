@@ -2,8 +2,9 @@
 //!
 //! Holds the data types for a sync and its chunked uploads ([`Chunk`],
 //! [`SyncSession`]) and the incremental-computation harness used by
-//! `execute_operations` to spread expensive work across multiple canister
-//! calls ([`ComputationStatus`], [`ExecuteOperationsProgress`]).
+//! `execute_operations` to spread work across multiple canister calls
+//! ([`ComputationStatus`], [`ExecuteOperationsProgress`]) — one operation per
+//! step, so a many-operation commit can yield between operations.
 //!
 //! The State methods that drive a sync — `start_sync`, `upload_chunks`,
 //! `execute_operations` — live here too, alongside the small
@@ -15,10 +16,8 @@ use crate::runtime::SystemContext;
 use crate::state::State;
 use candid::Principal;
 use serde_bytes::ByteBuf;
-use sha2::Digest;
 use wire_types::{
-    ExecuteOperationsArguments, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
-    UploadChunksArguments,
+    ExecuteOperationsArguments, Operation, SessionId, StartSyncResult, UploadChunksArguments,
 };
 
 /// How long a sync may sit idle (no calls carrying its session id) before a
@@ -51,7 +50,6 @@ pub enum ComputationStatus<D, P, E> {
     Error(E),
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Default)]
 pub enum ExecuteOperationsProgress {
     /// Initial state when `execute_operations` is first called.
@@ -61,26 +59,13 @@ pub enum ExecuteOperationsProgress {
     /// first operation.
     #[default]
     Starting,
-    /// Processing operations one at a time.
-    ///
-    /// When a `SetAssetContent` operation is encountered, this transitions to
-    /// `HashingChunks` to hash the asset content incrementally.
+    /// Processing operations one at a time. Each call applies a single operation
+    /// (including writing a `SetAssetContent` encoding's chunks to stable memory
+    /// and re-certifying the asset), then yields so the driver can reset the
+    /// instruction counter between operations. Content is no longer hashed here:
+    /// the client supplies the hashes and the canister trusts them (see
+    /// [`State::complete_set_asset_content`](crate::state::State)).
     ProcessingOperations { operation_index: usize },
-    /// Incrementally hashing asset content chunks, one chunk per call.
-    ///
-    /// This phase is entered when processing a `SetAssetContent` operation to avoid
-    /// instruction limits when hashing large assets. The hasher processes one chunk
-    /// per call, allowing the operation to be resumed if interrupted.
-    ///
-    /// After all chunks are hashed, the hash is finalized, the asset encoding is created,
-    /// and processing continues with the next operation in `ProcessingOperations`.
-    HashingChunks {
-        operation_index: usize,
-        set_asset_content_arg: SetAssetContentArguments,
-        content_chunks: Vec<ByteBuf>,
-        chunk_index: usize,
-        hasher: sha2::Sha256,
-    },
 }
 
 impl State {
@@ -229,15 +214,11 @@ impl State {
                             content_chunks.push(chunk);
                         }
 
-                        // Start hashing phase with an empty hasher
-                        let progress = ExecuteOperationsProgress::HashingChunks {
-                            operation_index,
-                            set_asset_content_arg: arg.clone(),
-                            content_chunks,
-                            chunk_index: 0,
-                            hasher: sha2::Sha256::new(),
-                        };
-                        return ComputationStatus::InProgress(progress);
+                        // The client supplied the content hashes; the canister
+                        // trusts them, so there's no per-chunk hashing pass to
+                        // spread across calls — write the encoding and certify it
+                        // in this single step.
+                        self.complete_set_asset_content(arg.clone(), content_chunks)
                     }
                     Operation::UnsetAssetContent(arg) => self.unset_asset_content(arg.clone()),
                     Operation::DeleteAsset(arg) => {
@@ -285,43 +266,6 @@ impl State {
                     operation_index: operation_index + 1,
                 };
                 ComputationStatus::InProgress(progress)
-            }
-            ExecuteOperationsProgress::HashingChunks {
-                operation_index,
-                set_asset_content_arg,
-                content_chunks,
-                chunk_index,
-                mut hasher,
-            } => {
-                if chunk_index >= content_chunks.len() {
-                    // All chunks hashed, finalize and complete set_asset_content
-                    let sha256: [u8; 32] = hasher.finalize().into();
-
-                    if let Err(e) = self.complete_set_asset_content(
-                        set_asset_content_arg.clone(),
-                        content_chunks,
-                        sha256,
-                    ) {
-                        return ComputationStatus::Error(e);
-                    }
-
-                    // Continue with next operation
-                    let progress = ExecuteOperationsProgress::ProcessingOperations {
-                        operation_index: operation_index + 1,
-                    };
-                    ComputationStatus::InProgress(progress)
-                } else {
-                    // Hash one chunk per iteration
-                    hasher.update(&content_chunks[chunk_index]);
-                    let progress = ExecuteOperationsProgress::HashingChunks {
-                        operation_index,
-                        set_asset_content_arg,
-                        content_chunks,
-                        chunk_index: chunk_index + 1,
-                        hasher,
-                    };
-                    ComputationStatus::InProgress(progress)
-                }
             }
         }
     }
