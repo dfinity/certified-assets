@@ -1,0 +1,12 @@
+[package]
+name = "state-hash"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wire-types = { path = "../wire-types" }
+sha2.workspace = true

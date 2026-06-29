@@ -41,6 +41,34 @@ pub struct AuthorizedSet(pub BTreeSet<Principal>);
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RedirectRules(pub Vec<RedirectRule>);
 
+/// The cached canonical **state hash** (see the `state-hash` crate). Recomputed
+/// at the end of every final `execute_operations` and stored so the public
+/// `state_hash` endpoint returns it with no recomputation. `[0; 32]` before the
+/// first sync. Its own fixed 32-byte cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct StateHash(pub [u8; 32]);
+
+impl Storable for StateHash {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.to_vec())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes);
+        Self(hash)
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 32,
+        is_fixed_size: true,
+    };
+}
+
 /// Per-asset metadata. Content bytes live in the chunk store, grouped by each
 /// encoding's `content_id`.
 #[derive(Clone, Debug, Serialize, Deserialize)]

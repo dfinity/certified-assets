@@ -25,7 +25,7 @@ use crate::certification::{
 };
 use crate::http::{HeaderField, HttpRequest, HttpResponse};
 use crate::stable_store::{
-    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, RedirectRules,
+    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, RedirectRules, StateHash,
 };
 use crate::sync::{Chunk, SyncSession};
 use crate::url::url_decode;
@@ -97,6 +97,9 @@ const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(6);
 /// Per-chunk certification data (`ContentChunkKey -> ChunkCert`); read by the
 /// 206 certify/serve paths so neither has to re-hash or fully read content.
 const CHUNK_CERT_MEMORY: MemoryId = MemoryId::new(7);
+/// Cached canonical state hash (`StateHash`), recomputed at the end of every
+/// final sync. Its own cell so the frequent counter bumps don't touch it.
+const STATE_HASH_MEMORY: MemoryId = MemoryId::new(8);
 
 pub struct State {
     // ---- durable (stable memory) ----
@@ -122,6 +125,10 @@ pub struct State {
     /// stay content-free (no re-hash in `post_upgrade`) and the serve path avoid
     /// reading every chunk to locate a range. Freed alongside its content group.
     chunk_certs: StableBTreeMap<ContentChunkKey, ChunkCert, Mem>,
+    /// Cached canonical state hash, recomputed at the end of every final sync and
+    /// returned verbatim by the public `state_hash` endpoint. `[0; 32]` until the
+    /// first sync finalizes. See [`State::cached_state_hash`].
+    state_hash: StableCell<StateHash, Mem>,
 
     // ---- transient heap (lost on upgrade) ----
     /// Chunks staged by `upload_chunks` for the current sync, in upload order:
@@ -178,6 +185,7 @@ impl State {
             metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
             content: BlobStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
             chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
+            state_hash: StableCell::init(mm.get(STATE_HASH_MEMORY), StateHash::default()),
             chunks: Vec::new(),
             sync_session: None,
             asset_hashes: CertifiedResponses::default(),
@@ -605,6 +613,113 @@ impl State {
             .take(PAGE_SIZE)
             .cloned()
             .collect()
+    }
+
+    // ---- state hash ----
+
+    /// The cached canonical state hash (see the `state-hash` crate). `[0; 32]`
+    /// before the first sync finalizes. Read by the public `state_hash` endpoint.
+    pub fn cached_state_hash(&self) -> [u8; 32] {
+        self.state_hash.get().0
+    }
+
+    /// Number of assets the staged hash will fold in — the `asset_count` written
+    /// into the digest header (see `state_hash::StateHasher::begin`).
+    pub(crate) fn state_hash_asset_count(&self) -> u64 {
+        self.metadata.len()
+    }
+
+    /// The next asset (in ascending key order) strictly after `resume_after`,
+    /// shaped as a `state_hash::ManifestAsset` ready to fold into the digest, and
+    /// returning its key so the caller can resume after it. `None` once the
+    /// keyspace is exhausted. Folding one asset per step keeps a many-asset state
+    /// within the per-message instruction limit.
+    pub(crate) fn next_manifest_asset(
+        &self,
+        resume_after: &Option<AssetKey>,
+    ) -> Option<(AssetKey, state_hash::ManifestAsset)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let lower = match resume_after {
+            Some(key) => Excluded(key.clone()),
+            None => Unbounded,
+        };
+        let (key, meta) = self.metadata.range((lower, Unbounded)).next()?.into_pair();
+        let asset = self.manifest_asset(&key, &meta);
+        Some((key, asset))
+    }
+
+    /// Builds the manifest view of one stored asset. Reads the per-encoding
+    /// `EncodingMeta` and, for multi-chunk encodings only, scans the per-chunk
+    /// `ChunkCert`s in index order — exactly the gateway-enforced hashes the
+    /// digest folds in (single-chunk encodings are covered by the whole `sha256`).
+    fn manifest_asset(&self, key: &str, meta: &AssetMeta) -> state_hash::ManifestAsset {
+        let encodings = meta
+            .encodings
+            .iter()
+            .map(|(&encoding, enc)| {
+                if enc.num_chunks > 1 {
+                    let chunks = self
+                        .chunk_certs
+                        .range(ContentChunkKey::range(enc.content_id))
+                        .map(|entry| {
+                            let (_key, cert) = entry.into_pair();
+                            state_hash::ManifestChunk {
+                                len: cert.len,
+                                sha256: cert.sha256,
+                            }
+                        })
+                        .collect();
+                    state_hash::ManifestEncoding {
+                        encoding,
+                        sha256: enc.sha256,
+                        content_len: enc.content_len,
+                        num_chunks: enc.num_chunks,
+                        chunks,
+                    }
+                } else {
+                    state_hash::ManifestEncoding::single_chunk(
+                        encoding,
+                        enc.sha256,
+                        enc.content_len,
+                    )
+                }
+            })
+            .collect();
+
+        state_hash::ManifestAsset {
+            key: key.to_string(),
+            content_type: meta.content_type.clone(),
+            headers: meta.headers.clone(),
+            encodings,
+        }
+    }
+
+    /// Folds the stored redirect rules (in match order) into `hasher` — the final
+    /// step of the staged digest, after every asset.
+    pub(crate) fn fold_redirect_rules(&self, hasher: &mut state_hash::StateHasher) {
+        hasher.write_redirect_rules(&self.redirect_rules.get().0);
+    }
+
+    /// Stores a freshly-computed state hash in its cell.
+    pub(crate) fn cache_state_hash(&mut self, hash: [u8; 32]) {
+        self.state_hash.set(StateHash(hash));
+    }
+
+    /// Recomputes the canonical state hash in one pass and caches it. Off-staging
+    /// path used by tests; production finalizes via the staged
+    /// `ExecuteOperationsProgress::HashingState` machine.
+    #[cfg(test)]
+    pub(crate) fn recompute_state_hash(&mut self) -> [u8; 32] {
+        let mut hasher = state_hash::StateHasher::begin(self.state_hash_asset_count());
+        let mut resume_after: Option<AssetKey> = None;
+        while let Some((key, asset)) = self.next_manifest_asset(&resume_after) {
+            hasher.write_asset(&asset);
+            resume_after = Some(key);
+        }
+        self.fold_redirect_rules(&mut hasher);
+        let hash = hasher.finish();
+        self.cache_state_hash(hash);
+        hash
     }
 
     // ---- HTTP serving ----

@@ -240,6 +240,20 @@ service: {
   // Whether the calling identity may sync assets (authorized or a controller).
   can_sync: () -> (bool) query;
 
+  // ───────── Verification ─────────
+
+  // The canister's canonical state hash: a 32-byte SHA-256 over its served-
+  // content model — every asset's content_type, response headers, and per-
+  // encoding content hashes, plus the redirect rules in match order. Recomputed
+  // at the end of every sync; a `blob` of 32 zero bytes before the first sync.
+  //
+  // Lets a third party verify the canister serves exactly a known frontend
+  // build: reproduce `dist/` from public source, compute the same hash locally
+  // (`state-hash-cli`), and compare. An update (not a query) so the reply is
+  // consensus-backed; public and unguarded, returning the cached value with no
+  // recomputation.
+  state_hash: () -> (blob);
+
   // ───────── Environment ─────────
 
   // Recapture the canister's `PUBLIC_*` env vars and IC root key and re-certify

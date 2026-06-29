@@ -20,6 +20,7 @@ canbench-rs = ["dep:canbench-rs"]
 
 [dependencies]
 wire-types = { path = "../wire-types" }
+state-hash = { path = "../state-hash" }
 canbench-rs = { workspace = true, optional = true }
 base64.workspace = true
 candid.workspace = true
@@ -39,6 +40,11 @@ sha2.workspace = true
 percent-encoding.workspace = true
 
 [dev-dependencies]
+# Cross-implementation test only: prepare a `dist/` the same way the sync plugin
+# does, drive it into a `State`, and assert the canister's state hash equals the
+# verifier's. Native dev-dep; never linked into the wasm.
+asset-prep = { path = "../asset-prep" }
+tempfile.workspace = true
 ic-http-certification.workspace = true
 anyhow.workspace = true
 ic-certification-testing = { git = "https://github.com/dfinity/response-verification.git", rev = "66d33cf61e6ac17ec895598dd7f584605637bb42" }

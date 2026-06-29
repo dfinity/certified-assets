@@ -368,6 +368,250 @@ fn can_create_assets_using_batch_api() {
     );
 }
 
+// ───────── state hash ─────────
+
+/// Whole-encoding SHA-256 over `chunks` concatenated, as the plugin computes it.
+fn whole_sha(chunks: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = sha2::Sha256::new();
+    for chunk in chunks {
+        hasher.update(chunk);
+    }
+    hasher.finalize().into()
+}
+
+fn chunk_sha(chunk: &[u8]) -> [u8; 32] {
+    sha2::Sha256::digest(chunk).into()
+}
+
+#[test]
+fn state_hash_is_zero_before_any_sync() {
+    let state = State::default();
+    assert_eq!(state.cached_state_hash(), [0u8; 32]);
+}
+
+#[test]
+fn state_hash_matches_manifest_digest_single_chunk() {
+    use state_hash::{digest, Manifest, ManifestAsset, ManifestEncoding};
+
+    let mut state = State::default();
+    let ctx = mock_system_context();
+
+    const BODY: &[u8] = b"hello world";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/index.html", "text/html")
+            .with_header("Cache-Control", "max-age=60")
+            .with_encoding("identity", vec![BODY])],
+    );
+
+    let cached = state.cached_state_hash();
+    assert_ne!(cached, [0u8; 32], "the hash is cached after a final sync");
+
+    // Independently rebuild the manifest the offline verifier would and digest
+    // it with the `state-hash` crate. This is the cross-implementation contract:
+    // the canister's streamed hash over stored state must equal the one-shot
+    // digest over the same logical content.
+    let expected = digest(&Manifest {
+        assets: vec![ManifestAsset {
+            key: "/index.html".to_string(),
+            content_type: "text/html".to_string(),
+            headers: vec![("Cache-Control".to_string(), "max-age=60".to_string())],
+            encodings: vec![ManifestEncoding::single_chunk(
+                Encoding::Identity,
+                whole_sha(&[BODY]),
+                BODY.len() as u64,
+            )],
+        }],
+        redirect_rules: vec![],
+    });
+    assert_eq!(cached, expected);
+
+    // Staged finalization (HashingState) and the one-shot recompute agree.
+    assert_eq!(state.recompute_state_hash(), cached);
+}
+
+#[test]
+fn state_hash_folds_per_chunk_hashes_for_multi_chunk() {
+    use state_hash::{digest, Manifest, ManifestAsset, ManifestChunk, ManifestEncoding};
+
+    let mut state = State::default();
+    let ctx = mock_system_context();
+
+    const C0: &[u8] = b"first-chunk-bytes";
+    const C1: &[u8] = b"second-chunk";
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+            .with_encoding("identity", vec![C0, C1])],
+    );
+
+    let cached = state.cached_state_hash();
+    let expected = digest(&Manifest {
+        assets: vec![ManifestAsset {
+            key: "/big.bin".to_string(),
+            content_type: "application/octet-stream".to_string(),
+            headers: vec![],
+            encodings: vec![ManifestEncoding::multi_chunk(
+                Encoding::Identity,
+                whole_sha(&[C0, C1]),
+                vec![
+                    ManifestChunk {
+                        len: C0.len() as u32,
+                        sha256: chunk_sha(C0),
+                    },
+                    ManifestChunk {
+                        len: C1.len() as u32,
+                        sha256: chunk_sha(C1),
+                    },
+                ],
+            )],
+        }],
+        redirect_rules: vec![],
+    });
+    assert_eq!(cached, expected);
+}
+
+#[test]
+fn state_hash_changes_when_content_changes() {
+    let mut state = State::default();
+    let ctx = mock_system_context();
+
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/a.txt", "text/plain").with_encoding("identity", vec![b"v1"])],
+    );
+    let before = state.cached_state_hash();
+
+    // Re-sync the same key with different bytes.
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/a.txt", "text/plain")
+            .with_encoding("identity", vec![b"v2-different"])],
+    );
+    let after = state.cached_state_hash();
+
+    assert_ne!(
+        before, after,
+        "different content yields a different state hash"
+    );
+}
+
+#[test]
+fn state_hash_survives_upgrade() {
+    let memory = DefaultMemoryImpl::default();
+    let mut state = State::new(memory.clone());
+    let ctx = mock_system_context();
+
+    create_assets(
+        &mut state,
+        &ctx,
+        vec![AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![b"hi"])],
+    );
+    let before = state.cached_state_hash();
+    assert_ne!(before, [0u8; 32]);
+
+    // The cached hash lives in stable memory, so it survives the upgrade without
+    // a recompute (no sync runs during post_upgrade_rebuild).
+    let restored = upgrade(state, memory);
+    assert_eq!(restored.cached_state_hash(), before);
+}
+
+/// Drives an `asset-prep` `PreparedProject` into `state` the way a real sync
+/// does: CreateAsset + per-encoding upload/SetAssetContent + SetRedirectRules,
+/// in one finalizing call. Mirrors the sync plugin's build_operations/pack so
+/// the resulting stored state is what a real deploy would leave.
+fn apply_prepared(state: &mut State, ctx: &SystemContext, prepared: &asset_prep::PreparedProject) {
+    let session_id = start_session(state, ctx);
+    let mut operations = vec![];
+    for pa in &prepared.assets {
+        operations.push(Operation::CreateAsset(CreateAssetArguments {
+            key: pa.key.clone(),
+            content_type: pa.content_type.clone(),
+            headers: pa.headers.clone(),
+        }));
+        for enc in &pa.encodings {
+            // Stage this encoding's chunks; ids are their staging slots.
+            let base = state.chunks.len() as u64;
+            let chunk_ids: Vec<u64> = (base..base + enc.chunks.len() as u64).collect();
+            let chunks: Vec<ByteBuf> = enc
+                .chunks
+                .iter()
+                .map(|c| ByteBuf::from(c.data.clone()))
+                .collect();
+            state
+                .upload_chunks(UploadChunksArguments { session_id, chunks }, ctx)
+                .unwrap();
+            operations.push(Operation::SetAssetContent(SetAssetContentArguments {
+                key: pa.key.clone(),
+                encoding: enc.encoding,
+                chunk_ids,
+                sha256: ByteBuf::from(enc.sha256.to_vec()),
+                chunk_sha256: enc
+                    .chunks
+                    .iter()
+                    .map(|c| ByteBuf::from(c.sha256.to_vec()))
+                    .collect(),
+            }));
+        }
+    }
+    operations.push(Operation::SetRedirectRules(
+        wire_types::SetRedirectRulesArguments {
+            rules: prepared.redirect_rules.clone(),
+        },
+    ));
+    execute_all(state, session_id, operations, ctx);
+}
+
+/// The decisive cross-implementation contract: a canister populated by a sync of
+/// `dist/` reports the **same** state hash the offline verifier computes from
+/// that same `dist/`. Covers real compressed encodings, a multi-file project,
+/// redirect rules, and the injected branded 404 — the cases the unit tests of
+/// each side don't exercise together.
+#[test]
+fn state_hash_matches_asset_prep_over_a_real_dist() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let write = |rel: &str, bytes: &[u8]| {
+        let path = dir.path().join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    };
+    // A compressible HTML page (gets gzip + brotli), a CSS file, an
+    // incompressible binary, plus `_headers` and `_redirects`.
+    write(
+        "index.html",
+        "<!DOCTYPE html><h1>hello</h1>\n".repeat(50).as_bytes(),
+    );
+    write("assets/app.css", "body{color:red}\n".repeat(80).as_bytes());
+    write(
+        "img/logo.png",
+        &(0u8..=255).cycle().take(4096).collect::<Vec<u8>>(),
+    );
+    write("_headers", b"/*\n  X-Frame-Options: DENY\n");
+    write("_redirects", b"/old /new 301\n");
+
+    let dir_str = dir.path().to_str().unwrap();
+    let prepared = asset_prep::prepare_project(dir_str).expect("prepare project");
+
+    let mut state = State::default();
+    let ctx = mock_system_context();
+    apply_prepared(&mut state, &ctx, &prepared);
+
+    let canister_hash = state.cached_state_hash();
+    let verifier_hash = asset_prep::state_hash_for_dir(dir_str).expect("verifier hash");
+    assert_eq!(
+        hex::encode(canister_hash),
+        hex::encode(verifier_hash),
+        "canister state hash must equal the offline verifier's hash of the same dist/"
+    );
+    assert_ne!(canister_hash, [0u8; 32]);
+}
+
 #[test]
 fn serve_correct_encoding() {
     let mut state = State::default();

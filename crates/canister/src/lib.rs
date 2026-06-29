@@ -1,7 +1,7 @@
 use candid::Principal;
 use canister_core::{
-    guard_can_sync, guard_is_controller, AssetDetails, ExecuteOperationsArguments, HttpRequest,
-    HttpResponse, RedirectRule, StartSyncResult, UploadChunksArguments, Version,
+    guard_can_sync, guard_is_controller, AssetDetails, ByteBuf, ExecuteOperationsArguments,
+    HttpRequest, HttpResponse, RedirectRule, StartSyncResult, UploadChunksArguments, Version,
 };
 use ic_cdk::{post_upgrade, query, update};
 
@@ -63,6 +63,17 @@ fn refresh_env() {
 #[update]
 fn list_authorized() -> Vec<Principal> {
     canister_core::list_authorized()
+}
+
+// The canister's canonical state hash: a SHA-256 over its served-content model
+// (every asset's content_type/headers/encoding hashes + the redirect rules; see
+// `state-hash`). Recomputed at the end of every final sync. Public and
+// unguarded; an **update** (not a query) so the reply is consensus-backed and a
+// third party can trust it against a hash they computed locally from the source
+// build. Returns the cached value with no recomputation.
+#[update]
+fn state_hash() -> ByteBuf {
+    canister_core::state_hash()
 }
 
 // Whether the calling identity may sync assets (authorized or a controller).
