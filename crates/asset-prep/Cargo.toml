@@ -1,0 +1,28 @@
+[package]
+name = "asset-prep"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Native, local-only crate: turns a `dist/` directory into the prepared assets a
+# sync uploads, and into the canonical `state-hash::Manifest`. No canister calls
+# and no WASI — shared by `sync-core` (which adds the canister orchestration) and
+# the standalone `state-hash-cli` verifier (which depends on this, NOT sync-core,
+# to keep its trusted surface small).
+
+[dependencies]
+wire-types = { path = "../wire-types" }
+state-hash = { path = "../state-hash" }
+brotli.workspace = true
+flate2.workspace = true
+http.workspace = true
+mime.workspace = true
+mime_guess.workspace = true
+sha2.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

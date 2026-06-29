@@ -123,6 +123,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "asset-prep"
+version = "0.1.0"
+dependencies = [
+ "brotli",
+ "flate2",
+ "http",
+ "mime",
+ "mime_guess",
+ "sha2 0.11.0",
+ "state-hash",
+ "tempfile",
+ "url",
+ "wire-types",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -423,6 +439,7 @@ name = "canister-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asset-prep",
  "base64 0.22.1",
  "canbench-rs",
  "candid",
@@ -443,6 +460,8 @@ dependencies = [
  "serde",
  "serde_bytes",
  "sha2 0.11.0",
+ "state-hash",
+ "tempfile",
  "wire-types",
 ]
 
@@ -3037,6 +3056,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "state-hash"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.0",
+ "wire-types",
+]
+
+[[package]]
+name = "state-hash-cli"
+version = "0.1.0"
+dependencies = [
+ "asset-prep",
+ "hex",
+]
+
+[[package]]
 name = "string_cache"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3114,18 +3149,13 @@ dependencies = [
 name = "sync-core"
 version = "0.1.0"
 dependencies = [
- "brotli",
+ "asset-prep",
  "candid",
- "flate2",
  "hex",
- "http",
- "mime",
- "mime_guess",
  "serde",
  "serde_bytes",
  "sha2 0.11.0",
  "tempfile",
- "url",
  "wire-types",
 ]
 

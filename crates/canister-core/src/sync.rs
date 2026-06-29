@@ -11,6 +11,7 @@
 //! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
 
+use crate::certification::AssetKey;
 use crate::redirect;
 use crate::runtime::SystemContext;
 use crate::state::State;
@@ -66,6 +67,18 @@ pub enum ExecuteOperationsProgress {
     /// the client supplies the hashes and the canister trusts them (see
     /// [`State::complete_set_asset_content`](crate::state::State)).
     ProcessingOperations { operation_index: usize },
+    /// After all operations of a **final** call are applied, recompute the cached
+    /// canonical state hash (see the `state-hash` crate), folding in one asset per
+    /// step so a many-asset state stays within the per-message instruction limit.
+    /// The streaming hasher and a key cursor ride across steps; when the keyspace
+    /// is exhausted the redirect rules are folded in, the hash is cached, and the
+    /// computation is `Done`.
+    HashingState {
+        hasher: state_hash::StateHasher,
+        /// The last asset key folded in; the next step resumes strictly after it
+        /// (`None` ⇒ start from the first key).
+        resume_after: Option<AssetKey>,
+    },
 }
 
 impl State {
@@ -167,18 +180,28 @@ impl State {
             ExecuteOperationsProgress::ProcessingOperations { operation_index } => {
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
-                    // All operations in this call processed. Finalize the sync
-                    // only when the caller signals this is the last call;
-                    // otherwise keep the session open for further operations.
-                    if arg.is_final {
-                        self.sync_session = None;
-                        self.chunks.clear();
-                    }
                     // Asset ops in this call may have clobbered tree entries
                     // that redirect rules own (any rule whose source path
                     // collides with an asset's `<$>` slot). Re-cert them so
                     // the call ends with a consistent rule tree.
                     self.on_redirect_rules_change();
+
+                    // Finalize the sync only when the caller signals this is the
+                    // last call; otherwise keep the session open for further
+                    // operations and don't touch the cached hash yet.
+                    if arg.is_final {
+                        self.sync_session = None;
+                        self.chunks.clear();
+                        // Recompute the cached state hash over the now-final
+                        // state, staged one asset per step.
+                        let hasher = state_hash::StateHasher::begin(self.state_hash_asset_count());
+                        return ComputationStatus::InProgress(
+                            ExecuteOperationsProgress::HashingState {
+                                hasher,
+                                resume_after: None,
+                            },
+                        );
+                    }
 
                     return ComputationStatus::Done(());
                 }
@@ -266,6 +289,25 @@ impl State {
                     operation_index: operation_index + 1,
                 };
                 ComputationStatus::InProgress(progress)
+            }
+            ExecuteOperationsProgress::HashingState {
+                mut hasher,
+                resume_after,
+            } => {
+                // Fold one asset per step, in key order, resuming after the last.
+                if let Some((key, asset)) = self.next_manifest_asset(&resume_after) {
+                    hasher.write_asset(&asset);
+                    return ComputationStatus::InProgress(
+                        ExecuteOperationsProgress::HashingState {
+                            hasher,
+                            resume_after: Some(key),
+                        },
+                    );
+                }
+                // Keyspace exhausted: fold the redirect rules, finalize, cache.
+                self.fold_redirect_rules(&mut hasher);
+                self.cache_state_hash(hasher.finish());
+                ComputationStatus::Done(())
             }
         }
     }

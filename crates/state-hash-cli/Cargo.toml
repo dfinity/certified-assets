@@ -1,0 +1,22 @@
+[package]
+name = "state-hash-cli"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Standalone offline verifier: reads a prepared `dist/` directory and prints the
+# canonical state hash to compare against a canister's `state_hash()`. Depends
+# only on `asset-prep` (+ `state-hash`), NOT `sync-core` — it carries no
+# canister-call, identity, or deploy capability, keeping the trusted surface a
+# verifier must vet as small as possible.
+
+[[bin]]
+name = "state-hash"
+path = "src/main.rs"
+
+[dependencies]
+asset-prep = { path = "../asset-prep" }
+hex.workspace = true

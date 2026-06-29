@@ -7,19 +7,18 @@ repository.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The local `dist/` preparation (scan/encode/headers/redirects/hash) lives in
+# `asset-prep`, shared with the offline verifier. sync-core keeps only the
+# canister-call orchestration (diff, upload, execute, auth), so its dependency
+# set is small.
 [dependencies]
 wire-types = { path = "../wire-types" }
-brotli.workspace = true
+asset-prep = { path = "../asset-prep" }
 candid.workspace = true
-flate2.workspace = true
 hex.workspace = true
-http.workspace = true
-mime.workspace = true
-mime_guess.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
-sha2.workspace = true
-url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+sha2.workspace = true

@@ -27,6 +27,7 @@ use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, trap};
 use std::cell::RefCell;
 
 pub use http::{HttpRequest, HttpResponse};
+pub use serde_bytes::ByteBuf;
 pub use wire_types::{
     AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
     Version,
@@ -107,6 +108,19 @@ pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
 
 pub fn get_redirect_rules(start_index: u64) -> Vec<RedirectRule> {
     STATE.with_borrow(|s| s.get_redirect_rules(start_index))
+}
+
+/// The cached canonical **state hash**: a SHA-256 over the canister's served-
+/// content model (every asset's content_type/headers/encoding hashes + the
+/// redirect rules — see the `state-hash` crate). Recomputed at the end of every
+/// final sync and returned here verbatim. `[0; 32]` before the first sync.
+///
+/// The endpoint is public and unguarded; the `canister` crate exposes it as an
+/// **update** so the reply is consensus-backed and a verifier can trust it
+/// against a hash they computed locally from the source build. Returns the
+/// cached value with no recomputation, so there is no cycle-DoS vector.
+pub fn state_hash() -> ByteBuf {
+    STATE.with_borrow(|s| ByteBuf::from(s.cached_state_hash().to_vec()))
 }
 
 pub fn http_request(req: HttpRequest) -> HttpResponse {
