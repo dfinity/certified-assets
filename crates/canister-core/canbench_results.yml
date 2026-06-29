@@ -2,35 +2,35 @@ benches:
   post_upgrade_rebuild:
     total:
       calls: 1
-      instructions: 127420027
+      instructions: 127422733
       heap_increase: 0
       stable_memory_increase: 0
     scopes: {}
   serve_large_asset:
     total:
       calls: 1
-      instructions: 10103824
+      instructions: 10101442
       heap_increase: 0
       stable_memory_increase: 0
     scopes: {}
   serve_small_asset:
     total:
       calls: 1
-      instructions: 152487
+      instructions: 152351
       heap_increase: 0
       stable_memory_increase: 0
     scopes: {}
   sync_commit:
     total:
       calls: 1
-      instructions: 69503737
+      instructions: 72968392
       heap_increase: 0
       stable_memory_increase: 128
     scopes: {}
   sync_commit_large:
     total:
       calls: 1
-      instructions: 15234634
+      instructions: 15332773
       heap_increase: 0
       stable_memory_increase: 128
     scopes: {}
