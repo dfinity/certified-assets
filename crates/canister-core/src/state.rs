@@ -89,11 +89,20 @@ fn parse_range_start(value: &str) -> Option<usize> {
 /// `IC_AUTH_TOKEN` gate cookie out of a header that also carries `ic_env` and any
 /// other site cookies — which is exactly why the gate can't use request
 /// certification (it would have to match the whole header value verbatim).
+///
+/// The value is **percent-decoded** before being returned: cookies are written
+/// percent-encoded (the gate page sets `IC_AUTH_TOKEN` via `encodeURIComponent`),
+/// so decoding here recovers the raw token to compare against the configured
+/// secret. This is what lets a secret containing cookie-unsafe characters (`;`,
+/// `,`, space, …) round-trip — they ride the wire encoded and become valid again
+/// after decode. A malformed encoding yields `None` (no token → unauthorized),
+/// never a trap.
 fn parse_cookie(header: &str, name: &str) -> Option<String> {
-    header.split(';').find_map(|pair| {
+    let raw = header.split(';').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
-        (k.trim() == name).then(|| v.trim().to_string())
-    })
+        (k.trim() == name).then(|| v.trim())
+    })?;
+    url_decode(raw).ok()
 }
 
 type Mem = VirtualMemory<DefaultMemoryImpl>;
@@ -1554,5 +1563,22 @@ mod parse_cookie_tests {
             parse_cookie("IC_AUTH_TOKEN=a; IC_AUTH_TOKEN=b", "IC_AUTH_TOKEN"),
             Some("a".to_string())
         );
+    }
+
+    #[test]
+    fn percent_decodes_the_value() {
+        // `encodeURIComponent("p@ss w;rd")` on the client → this on the wire.
+        assert_eq!(
+            parse_cookie("IC_AUTH_TOKEN=p%40ss%20w%3Brd", "IC_AUTH_TOKEN"),
+            Some("p@ss w;rd".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_encoding_is_none() {
+        // `%FF` decodes to a byte that isn't valid UTF-8 → no token (unauthorized),
+        // not a trap. (A non-escape like `%zz` is passed through literally by the
+        // percent decoder, so it's a valid — just non-matching — token.)
+        assert_eq!(parse_cookie("IC_AUTH_TOKEN=%FF", "IC_AUTH_TOKEN"), None);
     }
 }

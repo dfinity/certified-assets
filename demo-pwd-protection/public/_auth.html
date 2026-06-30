@@ -3,7 +3,10 @@
     <title>Unauthorized</title>
     <script>
       function setAuthToken(value) {
-        document.cookie = "IC_AUTH_TOKEN=" + value + "; path=/; SameSite=Lax";
+        // Encode the value so a `;`/`,`/space in the param can't break out of the
+        // cookie value and inject extra cookie attributes (cookie injection).
+        document.cookie =
+          "IC_AUTH_TOKEN=" + encodeURIComponent(value) + "; path=/; SameSite=Lax";
       }
 
       // The login button sets the demo token and reloads so the gate re-evaluates.

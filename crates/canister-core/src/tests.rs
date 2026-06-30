@@ -3786,6 +3786,40 @@ mod auth_gate {
     }
 
     #[test]
+    fn secret_with_special_chars_round_trips() {
+        // The env secret can hold cookie-unsafe characters; the client sends them
+        // percent-encoded and the canister decodes before comparing.
+        const SPECIAL: &str = "p@ss w;rd";
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        state.refresh_env(&env_with_token(Some(SPECIAL)));
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html(AUTH_KEY, AUTH_BODY), html("/index.html", PAGE_BODY)],
+        );
+
+        // `encodeURIComponent("p@ss w;rd")` == "p%40ss%20w%3Brd".
+        let ok = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", "IC_AUTH_TOKEN=p%40ss%20w%3Brd")
+                .build(),
+        );
+        assert_eq!(ok.status_code, 200);
+        assert_eq!(ok.body.as_ref(), PAGE_BODY);
+
+        // The raw (undecoded) value must NOT match.
+        let denied = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", "IC_AUTH_TOKEN=p@ss")
+                .build(),
+        );
+        assert_eq!(denied.status_code, 401);
+    }
+
+    #[test]
     fn nonexistent_path_is_404_not_gated() {
         let state = gated_state();
         let resp = certified_http_request(&state, RequestBuilder::get("/missing").build());
