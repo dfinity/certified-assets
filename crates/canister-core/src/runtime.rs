@@ -13,6 +13,13 @@ use std::collections::BTreeMap;
 /// frontend-safe and canister-only configuration.
 const PUBLIC_ENV_VAR_PREFIX: &str = "PUBLIC_";
 
+/// Env var holding the cookie-gate secret: the value the `IC_AUTH_TOKEN` cookie
+/// must carry for a request to reach a gated asset (see
+/// [`crate::state::State`]'s auth-gate handling). It is deliberately **not**
+/// `PUBLIC_`-prefixed, so it never leaks into the `ic_env` cookie. An unset or
+/// empty value means the gate is off.
+const AUTH_TOKEN_ENV_VAR: &str = "IC_AUTH_TOKEN";
+
 /// Context that is available only inside canister runtime.
 pub struct SystemContext {
     pub current_timestamp_ns: u64,
@@ -53,6 +60,10 @@ pub struct CanisterEnv {
     pub root_key: Vec<u8>,
     /// `PUBLIC_`-prefixed env vars only, sorted by name (BTreeMap order).
     pub public_vars: BTreeMap<String, String>,
+    /// The cookie-gate secret from `IC_AUTH_TOKEN`, if set to a non-empty value.
+    /// `None` means the gate is off. Kept separate from `public_vars` so it is
+    /// never rendered into the (frontend-visible) `ic_env` cookie.
+    pub auth_token: Option<String>,
 }
 
 impl CanisterEnv {
@@ -69,19 +80,29 @@ impl CanisterEnv {
     }
 
     /// Builds a snapshot from a root key and the *full* env-var set, keeping only
-    /// the `PUBLIC_`-prefixed (frontend-safe) vars. Split out from [`Self::load`]
-    /// so the prefix filter is unit-testable without the system API.
+    /// the `PUBLIC_`-prefixed (frontend-safe) vars plus the private
+    /// `IC_AUTH_TOKEN` gate secret. Split out from [`Self::load`] so the
+    /// filtering is unit-testable without the system API.
     pub fn from_raw(
         root_key: Vec<u8>,
         all_vars: impl IntoIterator<Item = (String, String)>,
     ) -> Self {
-        let public_vars = all_vars
-            .into_iter()
-            .filter(|(name, _)| name.starts_with(PUBLIC_ENV_VAR_PREFIX))
-            .collect();
+        let mut public_vars = BTreeMap::new();
+        let mut auth_token = None;
+        for (name, value) in all_vars {
+            if name == AUTH_TOKEN_ENV_VAR {
+                // An empty secret is treated as "gate off".
+                if !value.is_empty() {
+                    auth_token = Some(value);
+                }
+            } else if name.starts_with(PUBLIC_ENV_VAR_PREFIX) {
+                public_vars.insert(name, value);
+            }
+        }
         Self {
             root_key,
             public_vars,
+            auth_token,
         }
     }
 

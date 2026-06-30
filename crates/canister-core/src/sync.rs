@@ -32,6 +32,22 @@ pub const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 /// [`State::chunks`](crate::state::State), not anything stored here.
 pub type Chunk = ByteBuf;
 
+/// Whether an operation creates, mutates, or deletes the cookie-gate page
+/// ([`crate::state::AUTH_KEY`]). A batch containing any such op triggers a
+/// full gate-leaf re-certification at the end of the call (see
+/// `execute_operations`), because every asset borrows the gate page's body.
+fn operation_targets_auth_page(op: &Operation) -> bool {
+    let key = match op {
+        Operation::CreateAsset(a) => &a.key,
+        Operation::SetAssetContent(a) => &a.key,
+        Operation::UnsetAssetContent(a) => &a.key,
+        Operation::DeleteAsset(a) => &a.key,
+        Operation::SetAssetHeaders(a) => &a.key,
+        Operation::SetRedirectRules(_) => return false,
+    };
+    key == crate::state::AUTH_KEY
+}
+
 /// The single in-progress sync. The canister holds at most one at a time;
 /// `start_sync` rejects a second caller while this is present and non-stale.
 pub struct SyncSession {
@@ -180,11 +196,21 @@ impl State {
             ExecuteOperationsProgress::ProcessingOperations { operation_index } => {
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
-                    // Asset ops in this call may have clobbered tree entries
-                    // that redirect rules own (any rule whose source path
-                    // collides with an asset's `<$>` slot). Re-cert them so
-                    // the call ends with a consistent rule tree.
-                    self.on_redirect_rules_change();
+                    // If this call changed the cookie-gate page, every asset's
+                    // 401 gate leaf (which borrows `/_auth.html`'s body) is now
+                    // stale — re-certify all assets. `refresh_auth_gate` also
+                    // rebuilds the rule entries, so it subsumes the rule re-cert
+                    // below. Rare to fire (the gate page changes ~once a deploy),
+                    // cheap to detect.
+                    if arg.operations.iter().any(operation_targets_auth_page) {
+                        self.refresh_auth_gate();
+                    } else {
+                        // Asset ops in this call may have clobbered tree entries
+                        // that redirect rules own (any rule whose source path
+                        // collides with an asset's `<$>` slot). Re-cert them so
+                        // the call ends with a consistent rule tree.
+                        self.on_redirect_rules_change();
+                    }
 
                     // Finalize the sync only when the caller signals this is the
                     // last call; otherwise keep the session open for further

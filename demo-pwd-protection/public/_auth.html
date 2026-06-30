@@ -1,0 +1,15 @@
+<html>
+  <head>
+    <title>Unauthorized</title>
+    <script>
+      function addCookie() {
+        document.cookie = "IC_AUTH_TOKEN=password";
+      }
+    </script>
+  </head>
+
+  <body>
+    <h1>Not Authorized</h1>
+    <button onClick="addCookie()">Login</button>
+  </body>
+</html>

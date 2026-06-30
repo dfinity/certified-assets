@@ -160,10 +160,10 @@ pub fn guard_is_controller() -> Result<(), String> {
 }
 
 /// Recaptures the environment snapshot and re-certifies everything it touches:
-/// every `text/html` asset (whose effective header set now carries the cookie)
-/// and the redirect-rule entries (a 200-rewrite to an HTML asset borrows it).
-/// Controller-guarded at the endpoint; icp-cli calls this during deploy once the
-/// `PUBLIC_*` env vars are set.
+/// every `text/html` asset (whose effective header set now carries the cookie),
+/// every asset's cookie-gate leaf if the `IC_AUTH_TOKEN` secret changed, and the
+/// redirect-rule entries. Controller-guarded at the endpoint; icp-cli calls this
+/// during deploy once the `PUBLIC_*` (and `IC_AUTH_TOKEN`) env vars are set.
 pub fn refresh_env() {
     let env = CanisterEnv::load(); // replicated context — system API is readable
     STATE.with_borrow_mut(|s| {

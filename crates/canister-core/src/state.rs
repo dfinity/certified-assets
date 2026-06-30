@@ -82,6 +82,20 @@ fn parse_range_start(value: &str) -> Option<usize> {
     start.trim().parse::<usize>().ok()
 }
 
+/// Extracts the value of cookie `name` from a `Cookie` request header (the
+/// `name=value; name2=value2` form, RFC 6265 §4.2). Names are matched
+/// case-sensitively (cookie names are case-sensitive); surrounding whitespace is
+/// trimmed. Returns the first match, or `None` if absent. Used to read the
+/// `IC_AUTH_TOKEN` gate cookie out of a header that also carries `ic_env` and any
+/// other site cookies — which is exactly why the gate can't use request
+/// certification (it would have to match the whole header value verbatim).
+fn parse_cookie(header: &str, name: &str) -> Option<String> {
+    header.split(';').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k.trim() == name).then(|| v.trim().to_string())
+    })
+}
+
 type Mem = VirtualMemory<DefaultMemoryImpl>;
 
 const AUTHORIZED_MEMORY: MemoryId = MemoryId::new(0);
@@ -155,7 +169,26 @@ pub struct State {
     /// (the env vars themselves survive as canister settings), exactly like
     /// `asset_hashes`. See [`State::effective_headers`].
     pub env_cookie: Option<String>,
+    /// The cookie-gate secret (the `IC_AUTH_TOKEN` env var), or `None` when the
+    /// gate is off. When set, every existing asset (except [`AUTH_KEY`]) is
+    /// served as a 401 carrying `/_auth.html`'s body unless the request's
+    /// `IC_AUTH_TOKEN` cookie equals this value. Derived heap state recaptured
+    /// from the live system API on `post_upgrade` and at sync start, exactly
+    /// like `env_cookie`; never serialized into the `ic_env` cookie.
+    pub auth_token: Option<String>,
 }
+
+/// Asset key of the cookie-gate page. A request for any *other* existing asset
+/// is served this page's body at 401 when the `IC_AUTH_TOKEN` cookie doesn't
+/// match the configured secret. The gate page itself is never gated.
+pub const AUTH_KEY: &str = "/_auth.html";
+
+/// Name of the cookie carrying the gate token, matched against the configured
+/// secret (the `IC_AUTH_TOKEN` env var).
+const AUTH_COOKIE: &str = "IC_AUTH_TOKEN";
+
+/// HTTP status the gate page is served under for an unauthorized request.
+const AUTH_GATE_STATUS: u16 = 401;
 
 impl Default for State {
     fn default() -> Self {
@@ -191,6 +224,7 @@ impl State {
             asset_hashes: CertifiedResponses::default(),
             rule_certified_entries: Vec::new(),
             env_cookie: None,
+            auth_token: None,
         }
     }
 
@@ -340,6 +374,18 @@ impl State {
         let num_chunks = content_chunks.len() as u32;
         let multi_chunk = num_chunks > 1;
 
+        // The cookie-gate page is served as a single inline body at 401
+        // (status-overridden, like a 4xx custom error page), which can't be a
+        // reassembled multi-chunk 206. Reject a multi-chunk `/_auth.html` up
+        // front. The sync plugin enforces the same bound at deploy time; this
+        // guards against other callers. Keep the gate page small (< ~1.9 MB).
+        if arg.key == AUTH_KEY && multi_chunk {
+            return Err(format!(
+                "the cookie-gate page '{AUTH_KEY}' must be a single chunk \
+                 (< ~1.9 MB) so it can be served as a 401; got {num_chunks} chunks"
+            ));
+        }
+
         // Per-chunk cert data (length + hash) is only needed to serve/certify 206
         // ranges, which only happen for multi-chunk encodings — so single-chunk
         // assets (the common case) skip the `chunk_certs` write and reuse the
@@ -461,16 +507,70 @@ impl State {
     /// Removes and recomputes every certified response for one asset from its
     /// metadata. Recompute is cheap: it reads only headers/content_type/sha256,
     /// never content bytes.
+    ///
+    /// Besides the asset's own responses, this also lays down the **cookie-gate
+    /// leaf** when the gate is active (a secret is set and `/_auth.html` exists):
+    /// `/_auth.html`'s body certified at 401 under this asset's path, so an
+    /// unauthorized request served the gate page here still verifies. The gate
+    /// page itself is exempt. Because every asset borrows `/_auth.html`'s
+    /// response, any change to the gate page (or the secret) must re-run this for
+    /// every asset — see [`State::refresh_auth_gate`].
     fn recertify_asset(&mut self, key: &AssetKey, meta: &AssetMeta) {
         self.asset_hashes.remove_responses_for_path(key);
         if meta.encodings.is_empty() {
             return;
         }
-
-        let effective_headers = self.effective_headers(meta);
         let path = AssetPath::from(key.as_str());
+        self.certify_meta_at_path(&path, meta, None);
+
+        if self.auth_token.is_some() && key != AUTH_KEY {
+            if let Some(auth_meta) = self.metadata.get(&AUTH_KEY.to_string()) {
+                self.certify_meta_at_path(&path, &auth_meta, Some(AUTH_GATE_STATUS));
+            }
+        }
+    }
+
+    /// Certifies `meta`'s responses at `path`. With `status_override == None` this
+    /// is the normal asset path: the 304 (empty body) for every encoding, the full
+    /// 200 for single-chunk encodings, and one 206 per chunk for multi-chunk ones.
+    /// With `status_override == Some(s)` it certifies a single inline body at
+    /// status `s` (used for the 401 cookie-gate leaf) — only for single-chunk
+    /// encodings, since a non-200 status can't be served as reassembled 206s
+    /// (mirrors the `acceptable` filter in `build_asset_response` and the 4xx
+    /// branch of `build_alias_rule_entry`).
+    fn certify_meta_at_path(
+        &mut self,
+        path: &AssetPath,
+        meta: &AssetMeta,
+        status_override: Option<u16>,
+    ) {
+        let effective_headers = self.effective_headers(meta);
         for (&encoding, enc) in &meta.encodings {
             let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
+
+            if let Some(status) = status_override {
+                if enc.num_chunks != 1 {
+                    continue;
+                }
+                let base_headers: Vec<(String, Value)> = headers_for(
+                    &effective_headers,
+                    &meta.content_type,
+                    encoding,
+                    &enc.sha256,
+                )
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect();
+                let resp_hash = response_hash(&base_headers, status, &enc.sha256).0;
+                let tp = path.hash_tree_path(
+                    &cert_expr,
+                    &RequestHash::default(),
+                    ResponseHash::from(&resp_hash),
+                );
+                self.asset_hashes.certify_response_precomputed(&tp);
+                continue;
+            }
+
             let response_hashes = response_hashes_for(
                 &effective_headers,
                 &meta.content_type,
@@ -731,10 +831,24 @@ impl State {
         requested_encodings: Vec<Encoding>,
         etags: Vec<Hash>,
         range_start: Option<usize>,
+        authorized: bool,
     ) -> HttpResponse {
         // Asset at the requested path wins.
         if let Some(meta) = self.metadata.get(&path.to_string()) {
             let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
+            // Cookie gate: an unauthorized request for an existing asset is served
+            // the `/_auth.html` body at 401, certified under THIS path (the gate
+            // leaf added by `recertify_asset`). The gate page itself is never
+            // gated. If the gate page is missing, fall through and serve normally
+            // (fail-open for a misconfigured gate). A non-existent path is never
+            // gated — it 404s below.
+            if !authorized && path != AUTH_KEY {
+                if let Some(response) =
+                    self.auth_gate_response(&cert_header, &requested_encodings, &etags)
+                {
+                    return response;
+                }
+            }
             if let Some(response) = self.build_asset_response(
                 &meta,
                 &requested_encodings,
@@ -768,11 +882,36 @@ impl State {
                 &requested_encodings,
                 &etags,
                 range_start,
+                authorized,
             );
         }
 
         let (certificate_header, _) = self.asset_hashes.witness_to_header(path, certificate);
         HttpResponse::build_404(certificate_header)
+    }
+
+    /// Builds the 401 cookie-gate response: `/_auth.html`'s body+headers served
+    /// under `cert_header`'s path. Returns `None` when the gate page is absent or
+    /// has no single-chunk encoding the client accepts (caller then serves the
+    /// real asset). The witness in `cert_header` must already prove this 401 leaf
+    /// — `recertify_asset` / `build_alias_rule_entry` certify it under every gated
+    /// path. Range is disabled (a 401 is a single inline body, like a 4xx error
+    /// page).
+    fn auth_gate_response(
+        &self,
+        cert_header: &HeaderField,
+        requested_encodings: &[Encoding],
+        etags: &[Hash],
+    ) -> Option<HttpResponse> {
+        let auth_meta = self.metadata.get(&AUTH_KEY.to_string())?;
+        self.build_asset_response(
+            &auth_meta,
+            requested_encodings,
+            Some(cert_header),
+            etags,
+            Some(AUTH_GATE_STATUS),
+            None,
+        )
     }
 
     /// Builds the 200/304 (or status-overridden) response for the best matching
@@ -958,10 +1097,26 @@ impl State {
         requested_encodings: &[Encoding],
         etags: &[Hash],
         range_start: Option<usize>,
+        authorized: bool,
     ) -> HttpResponse {
         let cert_header =
             self.asset_hashes
                 .witness_to_header_with_location(path, &entry.location, certificate);
+        // Cookie gate on alias paths (e.g. the `/` → `/index.html` rewrite): an
+        // unauthorized request gets `/_auth.html` at 401, certified at the rule's
+        // tree location (the gate leaf added in `build_alias_rule_entry`). Only
+        // body-borrowing rules (200/4xx `AliasOf`) carry such a leaf; 3xx
+        // `Synthetic` redirects are not gated.
+        if !authorized
+            && path != AUTH_KEY
+            && matches!(entry.kind, crate::redirect::CertifiedRuleEntryKind::AliasOf { .. })
+        {
+            if let Some(response) =
+                self.auth_gate_response(&cert_header, requested_encodings, etags)
+            {
+                return response;
+            }
+        }
         match &entry.kind {
             crate::redirect::CertifiedRuleEntryKind::Synthetic { expression } => {
                 // Synthetic entries only cover 3xx redirects — empty body.
@@ -1000,6 +1155,7 @@ impl State {
         let mut encodings: Vec<Encoding> = vec![];
         let mut etags: Vec<Hash> = vec![];
         let mut range_start: Option<usize> = None;
+        let mut auth_cookie: Option<String> = None;
         for (name, value) in req.headers.iter() {
             if name.eq_ignore_ascii_case("Accept-Encoding") {
                 encodings.extend(Encoding::parse_accept_encoding(value));
@@ -1007,8 +1163,19 @@ impl State {
                 etags.extend(parse_if_none_match(value));
             } else if name.eq_ignore_ascii_case("Range") {
                 range_start = parse_range_start(value);
+            } else if name.eq_ignore_ascii_case("Cookie") {
+                // The first `Cookie` header carrying our token wins; browsers
+                // send a single header, but be tolerant of multiple.
+                auth_cookie = auth_cookie.or_else(|| parse_cookie(value, AUTH_COOKIE));
             }
         }
+        // Gate off (no secret configured) ⇒ always authorized. Gate on ⇒ the
+        // cookie must match the secret exactly. NB: this choice is plain app
+        // logic, not part of the certified guarantee — see `build_http_response`.
+        let authorized = match &self.auth_token {
+            None => true,
+            Some(secret) => auth_cookie.as_deref() == Some(secret.as_str()),
+        };
 
         let path = match req.url.find('?') {
             Some(i) => &req.url[..i],
@@ -1016,7 +1183,9 @@ impl State {
         };
 
         match url_decode(path) {
-            Ok(path) => self.build_http_response(certificate, &path, encodings, etags, range_start),
+            Ok(path) => {
+                self.build_http_response(certificate, &path, encodings, etags, range_start, authorized)
+            }
             // Malformed percent-encoding (invalid UTF-8 once decoded). This 400
             // is intentionally uncertified: the body is per-request (it echoes
             // the bad path), so it can't be pinned to a certified hash, and a
@@ -1207,6 +1376,42 @@ impl State {
         if tree_paths.is_empty() {
             return None;
         }
+
+        // Cookie-gate leaf for this (live) alias path: an unauthorized request is
+        // served `/_auth.html` at 401 here (see `build_redirect_rule_response`),
+        // certified at the rule's tree location. One leaf per single-chunk auth
+        // encoding. Active only when a secret is set and the gate page exists.
+        if self.auth_token.is_some() {
+            if let Some(auth_meta) = self.metadata.get(&AUTH_KEY.to_string()) {
+                let auth_headers = self.effective_headers(&auth_meta);
+                for (&encoding, enc) in &auth_meta.encodings {
+                    if enc.num_chunks != 1 {
+                        continue;
+                    }
+                    let cert_expr =
+                        certificate_expression_for(&auth_headers, encoding, &enc.sha256);
+                    let base_headers: Vec<(String, Value)> = headers_for(
+                        &auth_headers,
+                        &auth_meta.content_type,
+                        encoding,
+                        &enc.sha256,
+                    )
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::String(v)))
+                    .collect();
+                    let resp_hash =
+                        response_hash(&base_headers, AUTH_GATE_STATUS, &enc.sha256).0;
+                    let tp = crate::redirect::alias_tree_path(
+                        &location,
+                        cert_expr.expression_hash,
+                        resp_hash,
+                    );
+                    self.asset_hashes.certify_response_precomputed(&tp);
+                    tree_paths.push(tp);
+                }
+            }
+        }
+
         Some(crate::redirect::CertifiedRuleEntry {
             tree_paths,
             location,
@@ -1214,66 +1419,140 @@ impl State {
         })
     }
 
-    // ---- environment cookie ----
+    // ---- environment (cookie + auth-gate secret) ----
 
-    /// Stores the rendered env cookie from a freshly captured snapshot **without**
-    /// re-certifying. Used by `post_upgrade` *before* `post_upgrade_rebuild`, so
-    /// the rebuild — which re-certifies every asset from scratch — picks the
-    /// cookie up through `effective_headers`.
+    /// Stores the derived env snapshot (the rendered `ic_env` cookie and the
+    /// cookie-gate secret) **without** re-certifying. Used by `post_upgrade`
+    /// *before* `post_upgrade_rebuild`, so the rebuild — which re-certifies every
+    /// asset from scratch — picks both up (the cookie via `effective_headers`,
+    /// the secret via the gate-leaf check in `recertify_asset`).
     pub fn store_env(&mut self, env: &crate::runtime::CanisterEnv) {
         self.env_cookie = Some(env.render_cookie());
+        self.auth_token = env.auth_token.clone();
     }
 
     /// Captures the env at the **start of a sync**, so the operations that follow
-    /// certify their assets against the current cookie (no end-of-sync re-cert
-    /// pass). If the rendered cookie is unchanged — the common case, since env
-    /// vars rarely change between syncs — this is a no-op: existing certs are
-    /// already correct and the sync's own ops will re-use the same cookie. Only
-    /// when it *changed* must we re-certify here (via [`Self::refresh_env`]):
-    /// otherwise HTML assets the sync doesn't touch would keep an old-cookie
-    /// certificate while `effective_headers` serves the new cookie, and the
-    /// gateway would reject them. Caller publishes `certified_data` afterwards.
+    /// certify against the current cookie and gate secret (no end-of-sync env
+    /// re-cert pass). Unchanged env — the common case — is a no-op. Delegates to
+    /// [`Self::refresh_env`], which re-certifies exactly what changed. Caller
+    /// publishes `certified_data` afterwards.
     pub fn capture_env_at_sync_start(&mut self, env: &crate::runtime::CanisterEnv) {
-        if self.env_cookie.as_deref() != Some(env.render_cookie().as_str()) {
-            self.refresh_env(env);
+        self.refresh_env(env);
+    }
+
+    /// Captures a new env snapshot on a running canister and re-certifies what it
+    /// affects, then rebuilds the redirect-rule entries. Caller refreshes
+    /// `certified_data` afterwards.
+    ///
+    /// - The **gate secret** changing affects *every* asset (each borrows
+    ///   `/_auth.html` for its 401 gate leaf), so all assets are re-certified.
+    /// - The **`ic_env` cookie** changing affects only `text/html` assets (the
+    ///   cookie is layered onto their effective headers).
+    /// - No change is a no-op (existing certs are already correct).
+    pub fn refresh_env(&mut self, env: &crate::runtime::CanisterEnv) {
+        let cookie_changed = self.env_cookie.as_deref() != Some(env.render_cookie().as_str());
+        let token_changed = self.auth_token != env.auth_token;
+        self.store_env(env);
+        if token_changed {
+            self.recertify_all_assets();
+        } else if cookie_changed {
+            self.recertify_html_assets();
+        } else {
+            return;
+        }
+        // Rebuild rule entries: a 200-rewrite (e.g. the `/` SPA alias) to an HTML
+        // target borrows the cookie, and every alias carries the gate leaf.
+        self.on_redirect_rules_change();
+    }
+
+    /// Re-certifies every asset and rebuilds the redirect-rule entries. Run when
+    /// the cookie-gate page itself changes during a sync: each asset borrows
+    /// `/_auth.html`'s body for its 401 gate leaf, so a change to the gate page
+    /// (content, headers, or existence) invalidates every gate leaf at once.
+    /// Caller refreshes `certified_data` afterwards.
+    pub fn refresh_auth_gate(&mut self) {
+        self.recertify_all_assets();
+        self.on_redirect_rules_change();
+    }
+
+    /// Re-certifies every asset from its current metadata.
+    fn recertify_all_assets(&mut self) {
+        for key in self.metadata.keys().collect::<Vec<AssetKey>>() {
+            if let Some(meta) = self.metadata.get(&key) {
+                self.recertify_asset(&key, &meta);
+            }
         }
     }
 
-    /// Captures a new env snapshot on an already-running canister and re-certifies
-    /// everything it affects: every `text/html` asset (its effective header set
-    /// changed) and the redirect-rule entries (a 200-rewrite to an HTML asset
-    /// borrows the cookie). Non-HTML assets are untouched. Caller must refresh
-    /// `certified_data` afterwards. Mirrors `set_redirect_rules` →
-    /// `on_redirect_rules_change`.
-    pub fn refresh_env(&mut self, env: &crate::runtime::CanisterEnv) {
-        self.store_env(env);
-        let keys: Vec<AssetKey> = self.metadata.keys().collect();
-        for key in keys {
+    /// Re-certifies only the `text/html` assets (the ones carrying the `ic_env`
+    /// cookie in their effective headers).
+    fn recertify_html_assets(&mut self) {
+        for key in self.metadata.keys().collect::<Vec<AssetKey>>() {
             if let Some(meta) = self.metadata.get(&key) {
                 if crate::asset::is_html_content_type(&meta.content_type) {
                     self.recertify_asset(&key, &meta);
                 }
             }
         }
-        // Rebuild rule entries: a 200-rewrite (e.g. the `/` SPA alias) to an HTML
-        // target must pick up the cookie via its now-changed certified response.
-        self.on_redirect_rules_change();
     }
 
     // ---- upgrade ----
 
     /// Rebuilds all derived heap state from the durable stable-memory state
-    /// after an upgrade: the certified-response tree for every asset, the
-    /// redirect-rule certified entries, and the built-in 404 fallback (the last
-    /// two via `on_redirect_rules_change`). The caller publishes `certified_data`
+    /// after an upgrade: the certified-response tree for every asset (including
+    /// gate leaves, since `self.metadata` is fully populated), the redirect-rule
+    /// certified entries, and the built-in 404 fallback (the last two via
+    /// `on_redirect_rules_change`). The caller publishes `certified_data`
     /// afterwards.
     pub fn post_upgrade_rebuild(&mut self) {
-        let keys: Vec<AssetKey> = self.metadata.keys().collect();
-        for key in keys {
-            if let Some(meta) = self.metadata.get(&key) {
-                self.recertify_asset(&key, &meta);
-            }
-        }
+        self.recertify_all_assets();
         self.on_redirect_rules_change();
+    }
+}
+
+#[cfg(test)]
+mod parse_cookie_tests {
+    use super::parse_cookie;
+
+    #[test]
+    fn finds_named_cookie_among_others() {
+        assert_eq!(
+            parse_cookie("ic_env=x; IC_AUTH_TOKEN=secret; other=1", "IC_AUTH_TOKEN"),
+            Some("secret".to_string())
+        );
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(
+            parse_cookie("  IC_AUTH_TOKEN = secret  ", "IC_AUTH_TOKEN"),
+            Some("secret".to_string())
+        );
+    }
+
+    #[test]
+    fn absent_is_none() {
+        assert_eq!(parse_cookie("a=1; b=2", "IC_AUTH_TOKEN"), None);
+    }
+
+    #[test]
+    fn empty_value_is_some_empty() {
+        assert_eq!(
+            parse_cookie("IC_AUTH_TOKEN=", "IC_AUTH_TOKEN"),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn names_are_case_sensitive() {
+        assert_eq!(parse_cookie("ic_auth_token=secret", "IC_AUTH_TOKEN"), None);
+    }
+
+    #[test]
+    fn first_match_wins() {
+        assert_eq!(
+            parse_cookie("IC_AUTH_TOKEN=a; IC_AUTH_TOKEN=b", "IC_AUTH_TOKEN"),
+            Some("a".to_string())
+        );
     }
 }

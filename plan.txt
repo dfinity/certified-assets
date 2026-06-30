@@ -1,0 +1,262 @@
+Cookie-gated assets via a certified `_auth.html` page
+=====================================================
+
+Goal (as specified)
+--------------------
+
+- A special asset `/_auth.html` is the gate page.
+- A request may carry cookie `IC_AUTH_TOKEN`; its value may or may not equal the
+  configured secret.
+- A request for a path with NO asset (and no matching rule) returns 404, as today.
+- A request for an EXISTING asset returns **401 with the body of `/_auth.html`**,
+  UNLESS `IC_AUTH_TOKEN` equals the configured secret.
+- When `IC_AUTH_TOKEN` equals the secret, the asset serves normally.
+
+Decisions locked in:
+- Scope: EVERY existing asset is gated (not just HTML pages), and rewrite/redirect
+  rule paths (e.g. the `/` → `/index.html` SPA alias) are gated too.
+- Secret: CONFIGURABLE via a private (non-`PUBLIC_`) env var, not hardcoded. Gate is
+  OFF when the secret is unset.
+
+
+Why response-only certification (and why request certification is impossible here)
+==================================================================================
+
+This canister certifies response-only (certification.rs:23 `no_request_certification`,
+`RequestHash::default()` everywhere). The consequence we lean on:
+
+  The HTTP gateway accepts ANY response whose hash is certified under the requested
+  path's `<$>` subtree. WHICH certified response the canister returns is plain
+  application logic.
+
+That is exactly why one URL can already serve several certified responses (encodings,
+200 vs 304 — recertify_asset, state.rs:464) and why alias rules serve asset X's
+body+headers under path Y, certified at Y (build_alias_rule_entry, state.rs:1128).
+
+Our feature is the same shape: at serve time pick `/_auth.html` vs the real asset based
+on the `IC_AUTH_TOKEN` cookie, and certify BOTH responses under the gated path.
+
+Request (full) certification cannot be used here, for two independent reasons:
+  1. It hashes the ENTIRE `Cookie` header value exactly; it cannot extract a *named*
+     cookie out of a multi-cookie header. Reading `IC_AUTH_TOKEN` requires app-side
+     parsing → response-only.
+  2. This canister already sets its own `ic_env` cookie on every HTML response
+     (effective_headers, state.rs:451). A real browser therefore sends
+     `Cookie: ic_env=…; IC_AUTH_TOKEN=…` — never a bare exact value — so an exact-match
+     request-hash leaf would never fire.
+
+THE SECURITY CAVEAT (must be understood): because the cookie→response choice is plain
+app logic, it is NOT part of the certified guarantee. The gateway verifies only that
+each response is authentic canister content; a malicious replica could serve the asset
+to a token-less request, or serve `_auth.html` to a valid one. That is acceptable for a
+cookie gate (the cookie is never trusted as real auth — real authz happens in update
+calls). It is the unavoidable property of any header-driven, response-only gate.
+
+
+Configuration
+=============
+
+- Client cookie name:   `IC_AUTH_TOKEN`   (sent by the browser)               — const
+- Server secret source: a private env var, e.g. `AUTH_TOKEN` (NOT `PUBLIC_`-prefixed,
+  so it never leaks into the `ic_env` cookie)                                  — const
+- Gate page key:        `/_auth.html`                                          — const
+
+Gate is ACTIVE iff (secret is set) AND (`/_auth.html` asset exists). If the secret is
+set but `/_auth.html` is missing, the gate is treated as inactive (assets serve
+normally) — fail-open is the safe choice for a misconfigured gate page, since the
+alternative is an unservable uncertified 401.
+
+
+The change
+==========
+
+0. Capture the secret into heap state (runtime.rs + state.rs)
+------------------------------------------------------------
+
+`CanisterEnv` (runtime.rs:51) currently keeps only `PUBLIC_`-prefixed vars. Add:
+
+    pub struct CanisterEnv {
+        pub root_key: Vec<u8>,
+        pub public_vars: BTreeMap<String, String>,
+        pub auth_token: Option<String>,   // NEW: the `AUTH_TOKEN` env var, if present
+    }
+
+In `from_raw` (runtime.rs:74) pull `AUTH_TOKEN` out of `all_vars` into `auth_token`
+BEFORE the `PUBLIC_` filter — it is a server secret and must never reach `render_cookie`.
+
+`State` gains a derived heap field next to `env_cookie` (state.rs:157):
+
+    pub auth_token: Option<String>,
+
+It is derived state (like `env_cookie`): recaptured from the live system API on
+`post_upgrade` (store_env) and at sync start (capture_env_at_sync_start); never stable.
+
+
+1. Detect the cookie in `http_request` (state.rs:999)
+-----------------------------------------------------
+
+Add a `Cookie` arm to the header loop, parse out `IC_AUTH_TOKEN`, and thread an
+`authorized` flag through. (There can be multiple `Cookie` headers; each is
+`name=value; name=value`.)
+
+    const AUTH_COOKIE: &str = "IC_AUTH_TOKEN";
+
+    let mut token: Option<String> = None;
+    for (name, value) in req.headers.iter() {
+        ... existing Accept-Encoding / If-None-Match / Range arms ...
+        else if name.eq_ignore_ascii_case("Cookie") {
+            if let Some(v) = parse_cookie(value, AUTH_COOKIE) { token = Some(v); }
+        }
+    }
+    // Gate OFF (no secret) ⇒ always authorized. Gate ON ⇒ must match exactly.
+    let authorized = match &self.auth_token {
+        None => true,
+        Some(secret) => token.as_deref() == Some(secret.as_str()),
+    };
+    ... build_http_response(certificate, &path, encodings, etags, range_start, authorized)
+
+`parse_cookie(header, name)` splits on ';', trims, splits each on the first '=', returns
+the first matching value. Add it next to `parse_if_none_match` / `parse_range_start`
+with unit tests (multi-cookie, surrounding spaces, absent, empty).
+
+
+2. Gate at serve time in `build_http_response` (state.rs:727)
+-------------------------------------------------------------
+
+Three serve sites must honour the gate; all serve `/_auth.html`'s body at **401** under
+the REQUESTED path's certificate when `!authorized`:
+
+  a. Direct asset hit (state.rs:736): if `!authorized && gate_active && path != AUTH_KEY`,
+     serve `_auth.html` at 401 instead of the matched asset.
+  b. Redirect/alias rule match (state.rs:752): same gate before returning the alias
+     response — a token-less `/` must get the 401 gate page, not `index.html`.
+  c. The 404 fallthrough is UNCHANGED — a non-existent path is never gated.
+
+The 401 response is built exactly like a 4xx custom error page (status_override), which
+already exists: `build_asset_response(&auth_meta, encodings, Some(cert_header), etags,
+Some(401), None)`. Range is disabled for the gate (status_override path forces
+single-chunk; see build_ok_http_response, state.rs:847/871).
+
+    const AUTH_KEY: &str = "/_auth.html";
+
+    fn gate_response(&self, path: &str, certificate: &[u8],
+                     encodings: &[Encoding], etags: &[Hash]) -> Option<HttpResponse> {
+        let auth_meta = self.metadata.get(&AUTH_KEY.to_string())?;   // gate inactive if missing
+        let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
+        self.build_asset_response(&auth_meta, encodings, Some(&cert_header), etags,
+                                  Some(401), None)
+    }
+
+The witness from `witness_to_header(path)` covers the whole `<$>` subtree at `path`, so
+it proves whichever response we return — PROVIDED `_auth.html`'s 401 response hash is
+certified there. That is edit 3.
+
+(You cannot instead point `expr_path` at `/_auth.html`'s own subtree — the verifier's
+`validate_expr_path` requires `expr_path` to match the request URL. This is the same
+reason aliases certify at the source path. For the alias case (b) use the rule's tree
+`location` with `witness_to_header_with_location`, mirroring build_alias_rule_entry.)
+
+
+3. Certify `_auth.html` at 401 under every gated path (state.rs:464, :1128)
+---------------------------------------------------------------------------
+
+Refactor the per-encoding certify loop out of `recertify_asset` (state.rs:472-515) into:
+
+    fn certify_meta_at_path(&mut self, path: &AssetPath, meta: &AssetMeta,
+                            status_override: Option<u16>)
+
+  - status_override None  → today's behaviour (304 always; 200 single-chunk; 206 per
+    chunk for multi-chunk).
+  - status_override Some(401) → single-chunk encodings only, one leaf each with the
+    overridden status (mirror build_alias_rule_entry's 4xx branch, state.rs:1188-1201:
+    `response_hash(base_headers, 401, &enc.sha256)`).
+
+Then in `recertify_asset`:
+
+    fn recertify_asset(&mut self, key, meta) {
+        self.asset_hashes.remove_responses_for_path(key);
+        if meta.encodings.is_empty() { return; }
+        let path = AssetPath::from(key.as_str());
+        self.certify_meta_at_path(&path, meta, None);            // the asset itself
+
+        // Gate leaf: serve _auth.html at 401 under THIS path for token-less requests.
+        if self.auth_token.is_some() && key != AUTH_KEY {
+            if let Some(auth_meta) = self.metadata.get(&AUTH_KEY.to_string()) {
+                self.certify_meta_at_path(&path, &auth_meta, Some(401));
+            }
+        }
+    }
+
+`remove_responses_for_path(key)` clears the whole subtree first, so re-certifying both
+the asset and the gate leaf under it is clean.
+
+For aliases: in `build_alias_rule_entry` (state.rs:1128), when the gate is active and the
+rule source is not `/_auth.html`, ALSO certify `_auth.html` at 401 at the rule's
+`location` (alias_tree_path with the 401 response hash), and record those tree_paths on
+the entry so they're removed/rebuilt with the rule. The serve side (2b) returns that
+leaf via `witness_to_header_with_location`.
+
+
+4. Ordering: `_auth.html` changes must re-certify everything
+------------------------------------------------------------
+
+Every asset's gate leaf BORROWS `_auth.html`'s body+headers, so:
+  - `_auth.html` must already be in `self.metadata` when an asset is certified, and
+  - when `_auth.html` (or the secret) changes, EVERY asset and EVERY alias rule must be
+    re-certified, or their borrowed 401 leaves go stale and the gateway rejects them.
+
+This is the same shape the env cookie already solves. Add an all-asset pass mirroring
+`refresh_env` (state.rs:1248) — but over ALL assets, not just HTML:
+
+    fn refresh_auth_gate(&mut self) {
+        for key in self.metadata.keys().collect::<Vec<_>>() {
+            if let Some(meta) = self.metadata.get(&key) { self.recertify_asset(&key, &meta); }
+        }
+        self.on_redirect_rules_change();   // alias gate leaves
+    }
+
+Trigger points:
+  - post_upgrade_rebuild (state.rs:1270): already re-certifies every asset from a fully
+    populated `self.metadata`, so reading `_auth.html` meta per asset Just Works — only
+    ensure `auth_token` is captured (store_env) BEFORE the rebuild loop, like the cookie.
+  - During a sync: assets are created incrementally, so `_auth.html` may be created after
+    assets that reference it. Detect at sync finalization whether this call changed the
+    `/_auth.html` meta or the secret (snapshot presence + content hash at call start,
+    same trick as capture_env_at_sync_start, state.rs:1236) and run `refresh_auth_gate`
+    once if so. Hook it where `on_redirect_rules_change` already runs at the end of the
+    operation batch (sync.rs:187) — before HashingState. Ensure the sync plugin uploads
+    `/_auth.html` early; the end-of-batch pass makes correctness order-independent anyway.
+  - refresh_env endpoint (lib.rs:167): recapture the secret too and run the gate pass if
+    it changed.
+
+
+5. Guard: `/_auth.html` must be single-chunk (sync.rs:252)
+----------------------------------------------------------
+
+The 401 gate page is served as a single inline body (status_override ⇒ single-chunk),
+exactly like 404/410 custom error pages. Add a sync-op guard rejecting a multi-chunk
+`/_auth.html`, mirroring the existing `target_is_multichunk` check at sync.rs:269. Keep
+`/_auth.html` small (< ~1.9 MB).
+
+
+Tests (canister-core/src/tests.rs)
+===================================
+
+- Gate OFF by default (no secret): every asset serves normally; no 401.
+- Gate ON, correct `IC_AUTH_TOKEN` → asset serves (200/206/304, all encodings).
+- Gate ON, missing/empty/wrong token → 401 with `_auth.html` body + content-type.
+- Multi-cookie header (`ic_env=…; IC_AUTH_TOKEN=secret`) parses correctly.
+- Non-existent path → 404 regardless of token (gate never applies).
+- `/_auth.html` itself is reachable WITHOUT a token (never gated).
+- Alias path (`/` → `/index.html`) is gated: token-less `/` → 401 gate page.
+- Changing `/_auth.html` content re-certifies all gated leaves (old leaf gone, new
+  leaf served, gateway-verifiable).
+- Toggling the secret on/off re-certifies the gate leaves.
+- Multi-chunk `/_auth.html` is rejected by the sync guard.
+- parse_cookie unit tests (asset.rs/state.rs): multi-cookie, spaces, absent, empty,
+  duplicate names.
+
+Add an e2e (crates/e2e) alongside env_cookie coverage: deploy with a secret + a
+`_auth.html`, fetch a gated asset through the real gateway with and without the cookie,
+assert 401 vs 200 AND that the verifier accepts both (proves the 401 gate leaf is
+correctly certified).

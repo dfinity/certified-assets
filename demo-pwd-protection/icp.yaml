@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v1.0.0/docs/schemas/icp-yaml-schema.json
+
+canisters:
+  - name: frontend
+    build:
+      steps:
+      - type: script
+        commands:
+        - npm install
+        - npm run build
+      - type: pre-built
+        path: ../target/wasm32-unknown-unknown/canister-release/canister.wasm
+    sync:
+      steps:
+      - type: plugin
+        path: ../target/wasm32-wasip2/release/sync_plugin.wasm
+        dirs:
+        - dist
+    settings:
+      environment_variables:
+        IC_AUTH_TOKEN: password

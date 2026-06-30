@@ -3240,6 +3240,7 @@ mod env_cookie {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            auth_token: None,
         }
     }
 
@@ -3333,6 +3334,31 @@ mod env_cookie {
             ],
         );
         assert_eq!(env.public_vars.keys().collect::<Vec<_>>(), vec!["PUBLIC_A"]);
+        assert_eq!(env.auth_token, None);
+    }
+
+    #[test]
+    fn from_raw_extracts_auth_token_without_exposing_it() {
+        let env = CanisterEnv::from_raw(
+            mock_root_key(),
+            [
+                ("PUBLIC_A".to_string(), "1".to_string()),
+                ("IC_AUTH_TOKEN".to_string(), "password".to_string()),
+            ],
+        );
+        // The gate secret is captured but must never reach the public vars / cookie.
+        assert_eq!(env.auth_token.as_deref(), Some("password"));
+        assert_eq!(env.public_vars.keys().collect::<Vec<_>>(), vec!["PUBLIC_A"]);
+        assert!(!env.render_cookie().contains("password"));
+    }
+
+    #[test]
+    fn from_raw_treats_empty_auth_token_as_unset() {
+        let env = CanisterEnv::from_raw(
+            mock_root_key(),
+            [("IC_AUTH_TOKEN".to_string(), String::new())],
+        );
+        assert_eq!(env.auth_token, None);
     }
 
     #[test]
@@ -3629,5 +3655,256 @@ mod env_cookie {
             !verify_response(&state, &req, &stale).unwrap_or(false),
             "the pre-change cookie must not verify after capture re-certified it"
         );
+    }
+}
+
+// ───────── cookie-gate (`/_auth.html`) ─────────
+
+mod auth_gate {
+    use super::*;
+    use crate::runtime::CanisterEnv;
+    use crate::state::AUTH_KEY;
+    use wire_types::{RedirectRule, RulePattern};
+
+    const SECRET: &str = "password";
+    const AUTH_BODY: &[u8] = b"<html>please log in</html>";
+    const PAGE_BODY: &[u8] = b"<html>secret page</html>";
+
+    fn mock_root_key() -> Vec<u8> {
+        (0..133u32).map(|i| i as u8).collect()
+    }
+
+    /// A mock env carrying the gate secret (or none). `IC_AUTH_TOKEN` is private
+    /// (not `PUBLIC_`), so it never enters `public_vars`/the cookie.
+    fn env_with_token(token: Option<&str>) -> CanisterEnv {
+        CanisterEnv {
+            root_key: mock_root_key(),
+            public_vars: BTreeMap::new(),
+            auth_token: token.map(|t| t.to_string()),
+        }
+    }
+
+    fn html(key: &str, body: &'static [u8]) -> AssetBuilder {
+        AssetBuilder::new(key, "text/html").with_encoding("identity", vec![body])
+    }
+
+    fn cookie_header(token: &str) -> String {
+        format!("IC_AUTH_TOKEN={token}")
+    }
+
+    /// A `State` with `/_auth.html` + `/index.html` and the gate secret set
+    /// before the assets are synced — mirroring a deploy that set `IC_AUTH_TOKEN`
+    /// at sync start. The asset batch touches `/_auth.html`, so the end-of-batch
+    /// pass certifies every gate leaf.
+    fn gated_state() -> State {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        state.refresh_env(&env_with_token(Some(SECRET)));
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html(AUTH_KEY, AUTH_BODY), html("/index.html", PAGE_BODY)],
+        );
+        state
+    }
+
+    /// Mirrors `canister_core::post_upgrade`: a fresh `State` over the same
+    /// memory, recapturing the env (incl. the gate secret) before the rebuild.
+    fn upgrade_with_env(state: State, memory: DefaultMemoryImpl, env: &CanisterEnv) -> State {
+        drop(state);
+        let mut restored = State::new(memory);
+        restored.store_env(env);
+        restored.post_upgrade_rebuild();
+        restored
+    }
+
+    #[test]
+    fn gate_off_serves_asset_without_cookie() {
+        // No secret configured ⇒ gate inactive even though `/_auth.html` exists.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html(AUTH_KEY, AUTH_BODY), html("/index.html", PAGE_BODY)],
+        );
+        let resp = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body.as_ref(), PAGE_BODY);
+    }
+
+    #[test]
+    fn missing_token_serves_auth_page_at_401() {
+        let state = gated_state();
+        let resp = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(resp.status_code, 401);
+        assert_eq!(resp.body.as_ref(), AUTH_BODY);
+        assert_eq!(lookup_header(&resp, "content-type"), Some("text/html"));
+    }
+
+    #[test]
+    fn wrong_token_serves_auth_page_at_401() {
+        let state = gated_state();
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie_header("nope"))
+                .build(),
+        );
+        assert_eq!(resp.status_code, 401);
+        assert_eq!(resp.body.as_ref(), AUTH_BODY);
+    }
+
+    #[test]
+    fn correct_token_serves_asset() {
+        let state = gated_state();
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie_header(SECRET))
+                .build(),
+        );
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body.as_ref(), PAGE_BODY);
+    }
+
+    #[test]
+    fn token_among_other_cookies_serves_asset() {
+        // A real browser sends our own `ic_env` cookie alongside the token; the
+        // named-cookie parse must still find it (this is exactly why the gate
+        // can't use request certification).
+        let state = gated_state();
+        let header = format!("ic_env=abc; IC_AUTH_TOKEN={SECRET}; other=1");
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", header)
+                .build(),
+        );
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body.as_ref(), PAGE_BODY);
+    }
+
+    #[test]
+    fn nonexistent_path_is_404_not_gated() {
+        let state = gated_state();
+        let resp = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(resp.status_code, 404);
+    }
+
+    #[test]
+    fn auth_page_itself_is_reachable_without_token() {
+        let state = gated_state();
+        let resp = certified_http_request(&state, RequestBuilder::get(AUTH_KEY).build());
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body.as_ref(), AUTH_BODY);
+    }
+
+    #[test]
+    fn alias_path_is_gated() {
+        let mut state = gated_state();
+        state.set_redirect_rules(vec![RedirectRule {
+            from: RulePattern::Exact("/".into()),
+            to: "/index.html".into(),
+            status: 200,
+            headers: vec![],
+        }]);
+        // Unauthorized: the `/` rewrite is gated → 401 auth page.
+        let gated = certified_http_request(&state, RequestBuilder::get("/").build());
+        assert_eq!(gated.status_code, 401);
+        assert_eq!(gated.body.as_ref(), AUTH_BODY);
+        // Authorized: the rewrite serves `/index.html` at 200.
+        let ok = certified_http_request(
+            &state,
+            RequestBuilder::get("/")
+                .with_header("Cookie", cookie_header(SECRET))
+                .build(),
+        );
+        assert_eq!(ok.status_code, 200);
+        assert_eq!(ok.body.as_ref(), PAGE_BODY);
+    }
+
+    #[test]
+    fn changing_auth_page_recertifies_gate_leaves() {
+        let mut state = gated_state();
+        let ctx = mock_system_context();
+        const AUTH_V2: &[u8] = b"<html>v2 login</html>";
+        // Re-deploy the gate page with new content; the batch touches
+        // `/_auth.html`, so every gate leaf must be re-certified to the new body.
+        create_assets(&mut state, &ctx, vec![html(AUTH_KEY, AUTH_V2)]);
+        let resp = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(resp.status_code, 401);
+        assert_eq!(
+            resp.body.as_ref(),
+            AUTH_V2,
+            "gate leaf must reflect the updated auth page"
+        );
+    }
+
+    #[test]
+    fn toggling_secret_on_and_off() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html(AUTH_KEY, AUTH_BODY), html("/index.html", PAGE_BODY)],
+        );
+        // Off.
+        let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(r.status_code, 200);
+        // On.
+        state.refresh_env(&env_with_token(Some(SECRET)));
+        let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(r.status_code, 401);
+        // Off again.
+        state.refresh_env(&env_with_token(None));
+        let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body.as_ref(), PAGE_BODY);
+    }
+
+    #[test]
+    fn gate_survives_upgrade() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+        state.refresh_env(&env_with_token(Some(SECRET)));
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![html(AUTH_KEY, AUTH_BODY), html("/index.html", PAGE_BODY)],
+        );
+        let restored = upgrade_with_env(state, memory, &env_with_token(Some(SECRET)));
+        let resp = certified_http_request(&restored, RequestBuilder::get("/index.html").build());
+        assert_eq!(resp.status_code, 401);
+        assert_eq!(resp.body.as_ref(), AUTH_BODY);
+    }
+
+    #[test]
+    fn multi_chunk_auth_page_is_rejected() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        let session_id = start_session(&mut state, &ctx);
+        let operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new(AUTH_KEY, "text/html")
+                .with_encoding("identity", vec![b"aaaa".to_vec(), b"bbbb".to_vec()])],
+            session_id,
+        );
+        let err = run_computation_until_completion(|progress| {
+            state.execute_operations(
+                &ExecuteOperationsArguments {
+                    session_id,
+                    operations: operations.clone(),
+                    is_final: true,
+                },
+                progress,
+                &ctx,
+            )
+        })
+        .unwrap_err();
+        assert!(err.contains("single chunk"), "got: {err}");
     }
 }
