@@ -3,10 +3,16 @@
 //! goes through the gateway, so a passing status code means the gateway accepted
 //! the canister's *certified* response — the multi-response-per-path scheme working
 //! against the production verifier, not just the in-process one the unit tests use.
+//!
+//! The project deployed here is the runnable showcase at
+//! `examples/access-protection/`, deployed *in place* (not a tempdir copy) so the
+//! committed `icp.yaml` — which references the repo's `dist/` wasms — works
+//! unchanged for both a human and CI. This test both verifies the feature and
+//! guarantees the example stays deployable (see its README).
 
 use e2e::{
-    frontend_canister_id, http_fetch, http_fetch_with_headers, http_post_form, icp_cmd,
-    setup_project, LocalNetwork,
+    example_project, frontend_canister_id, http_fetch, http_fetch_with_headers, http_post_form,
+    icp_cmd, LocalNetwork,
 };
 use reqwest::StatusCode;
 
@@ -20,8 +26,8 @@ fn call(project: &std::path::Path, method: &str, args: &str) {
 
 #[test]
 fn protected_app_gates_unauthenticated_requests() {
-    let tmp = setup_project("tests/fixture/protected");
-    let project = tmp.path();
+    let project = example_project("access-protection");
+    let project = project.as_path();
     let _network = LocalNetwork::start(project);
 
     icp_cmd(project).arg("deploy").assert().success();

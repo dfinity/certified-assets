@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign in</title>
+    <!--
+      The login page is the ONLY gate-exempt path, so it must be fully
+      self-contained: any external CSS / JS / image it referenced would itself
+      be gated and fail to load for a logged-out visitor. Everything here is
+      inlined for that reason.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, sans-serif;
+        min-height: 100vh; margin: 0;
+        display: grid; place-items: center;
+        background: #0d1117; color: #e6edf3;
+      }
+      .card {
+        width: min(360px, 90vw); padding: 2rem;
+        border-radius: 12px; background: #161b22;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, .4);
+      }
+      h1 { margin: 0 0 .25rem; font-size: 1.25rem; }
+      p { margin: 0 0 1.25rem; color: #8b949e; font-size: .9rem; }
+      input, button {
+        width: 100%; box-sizing: border-box;
+        padding: .65rem .75rem; border-radius: 8px;
+        border: 1px solid #30363d; font-size: 1rem;
+      }
+      input { background: #0d1117; color: #e6edf3; margin-bottom: .75rem; }
+      button { background: #238636; color: #fff; border-color: #238636; cursor: pointer; }
+      button:hover { background: #2ea043; }
+      .hint { margin: 1rem 0 0; font-size: .8rem; }
+      code { background: #0d1117; padding: .1rem .35rem; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>🔒 This app is private</h1>
+      <p>Enter your access token to continue.</p>
+      <!--
+        Manual login: POST `token=<value>` to this same path. On success the
+        canister replies 302 → / and sets an HttpOnly cookie; on failure, 401.
+      -->
+      <form method="POST" action="/login.html">
+        <input type="password" name="token" placeholder="Access token" autofocus />
+        <button type="submit">Enter</button>
+      </form>
+      <p class="hint">
+        Demo token: <code>secret</code>. Tip: open
+        <code>/login.html#t=secret</code> to sign in with no prompt.
+      </p>
+    </main>
+    <script>
+      // Transparent login: a token in the URL fragment (`#t=<token>`) is
+      // auto-submitted, then scrubbed from the address bar with replaceState.
+      // The fragment never reaches the server, so a share link can sign a
+      // viewer in without ever showing the form.
+      var t = new URLSearchParams(location.hash.slice(1)).get("t");
+      if (t) {
+        var f = document.forms[0];
+        f.token.value = t;
+        history.replaceState(null, "", location.pathname);
+        f.submit();
+      }
+    </script>
+  </body>
+</html>

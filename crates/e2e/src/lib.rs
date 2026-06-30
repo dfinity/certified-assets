@@ -107,6 +107,32 @@ pub fn write_local_recipe(project: &Path) {
     fs::write(project.join("recipe.hbs"), recipe).expect("failed to write recipe.hbs");
 }
 
+/// Absolute path to a runnable example project under the repo's `examples/`.
+///
+/// Unlike [`setup_project`], this does **not** copy into a tempdir or inject
+/// wasms. The example's committed `icp.yaml` references the repo's `dist/`
+/// canister + plugin wasms by relative path (`../../dist/...`) — exactly the way
+/// a human runs it — so the test deploys the example *in place* and exercises the
+/// same bytes a reader would. `dist/` is populated by `make wasm`, which this
+/// crate's build script already runs before the tests compile.
+///
+/// The example directory is the project root. The caller must not mutate its
+/// committed files (canister-state-only tests like protection are fine); the only
+/// artifact left behind is a gitignored `.icp/`, which this removes up front so
+/// each run starts from clean network/deploy state.
+pub fn example_project(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(name)
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("example `{name}` not found under examples/: {e}"));
+    // Best-effort: drop any prior local replica/deploy state so the deploy is
+    // reproducible and a previous run (or a manual `icp deploy`) can't leak
+    // canister ids into this one.
+    let _ = fs::remove_dir_all(dir.join(".icp"));
+    dir
+}
+
 /// Return the canister ID of `frontend` as printed by `icp canister status --id-only`.
 pub fn frontend_canister_id(project: &Path) -> String {
     let stdout = icp_cmd(project)
