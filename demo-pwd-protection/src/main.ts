@@ -14,7 +14,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
 /** Clears the IC_AUTH_TOKEN cookie by expiring it (path `/`, matching how it's set). */
 function clearAuthToken() {
-  document.cookie = 'IC_AUTH_TOKEN=; path=/; Max-Age=0; SameSite=Lax'
+  document.cookie = 'IC_AUTH_TOKEN=; path=/; Max-Age=0; SameSite=Lax';
+  window.location.reload();
 }
 
 document

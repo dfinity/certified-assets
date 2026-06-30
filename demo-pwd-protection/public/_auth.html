@@ -2,14 +2,32 @@
   <head>
     <title>Unauthorized</title>
     <script>
-      function addCookie() {
-        document.cookie = "IC_AUTH_TOKEN=password";
+      function setAuthToken(value) {
+        document.cookie = "IC_AUTH_TOKEN=" + value + "; path=/; SameSite=Lax";
       }
+
+      // The login button sets the demo token and reloads so the gate re-evaluates.
+      function login() {
+        setAuthToken("password");
+        window.location.reload();
+      }
+
+      // On load: if the URL carries an `_auth_token` query param, adopt it as the
+      // cookie and reload with the param stripped (so it doesn't linger in the URL
+      // or get re-applied on the next reload).
+      (function () {
+        var url = new URL(window.location.href);
+        if (url.searchParams.has("_auth_token")) {
+          setAuthToken(url.searchParams.get("_auth_token"));
+          url.searchParams.delete("_auth_token");
+          window.location.replace(url.toString());
+        }
+      })();
     </script>
   </head>
 
   <body>
     <h1>Not Authorized</h1>
-    <button onClick="addCookie()">Login</button>
+    <button onClick="login()">Login</button>
   </body>
 </html>
