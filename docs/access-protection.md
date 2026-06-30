@@ -128,6 +128,39 @@ A token only works on the canister that issued it: the cookie is host-only (the
 browser never sends it to another origin) **and** tokens live in this canister's own
 store, so a token replayed against another canister isn't in *its* store.
 
+## How the gate is certified
+
+The canister serves **response-only** certified responses: the HTTP gateway (and any
+verifier) checks that each response is an *authentic, certified* response for the
+requested path — but **not** which of several certified responses the canister chose to
+return. Choosing one is ordinary application logic.
+
+That is the same mechanism the canister already uses to serve more than one response
+per URL — different content encodings, `200` vs `304`, `206` range responses, and the
+redirect/rewrite rules that serve one asset's body under another path. Access
+protection has the same shape: under every protected path the canister certifies
+**both** the asset's normal responses **and** a certified *unauthenticated sibling* —
+the `307 → <login_page>` (HTML pages) or the `401` (other types). At serve time it
+reads the `certified_assets_access` cookie and returns the sibling when it's missing or
+invalid, the real asset when it's valid — each one independently verified by the
+gateway. The login page's path additionally carries the certified `302 + Set-Cookie`
+redeem (one per token) and the `401` re-prompt, so a login `POST` is honored only
+because its outcome is certified too.
+
+**Why not certify the request?** Doing so would let the canister prove *which* request
+it answered, but request certification hashes the whole `Cookie` header verbatim — it
+can't match on a single *named* cookie. Nor would it fire: the canister sets its own
+`ic_env` cookie on HTML responses, so a browser always sends
+`Cookie: ic_env=…; certified_assets_access=…`, never a bare value. Picking one cookie
+out of many is necessarily app-side logic — hence response-only.
+
+**The caveat this creates.** Because the cookie→response choice is uncertified app
+logic, *which* response a request receives is **not** covered by the certificate. An
+honest replica gates correctly; a **malicious** replica could hand the asset to a
+token-less request (or the login page to a valid one), and the gateway couldn't tell.
+This is the unavoidable property of any cookie-driven gate on a response-only canister,
+and it sets up the trust boundary the threat model below makes precise.
+
 ## Threat model
 
 This is **access gating, not confidentiality.** Under the IC's honest-replica /
