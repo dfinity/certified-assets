@@ -177,6 +177,34 @@ type ExecuteOperationsArguments = record {
   is_final: bool;
 };
 
+// ───────── Access protection ─────────
+
+// Reported by `check_protection_status`. Distinguishes a public app from a
+// private one, and a healthy private app from a degraded one whose login-page
+// asset hasn't been synced (the app stays protected; a sync heals it).
+type ProtectionStatus = variant {
+  Disabled;
+  Enabled : record { login_page : Key };
+  EnabledLoginPageMissing : record { login_page : Key };
+};
+
+// Arguments to `issue_token`. A record (not positional args) so the two text
+// fields — the label and the optional chosen value — can't be silently swapped.
+type IssueTokenArgs = record {
+  // Human label — the token's unique identifier (issue / revoke / list).
+  label : text;
+  // Lifetime in seconds from now.
+  ttl_secs : nat32;
+  // A chosen (typeable) passphrase, or null for a high-entropy random token.
+  value : opt text;
+};
+
+// One live access token as `list_tokens` reports it (no secret material).
+type TokenInfo = record {
+  label : text;
+  expires_at : nat64; // absolute expiry, nanoseconds
+};
+
 service: {
   // ───────── Canister metadata ─────────
 
@@ -263,4 +291,28 @@ service: {
   // publish an env-var change without a content sync. Blast radius is bounded:
   // only `text/html` assets and redirect rules re-certify.
   refresh_env: () -> ();
+
+  // ───────── Access protection ─────────
+  //
+  // Controller-only configuration for the "private app" gate. With protection
+  // on, unauthenticated HTTP requests get a certified redirect to the login page
+  // (HTML) or a certified 401 (other types) instead of asset content; access is
+  // a set of labeled tokens (the cookie *is* the token). All serving — including
+  // login validation — stays in the `http_request` query. A public app
+  // (protection off) is completely unchanged.
+
+  // Turn the gate on, naming the owner-supplied login-page asset (gate-exempt).
+  // Does not require the page to exist yet (enable-first is the secure ordering).
+  enable_protection : (login_page : Key) -> ();
+  // Turn the gate off and drop all tokens.
+  disable_protection : () -> ();
+  // Mint a token; returns the token value (shown once). A classic "password" is
+  // one long-lived token.
+  issue_token : (IssueTokenArgs) -> (text);
+  // Revoke the token with the given label (live on the next request).
+  revoke_token : (label : text) -> ();
+  // Live tokens (label + expiry) for the management UI. Controller-only.
+  list_tokens : () -> (vec TokenInfo) query;
+  // Whether protection is off, healthy, or degraded. Controller-only.
+  check_protection_status : () -> (ProtectionStatus) query;
 }

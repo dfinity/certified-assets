@@ -242,11 +242,14 @@ fn populate_one(key: &str, content_type: &str, num_chunks: usize, chunk_bytes: u
 fn serve_small_asset() -> BenchResult {
     let state = populate_one("/index.html", "text/html", 1, SMALL_ASSET_BYTES);
     // Sanity (not measured): a broken setup would otherwise measure the 404 path.
-    assert_eq!(state.http_request(get("/index.html"), &[]).status_code, 200);
+    assert_eq!(
+        state.http_request(get("/index.html"), &[], 0).status_code,
+        200
+    );
 
     let req = get("/index.html");
     bench_fn(|| {
-        std::hint::black_box(state.http_request(req, &[]));
+        std::hint::black_box(state.http_request(req, &[], 0));
     })
 }
 
@@ -264,7 +267,7 @@ fn serve_large_asset() -> BenchResult {
         LARGE_CHUNK_BYTES,
     );
     // Sanity (not measured): a plain GET of a multi-chunk asset is a 206 chunk 0.
-    assert_eq!(state.http_request(get("/big.bin"), &[]).status_code, 206);
+    assert_eq!(state.http_request(get("/big.bin"), &[], 0).status_code, 206);
 
     bench_fn(|| {
         // Chunks are uniform `LARGE_CHUNK_BYTES`, so chunk `i` begins at
@@ -276,7 +279,7 @@ fn serve_large_asset() -> BenchResult {
             } else {
                 get_range("/big.bin", i * LARGE_CHUNK_BYTES)
             };
-            std::hint::black_box(state.http_request(req, &[]));
+            std::hint::black_box(state.http_request(req, &[], 0));
         }
     })
 }

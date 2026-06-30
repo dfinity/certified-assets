@@ -212,6 +212,34 @@ pub fn http_fetch_subdomain(project: &Path, path: &str) -> reqwest::blocking::Re
         .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
 }
 
+/// POST `body` (as `application/x-www-form-urlencoded`) to `<path>` on the
+/// `frontend` canister via the local gateway, attaching `headers`. Redirects are
+/// not followed, so callers can assert on the `302` + `Set-Cookie` a login redeem
+/// returns. Like the GET helpers, going through the gateway implicitly validates
+/// the `IC-Certificate` — the redeem response must be certified to be delivered.
+pub fn http_post_form(
+    project: &Path,
+    path: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> reqwest::blocking::Response {
+    let cid = frontend_canister_id(project);
+    let base = gateway_url(project);
+    let url = format!("{base}{path}?canisterId={cid}");
+    let mut req = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build reqwest client")
+        .post(&url)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body.to_string());
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    req.send()
+        .unwrap_or_else(|e| panic!("POST {url} failed: {e}"))
+}
+
 /// Call `get_asset_details` on the `frontend` canister and return all asset details.
 pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
     let stdout = icp_cmd(project)

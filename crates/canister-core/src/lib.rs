@@ -4,6 +4,7 @@ mod blob_store;
 mod certification;
 mod http;
 mod nested_tree;
+mod protection;
 mod redirect;
 mod runtime;
 mod stable_store;
@@ -23,10 +24,11 @@ use crate::{
     sync::ComputationStatus,
 };
 use candid::Principal;
-use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, trap};
+use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, time, trap};
 use std::cell::RefCell;
 
 pub use http::{HttpRequest, HttpResponse};
+pub use protection::{IssueTokenArgs, ProtectionStatus, TokenInfo};
 pub use serde_bytes::ByteBuf;
 pub use wire_types::{
     AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
@@ -128,8 +130,74 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
         trap("Only support V2 certification");
     }
     let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
+    // `time()` is readable in a (non-replicated) query; the access-protection
+    // gate uses it to reject expired tokens. Unlike `root_key`/`env_var_*` (which
+    // trap in a query and are snapshotted on the update path), `time` is fine here.
+    let now = time();
 
-    STATE.with_borrow(|s| s.http_request(req, &certificate))
+    STATE.with_borrow(|s| s.http_request(req, &certificate, now))
+}
+
+/// Turns access protection on with `login_page` as the gate-exempt login surface.
+/// Controller-guarded at the endpoint. Idempotent at the same page; see
+/// [`State::enable_protection`].
+pub fn enable_protection(login_page: String) {
+    STATE.with_borrow_mut(|s| {
+        s.enable_protection(login_page);
+        certified_data_set(s.root_hash());
+    })
+}
+
+/// Turns access protection off and drops all tokens. Controller-guarded.
+pub fn disable_protection() {
+    STATE.with_borrow_mut(|s| {
+        s.disable_protection();
+        certified_data_set(s.root_hash());
+    })
+}
+
+/// Issues an access token and returns its plaintext value (shown once). With
+/// `args.value` set, mints that exact (typeable) passphrase; otherwise a
+/// high-entropy random value via `raw_rand`. Controller-guarded. Async because
+/// random tokens need the management canister's randomness — a rare, off-the-
+/// hot-path update.
+pub async fn issue_token(args: IssueTokenArgs) -> String {
+    let value = match args.value {
+        Some(v) => v,
+        None => {
+            let random = ic_cdk_management_canister::raw_rand()
+                .await
+                .unwrap_or_else(|e| trap(format!("raw_rand failed: {e:?}")));
+            hex::encode(random)
+        }
+    };
+    let now = time();
+    STATE.with_borrow_mut(|s| {
+        if let Err(msg) = s.issue_token(value.clone(), args.label, args.ttl_secs, now) {
+            trap(&msg);
+        }
+        certified_data_set(s.root_hash());
+    });
+    value
+}
+
+/// Revokes the token with the given label (live on the next request).
+/// Controller-guarded.
+pub fn revoke_token(label: String) {
+    STATE.with_borrow_mut(|s| {
+        s.revoke_token(&label);
+        certified_data_set(s.root_hash());
+    })
+}
+
+/// Live tokens (label + expiry) for the management UI. Controller-guarded.
+pub fn list_tokens() -> Vec<TokenInfo> {
+    STATE.with_borrow(|s| s.list_tokens())
+}
+
+/// Whether protection is off, healthy, or degraded (login page missing).
+pub fn check_protection_status() -> ProtectionStatus {
+    STATE.with_borrow(|s| s.check_protection_status())
 }
 
 /// Whether the current caller may sync assets: either in the authorized set, or

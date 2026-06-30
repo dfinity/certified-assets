@@ -171,7 +171,7 @@ impl HashTreePath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NestedTreeKey {
     String(String),
     Bytes(Vec<u8>),

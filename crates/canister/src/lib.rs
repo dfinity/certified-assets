@@ -1,7 +1,8 @@
 use candid::Principal;
 use canister_core::{
     guard_can_sync, guard_is_controller, AssetDetails, ByteBuf, ExecuteOperationsArguments,
-    HttpRequest, HttpResponse, RedirectRule, StartSyncResult, UploadChunksArguments, Version,
+    HttpRequest, HttpResponse, IssueTokenArgs, ProtectionStatus, RedirectRule, StartSyncResult,
+    TokenInfo, UploadChunksArguments, Version,
 };
 use ic_cdk::{post_upgrade, query, update};
 
@@ -96,6 +97,41 @@ fn upload_chunks(arg: UploadChunksArguments) {
 #[update(guard = "guard_can_sync")]
 async fn execute_operations(arg: ExecuteOperationsArguments) {
     canister_core::execute_operations(arg).await
+}
+
+// ───────── Access protection ─────────
+// Controller-only configuration for the "private app" gate. None of these touch
+// the serving hot path; all serving (including login validation) stays in the
+// `http_request` query.
+
+#[update(guard = "guard_is_controller")]
+fn enable_protection(login_page: String) {
+    canister_core::enable_protection(login_page)
+}
+
+#[update(guard = "guard_is_controller")]
+fn disable_protection() {
+    canister_core::disable_protection()
+}
+
+#[update(guard = "guard_is_controller")]
+async fn issue_token(args: IssueTokenArgs) -> String {
+    canister_core::issue_token(args).await
+}
+
+#[update(guard = "guard_is_controller")]
+fn revoke_token(label: String) {
+    canister_core::revoke_token(label)
+}
+
+#[query(guard = "guard_is_controller")]
+fn list_tokens() -> Vec<TokenInfo> {
+    canister_core::list_tokens()
+}
+
+#[query(guard = "guard_is_controller")]
+fn check_protection_status() -> ProtectionStatus {
+    canister_core::check_protection_status()
 }
 
 ic_cdk::export_candid!();

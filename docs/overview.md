@@ -102,6 +102,8 @@ When you need finer control, each topic has its own page:
   Security Policy, and other security headers.
 - **[Site files & conventions](site-files.md)** — what gets uploaded, the special
   `_redirects`/`_headers` files, excluded files, and custom domains.
+- **[Access protection](access-protection.md)** — put a login screen in front of a
+  private/preview app with revocable, expiring access tokens.
 - **[Verifying contents](verifying-contents.md)** — the canister's state hash:
   prove to a third party that it serves exactly a known build, from source.
 

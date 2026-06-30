@@ -14,9 +14,14 @@
 //!   no content bytes.
 //! - content chunks — `StableBTreeMap<ContentChunkKey, Vec<u8>>`: raw bytes,
 //!   one entry per chunk.
+//! - [`ProtectionSettings`] / [`TokenMeta`] — access protection: one `StableCell`
+//!   for the gate's on/off + login page, and a `StableBTreeMap<label, TokenMeta>`
+//!   for live tokens.
 //!
 //! The certified-response tree is *not* stored here — it is derived heap state
 //! rebuilt from this metadata after an upgrade (see `State::post_upgrade_rebuild`).
+//! The hot-path token gate index is likewise derived heap (`State::token_index`),
+//! rebuilt from [`TokenMeta`] on upgrade — only the records above are durable.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +31,7 @@ use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use serde::{Deserialize, Serialize};
 
+use crate::certification::NestedTreeKey;
 use wire_types::{Encoding, RedirectRule};
 
 /// Principals authorized to sync (controllers are always allowed and are not
@@ -67,6 +73,42 @@ impl Storable for StateHash {
         max_size: 32,
         is_fixed_size: true,
     };
+}
+
+/// Access-protection configuration (see the access-protection design). When
+/// `login_page` is `Some`, the gate is **on**: unauthenticated requests get a
+/// certified redirect/401 instead of asset content, and the named asset is the
+/// gate-exempt login surface. `None` (the default) means a fully public app —
+/// the gate, the no-store override, and the unauthenticated certified siblings
+/// are all absent, so a public canister is bit-for-bit unchanged.
+///
+/// Its own `StableCell` so toggling protection is a single small write,
+/// independent of the (potentially large) asset metadata.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProtectionSettings {
+    pub login_page: Option<String>,
+}
+
+/// Per-token metadata, keyed by the token's **label** — the unique identifier a
+/// controller uses to issue/revoke/list. (The hot-path gate doesn't read this; it
+/// uses the in-heap `token_index`, which is rebuilt from these records on upgrade.)
+/// Holds the value hash (so revoke/GC can drop the matching `token_index` entry,
+/// and the index can be rebuilt), the expiry, and the certified-tree path of this
+/// token's `POST <login_page>` redeem response (`302 → "/"` + `Set-Cookie`). The
+/// redeem leaf's hash is derived from the plaintext cookie value, so storing the
+/// *path* lets the canister re-insert it on upgrade and remove it on revoke/GC
+/// **without** ever holding the plaintext. `token_id = SHA-256(value)`, so the
+/// plaintext is never stored either.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TokenMeta {
+    /// `SHA-256(value)` — links this token to its `token_index` entry and lets the
+    /// index be reconstructed on upgrade.
+    pub token_id: [u8; 32],
+    /// Absolute expiry in nanoseconds; the gate rejects once `now >= expires_at`.
+    pub expires_at: u64,
+    /// Full `HashTreePath` (as a `Vec<NestedTreeKey>`) of the certified redeem
+    /// response for this token, at the `login_page` subtree.
+    pub redeem_path: Vec<NestedTreeKey>,
 }
 
 /// Per-asset metadata. Content bytes live in the chunk store, grouped by each
@@ -211,6 +253,8 @@ macro_rules! impl_cbor_storable {
 impl_cbor_storable!(AuthorizedSet);
 impl_cbor_storable!(RedirectRules);
 impl_cbor_storable!(AssetMeta);
+impl_cbor_storable!(ProtectionSettings);
+impl_cbor_storable!(TokenMeta);
 
 #[cfg(test)]
 mod tests {
