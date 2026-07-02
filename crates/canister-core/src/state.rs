@@ -20,12 +20,15 @@ use crate::asset::{
 };
 use crate::blob_store::BlobStore;
 use crate::certification::{
-    response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, RequestHash,
+    build_ic_certificate_expression_header, response_hash, AssetKey, AssetPath,
+    CertificateExpression, CertifiedResponses, HashTreePath, NestedTreeKey, RequestHash,
     ResponseHash,
 };
 use crate::http::{HeaderField, HttpRequest, HttpResponse};
+use crate::protection::{ProtectionResponse, ProtectionStatus, TokenInfo};
 use crate::stable_store::{
-    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, RedirectRules, StateHash,
+    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, ProtectionSettings,
+    RedirectRules, StateHash, TokenMeta,
 };
 use crate::sync::{Chunk, SyncSession};
 use crate::url::url_decode;
@@ -35,7 +38,7 @@ use ic_representation_independent_hash::Value;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
 use serde_bytes::ByteBuf;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
 
 use wire_types::{
@@ -100,6 +103,13 @@ const CHUNK_CERT_MEMORY: MemoryId = MemoryId::new(7);
 /// Cached canonical state hash (`StateHash`), recomputed at the end of every
 /// final sync. Its own cell so the frequent counter bumps don't touch it.
 const STATE_HASH_MEMORY: MemoryId = MemoryId::new(8);
+/// Access-protection settings (`ProtectionSettings`): one small cell that flips
+/// the canister between public and private. `None` login page ⇒ public.
+const PROTECTION_MEMORY: MemoryId = MemoryId::new(9);
+/// Live access tokens, keyed by their unique **label** (`label -> TokenMeta`).
+/// The management view: issue/revoke/list. Empty unless protection is on. The
+/// hot-path gate index is *derived* from this (in heap; see `token_index`).
+const TOKENS_MEMORY: MemoryId = MemoryId::new(10);
 
 pub struct State {
     // ---- durable (stable memory) ----
@@ -129,6 +139,13 @@ pub struct State {
     /// returned verbatim by the public `state_hash` endpoint. `[0; 32]` until the
     /// first sync finalizes. See [`State::cached_state_hash`].
     state_hash: StableCell<StateHash, Mem>,
+    /// Access-protection settings. `login_page == None` (the default) ⇒ a fully
+    /// public app: the gate, the no-store override, and the certified
+    /// unauthenticated siblings are all absent. See the access-protection design.
+    protection: StableCell<ProtectionSettings, Mem>,
+    /// Live access tokens keyed by their unique **label** — the management view
+    /// (issue/revoke/list, all O(log n) by label). Empty when protection is off.
+    tokens: StableBTreeMap<String, TokenMeta, Mem>,
 
     // ---- transient heap (lost on upgrade) ----
     /// Chunks staged by `upload_chunks` for the current sync, in upload order:
@@ -155,6 +172,13 @@ pub struct State {
     /// (the env vars themselves survive as canister settings), exactly like
     /// `asset_hashes`. See [`State::effective_headers`].
     pub env_cookie: Option<String>,
+    /// Hot-path gate index: `SHA-256(value) -> expires_at`. The per-request gate
+    /// hashes the presented cookie and looks it up here — a heap-map read, no
+    /// stable access or `TokenMeta` deserialize. Pure derived state (every entry
+    /// is reconstructable from `tokens`, which carries each token's `token_id` and
+    /// expiry), so it lives in heap and is rebuilt on upgrade like `asset_hashes`.
+    /// Kept one-to-one with `tokens`; revocation/expiry are live.
+    token_index: HashMap<[u8; 32], u64>,
 }
 
 impl Default for State {
@@ -186,11 +210,14 @@ impl State {
             content: BlobStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
             chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
             state_hash: StableCell::init(mm.get(STATE_HASH_MEMORY), StateHash::default()),
+            protection: StableCell::init(mm.get(PROTECTION_MEMORY), ProtectionSettings::default()),
+            tokens: StableBTreeMap::init(mm.get(TOKENS_MEMORY)),
             chunks: Vec::new(),
             sync_session: None,
             asset_hashes: CertifiedResponses::default(),
             rule_certified_entries: Vec::new(),
             env_cookie: None,
+            token_index: HashMap::new(),
         }
     }
 
@@ -455,7 +482,31 @@ impl State {
                 headers.push(("set-cookie".to_string(), cookie.clone()));
             }
         }
+        // Under protection, force `Cache-Control: no-store` on every served
+        // response. The boundary cache is cookie-blind (keys on path+range, no
+        // `Vary`), so a cached `200` could be replayed to a no-token request
+        // (asset leak) or a cached `307`/`401` to an authorized user. `no-store`
+        // is certified like any other header, so an honest gateway can't strip
+        // it. This overrides any user `_headers` cache-control while protected;
+        // public apps (`protection == None`) are untouched.
+        if self.protection_enabled() {
+            headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cache-control"));
+            headers.push(("cache-control".to_string(), "no-store".to_string()));
+        }
         headers
+    }
+
+    // ---- access protection ----
+
+    /// The configured login-page path when the gate is on, else `None`. Reads
+    /// the in-memory `StableCell`, so it is cheap enough to call per request.
+    pub fn protection_login_page(&self) -> Option<String> {
+        self.protection.get().login_page.clone()
+    }
+
+    /// Whether access protection is enabled (the gate is on).
+    pub fn protection_enabled(&self) -> bool {
+        self.protection.get().login_page.is_some()
     }
 
     /// Removes and recomputes every certified response for one asset from its
@@ -463,10 +514,26 @@ impl State {
     /// never content bytes.
     fn recertify_asset(&mut self, key: &AssetKey, meta: &AssetMeta) {
         self.asset_hashes.remove_responses_for_path(key);
-        if meta.encodings.is_empty() {
-            return;
+        if !meta.encodings.is_empty() {
+            self.certify_asset_encodings(key, meta);
         }
 
+        // Access protection: this path may also carry the gate's certified
+        // unauthenticated sibling — or, for the login page itself, its redeem
+        // responses (which share this subtree and were wiped above).
+        if let Some(login_page) = self.protection_login_page() {
+            if key.as_str() == login_page {
+                self.reassert_login_responses(&login_page);
+            } else {
+                self.certify_unauth_sibling(key, meta, &login_page);
+            }
+        }
+    }
+
+    /// Certifies the 200/304 (single-chunk) or N×206 (multi-chunk) responses for
+    /// every encoding of an asset. Split out of [`Self::recertify_asset`] so the
+    /// access-protection tail there runs even for a content-less asset.
+    fn certify_asset_encodings(&mut self, key: &AssetKey, meta: &AssetMeta) {
         let effective_headers = self.effective_headers(meta);
         let path = AssetPath::from(key.as_str());
         for (&encoding, enc) in &meta.encodings {
@@ -996,7 +1063,364 @@ impl State {
         }
     }
 
-    pub fn http_request(&self, req: HttpRequest, certificate: &[u8]) -> HttpResponse {
+    // ---- access-protection certify/serve helpers ----
+
+    /// Certifies one [`ProtectionResponse`] as a response-only leaf at `location`
+    /// (an asset `<$>`, a rule `<$>`/`<*>`, or the root `<*>`). Returns the leaf's
+    /// `HashTreePath` so per-token redeem leaves can be stored for later removal.
+    fn certify_protection_response(
+        &mut self,
+        location: &HashTreePath,
+        resp: &ProtectionResponse,
+    ) -> HashTreePath {
+        let cert_expr = resp.cert_expr();
+        let resp_hash = resp.response_hash();
+        let tp = crate::redirect::alias_tree_path(location, cert_expr.expression_hash, resp_hash);
+        self.asset_hashes.certify_response_precomputed(&tp);
+        tp
+    }
+
+    /// Builds the served `HttpResponse` for a [`ProtectionResponse`], attaching the
+    /// `IC-CertificateExpression` header and the `IC-Certificate` witness for
+    /// `location`. The bytes match the certified leaf exactly (same constructor),
+    /// so the gateway verifies it.
+    fn serve_protection_response(
+        &self,
+        resp: &ProtectionResponse,
+        request_path: &str,
+        location: &HashTreePath,
+        certificate: &[u8],
+    ) -> HttpResponse {
+        let cert_expr = resp.cert_expr();
+        let cert_expr_header = build_ic_certificate_expression_header(&cert_expr);
+        let cert_header =
+            self.asset_hashes
+                .witness_to_header_with_location(request_path, location, certificate);
+        let mut headers = resp.headers.clone();
+        headers.push(cert_expr_header);
+        headers.push(cert_header);
+        HttpResponse {
+            status_code: resp.status,
+            headers,
+            body: ByteBuf::from(resp.body.clone()),
+            upgrade: None,
+        }
+    }
+
+    /// Certifies the unauthenticated sibling for a protected asset path: a
+    /// `307 → <login_page>` for HTML (humans navigate to documents) or a `401`
+    /// for anything else (a redirect would hand a subresource the wrong content
+    /// type).
+    fn certify_unauth_sibling(&mut self, key: &AssetKey, meta: &AssetMeta, login_page: &str) {
+        let resp = if crate::asset::is_html_content_type(&meta.content_type) {
+            ProtectionResponse::redirect_to_login(login_page)
+        } else {
+            ProtectionResponse::unauthorized()
+        };
+        let location = AssetPath::from(key.as_str()).asset_hash_path_root();
+        self.certify_protection_response(&location, &resp);
+    }
+
+    /// (Re)certifies the login page's `POST` responses: the shared redeem-failure
+    /// `401` plus each live token's `302 + Set-Cookie` redeem response. The `200`
+    /// page comes from the sync at the same subtree, so this must run whenever
+    /// that subtree is rebuilt (and on upgrade). Token redeem leaves are
+    /// re-inserted from their stored paths — no plaintext needed.
+    fn reassert_login_responses(&mut self, login_page: &str) {
+        let location = AssetPath::from(login_page).asset_hash_path_root();
+        self.certify_protection_response(&location, &ProtectionResponse::redeem_failure());
+        let paths: Vec<Vec<NestedTreeKey>> = self
+            .tokens
+            .iter()
+            .map(|e| e.into_pair().1.redeem_path)
+            .collect();
+        for path in paths {
+            self.asset_hashes
+                .certify_response_precomputed(&HashTreePath(path));
+        }
+    }
+
+    /// Whether the request carries a currently-valid `certified_assets_access` cookie: some
+    /// presented value hashes to a stored, unexpired token. Plain string parsing
+    /// of the `Cookie` header, so `ic_env` and any other cookie are irrelevant.
+    fn cookie_token_valid(&self, req: &HttpRequest, now: u64) -> bool {
+        crate::protection::access_cookie_values(req)
+            .into_iter()
+            .any(|value| {
+                self.token_index
+                    .get(&crate::protection::token_id(&value))
+                    .is_some_and(|&expires_at| expires_at > now)
+            })
+    }
+
+    /// Serves the certified unauthenticated response for `path`, mirroring the
+    /// resolution order of [`Self::build_http_response`] so the witness lands at
+    /// the most-specific certified location: an asset's sibling, a matching
+    /// rule's `307`, or the universal root `<*>` `307`.
+    fn serve_unauthenticated(
+        &self,
+        path: &str,
+        login_page: &str,
+        certificate: &[u8],
+    ) -> HttpResponse {
+        // 1. Exact asset at this path → its 307/401 sibling.
+        if let Some(meta) = self.metadata.get(&path.to_string()) {
+            let resp = if crate::asset::is_html_content_type(&meta.content_type) {
+                ProtectionResponse::redirect_to_login(login_page)
+            } else {
+                ProtectionResponse::unauthorized()
+            };
+            let location = AssetPath::from(path).asset_hash_path_root();
+            return self.serve_protection_response(&resp, path, &location, certificate);
+        }
+        // 2. Matching redirect rule → a 307 at the rule's location instead of
+        //    following the rule (which could leak content).
+        let redirect_rules = self.redirect_rules.get();
+        for (idx, rule) in redirect_rules.0.iter().enumerate() {
+            if !crate::redirect::matches(rule, path) {
+                continue;
+            }
+            if self
+                .rule_certified_entries
+                .get(idx)
+                .and_then(|e| e.as_ref())
+                .is_none()
+            {
+                continue;
+            }
+            let resp = ProtectionResponse::redirect_to_login(login_page);
+            let location = crate::redirect::tree_location(rule);
+            return self.serve_protection_response(&resp, path, &location, certificate);
+        }
+        // 3. No asset, no rule → the universal root `<*>` 307.
+        let resp = ProtectionResponse::redirect_to_login(login_page);
+        let location = HashTreePath::not_found_base_path();
+        self.serve_protection_response(&resp, path, &location, certificate)
+    }
+
+    /// Handles `POST <login_page>` (a certified query — no upgrade). Reads the
+    /// presented value from the form body and returns this token's certified
+    /// `302 + Set-Cookie` on success, or the certified `401` re-prompt otherwise.
+    fn serve_redeem(
+        &self,
+        req: &HttpRequest,
+        login_page: &str,
+        certificate: &[u8],
+        now: u64,
+    ) -> HttpResponse {
+        let location = AssetPath::from(login_page).asset_hash_path_root();
+        if let Some(value) = crate::protection::parse_form_token(req.body.as_ref()) {
+            if self
+                .token_index
+                .get(&crate::protection::token_id(&value))
+                .is_some_and(|&expires_at| expires_at > now)
+            {
+                let resp = ProtectionResponse::redeem_success(&value);
+                return self.serve_protection_response(&resp, login_page, &location, certificate);
+            }
+        }
+        let resp = ProtectionResponse::redeem_failure();
+        self.serve_protection_response(&resp, login_page, &location, certificate)
+    }
+
+    /// Adds the protection layer's redirect-rule siblings after a rule rebuild:
+    /// the universal root `<*>` `307 → login`, plus a `307` at every non-root rule
+    /// location (whose exact entry would otherwise reject the root wildcard). The
+    /// per-rule siblings are tracked on the rule entry so the next rebuild removes
+    /// them; the root one is re-added each rebuild (cleared by
+    /// `remove_fallback_responses`). Only called while protection is on.
+    fn certify_rule_unauth_siblings(&mut self, login_page: &str) {
+        let redirect = ProtectionResponse::redirect_to_login(login_page);
+        let root = HashTreePath::not_found_base_path();
+        self.certify_protection_response(&root, &redirect);
+        for idx in 0..self.rule_certified_entries.len() {
+            let Some(location) = self
+                .rule_certified_entries
+                .get(idx)
+                .and_then(|e| e.as_ref())
+                .map(|e| e.location.clone())
+            else {
+                continue;
+            };
+            if location.0 == root.0 {
+                continue; // root <*> already covered by the universal sibling
+            }
+            let tp = self.certify_protection_response(&location, &redirect);
+            if let Some(entry) = self.rule_certified_entries[idx].as_mut() {
+                entry.tree_paths.push(tp);
+            }
+        }
+    }
+
+    // ---- access-protection state management (controller-driven) ----
+
+    /// Re-certifies every asset from its metadata. Shared by the protection
+    /// toggles and `post_upgrade_rebuild`.
+    fn recertify_all_assets(&mut self) {
+        let keys: Vec<AssetKey> = self.metadata.keys().collect();
+        for key in keys {
+            if let Some(meta) = self.metadata.get(&key) {
+                self.recertify_asset(&key, &meta);
+            }
+        }
+    }
+
+    /// Removes every certified response under the login page's subtree (redeem
+    /// `302`s, the `401`, and the `200` page if synced) and drops all tokens. A
+    /// following recertify re-adds the `200` for a still-present asset.
+    fn clear_tokens_and_login_responses(&mut self, login_page: &str) {
+        // The whole login subtree (redeem 302s, the 401, the 200 page) goes in one
+        // shot, so per-token cert removal isn't needed — just empty the store and
+        // the (heap) gate index.
+        self.asset_hashes.remove_responses_for_path(login_page);
+        let labels: Vec<String> = self.tokens.keys().collect();
+        for label in labels {
+            self.tokens.remove(&label);
+        }
+        self.token_index.clear();
+    }
+
+    /// Turns the gate **on** with the given login page (controller-guarded at the
+    /// endpoint). Enabling on a fresh canister before the first sync is the secure
+    /// ordering — no window in which assets are world-readable. Idempotent if
+    /// already enabled at the same page; re-pointing to a different page drops the
+    /// old tokens (their redeem certs live under the old subtree). Caller
+    /// publishes `certified_data` afterwards.
+    pub fn enable_protection(&mut self, login_page: String) {
+        let previous = self.protection_login_page();
+        if previous.as_deref() == Some(login_page.as_str()) {
+            return;
+        }
+        if let Some(old) = previous {
+            self.clear_tokens_and_login_responses(&old);
+        }
+        self.protection.set(ProtectionSettings {
+            login_page: Some(login_page.clone()),
+        });
+        self.recertify_all_assets();
+        self.on_redirect_rules_change();
+        // Enable-first: if the page isn't synced yet, the asset loop didn't touch
+        // it, but the redeem endpoint must still work — assert its responses.
+        if !self.metadata.contains_key(&login_page) {
+            self.reassert_login_responses(&login_page);
+        }
+    }
+
+    /// Turns the gate **off** and drops all tokens, restoring a fully public app.
+    /// Caller publishes `certified_data` afterwards.
+    pub fn disable_protection(&mut self) {
+        let Some(login_page) = self.protection_login_page() else {
+            return;
+        };
+        self.protection.set(ProtectionSettings { login_page: None });
+        self.clear_tokens_and_login_responses(&login_page);
+        self.recertify_all_assets();
+        self.on_redirect_rules_change();
+    }
+
+    /// Mints a token under `label`: stores the record (`token_id`, expiry,
+    /// redeem-cert path) and the gate-index entry (`token_id → expiry`), certifies
+    /// this token's redeem response, and first sweeps expired tokens so the
+    /// store/tree track only live tokens. The plaintext `value` is supplied by the
+    /// caller (random or chosen) and is never stored. Errors if protection is off.
+    /// Caller publishes `certified_data` afterwards.
+    pub fn issue_token(
+        &mut self,
+        value: String,
+        label: String,
+        ttl_secs: u32,
+        now: u64,
+    ) -> Result<(), String> {
+        let Some(login_page) = self.protection_login_page() else {
+            return Err("protection is not enabled".to_string());
+        };
+        self.sweep_expired_tokens(now);
+        // Labels are the unique identifier: re-issuing under an existing label
+        // rotates it — drop the old token's gate-index entry and redeem cert first.
+        self.remove_token(&label);
+        let expires_at = now.saturating_add((ttl_secs as u64).saturating_mul(1_000_000_000));
+        let location = AssetPath::from(login_page.as_str()).asset_hash_path_root();
+        let redeem_tp = self
+            .certify_protection_response(&location, &ProtectionResponse::redeem_success(&value));
+        let token_id = crate::protection::token_id(&value);
+        self.token_index.insert(token_id, expires_at);
+        self.tokens.insert(
+            label,
+            TokenMeta {
+                token_id,
+                expires_at,
+                redeem_path: redeem_tp.0,
+            },
+        );
+        Ok(())
+    }
+
+    /// Removes the token with `label` from the store and gate index and drops its
+    /// redeem cert. No-op if absent. The single place token removal happens —
+    /// shared by `revoke_token`, the rotate path of `issue_token`, and the GC
+    /// sweep. O(log n).
+    fn remove_token(&mut self, label: &str) {
+        if let Some(meta) = self.tokens.remove(&label.to_string()) {
+            self.token_index.remove(&meta.token_id);
+            self.asset_hashes
+                .remove_response_precomputed(&HashTreePath(meta.redeem_path));
+        }
+    }
+
+    /// Drops every token at or past expiry. Run at the start of `issue_token` (the
+    /// op that grows the store) to bound growth. The full scan here is over the
+    /// rare management map, not the hot gate path.
+    fn sweep_expired_tokens(&mut self, now: u64) {
+        let expired: Vec<String> = self
+            .tokens
+            .iter()
+            .filter_map(|e| {
+                let (label, meta) = e.into_pair();
+                (meta.expires_at <= now).then_some(label)
+            })
+            .collect();
+        for label in expired {
+            self.remove_token(&label);
+        }
+    }
+
+    /// Revokes the token with the given label (live — the next request bearing it
+    /// fails the gate). O(log n) by label. Caller publishes `certified_data`.
+    pub fn revoke_token(&mut self, label: &str) {
+        self.remove_token(label);
+    }
+
+    /// Live tokens (label + expiry) for the management UI. Controller-guarded at
+    /// the endpoint.
+    pub fn list_tokens(&self) -> Vec<TokenInfo> {
+        self.tokens
+            .iter()
+            .map(|e| {
+                let (label, meta) = e.into_pair();
+                TokenInfo {
+                    label,
+                    expires_at: meta.expires_at,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether protection is off, on-and-healthy, or on-but-degraded (login page
+    /// asset absent).
+    pub fn check_protection_status(&self) -> ProtectionStatus {
+        match self.protection_login_page() {
+            None => ProtectionStatus::Disabled,
+            Some(login_page) => {
+                if self.metadata.contains_key(&login_page) {
+                    ProtectionStatus::Enabled { login_page }
+                } else {
+                    ProtectionStatus::EnabledLoginPageMissing { login_page }
+                }
+            }
+        }
+    }
+
+    pub fn http_request(&self, req: HttpRequest, certificate: &[u8], now: u64) -> HttpResponse {
         let mut encodings: Vec<Encoding> = vec![];
         let mut etags: Vec<Hash> = vec![];
         let mut range_start: Option<usize> = None;
@@ -1016,7 +1440,25 @@ impl State {
         };
 
         match url_decode(path) {
-            Ok(path) => self.build_http_response(certificate, &path, encodings, etags, range_start),
+            Ok(path) => {
+                // ---- access-protection gate ----
+                // Runs before asset/redirect resolution so an unauthenticated
+                // request never reaches asset content (a public app skips this
+                // entirely — `protection_login_page()` is `None`).
+                if let Some(login_page) = self.protection_login_page() {
+                    if path == login_page {
+                        // The login surface is gate-exempt. A POST is a login
+                        // attempt (validate + Set-Cookie / 401); a GET serves the
+                        // page itself, so it falls through to normal serving.
+                        if req.method.eq_ignore_ascii_case("POST") {
+                            return self.serve_redeem(&req, &login_page, certificate, now);
+                        }
+                    } else if !self.cookie_token_valid(&req, now) {
+                        return self.serve_unauthenticated(&path, &login_page, certificate);
+                    }
+                }
+                self.build_http_response(certificate, &path, encodings, etags, range_start)
+            }
             // Malformed percent-encoding (invalid UTF-8 once decoded). This 400
             // is intentionally uncertified: the body is per-request (it echoes
             // the bad path), so it can't be pinned to a certified hash, and a
@@ -1071,6 +1513,13 @@ impl State {
 
         if !self.asset_hashes.has_fallback_response() {
             self.certify_not_found_fallback();
+        }
+
+        // Under protection, every certified path needs an unauthenticated sibling
+        // (and a universal root `<*>` fallback) so the gate can serve a verifiable
+        // 307/401 there. Added after the rules + built-in 404 so it layers on top.
+        if let Some(login_page) = self.protection_login_page() {
+            self.certify_rule_unauth_siblings(&login_page);
         }
     }
 
@@ -1264,16 +1713,34 @@ impl State {
 
     /// Rebuilds all derived heap state from the durable stable-memory state
     /// after an upgrade: the certified-response tree for every asset, the
-    /// redirect-rule certified entries, and the built-in 404 fallback (the last
-    /// two via `on_redirect_rules_change`). The caller publishes `certified_data`
-    /// afterwards.
+    /// redirect-rule certified entries, the built-in 404 fallback (the last two
+    /// via `on_redirect_rules_change`), and the token gate index. The caller
+    /// publishes `certified_data` afterwards.
     pub fn post_upgrade_rebuild(&mut self) {
-        let keys: Vec<AssetKey> = self.metadata.keys().collect();
-        for key in keys {
-            if let Some(meta) = self.metadata.get(&key) {
-                self.recertify_asset(&key, &meta);
+        self.recertify_all_assets();
+        self.on_redirect_rules_change();
+        self.rebuild_token_index();
+        // If protection is on but the login page asset isn't present, the asset
+        // loop above didn't re-assert its redeem responses — do it explicitly so
+        // the redeem endpoint survives the upgrade even in the degraded state.
+        if let Some(login_page) = self.protection_login_page() {
+            if !self.metadata.contains_key(&login_page) {
+                self.reassert_login_responses(&login_page);
             }
         }
-        self.on_redirect_rules_change();
+    }
+
+    /// Rebuilds the in-heap gate index (`token_id → expires_at`) from the durable
+    /// `tokens` store after an upgrade. Lossless: every entry is derivable from a
+    /// `TokenMeta`. Cheap — the token set is small.
+    fn rebuild_token_index(&mut self) {
+        self.token_index = self
+            .tokens
+            .iter()
+            .map(|e| {
+                let meta = e.into_pair().1;
+                (meta.token_id, meta.expires_at)
+            })
+            .collect();
     }
 }

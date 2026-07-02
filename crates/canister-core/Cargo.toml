@@ -27,6 +27,7 @@ candid.workspace = true
 hex.workspace = true
 http.workspace = true
 ic-cdk.workspace = true
+ic-cdk-management-canister.workspace = true
 ic-stable-structures.workspace = true
 ic-certification.workspace = true
 ic-response-verification.workspace = true

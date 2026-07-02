@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Private dashboard</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px; margin: 4rem auto; padding: 0 1rem;
+        line-height: 1.6;
+      }
+      .badge {
+        display: inline-block; background: #1f6feb; color: #fff;
+        padding: .15rem .6rem; border-radius: 999px; font-size: .8rem;
+      }
+      .muted { color: #8b949e; font-size: .9rem; }
+      code { background: #0d1117; color: #e6edf3; padding: .1rem .35rem; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <p><span class="badge">authenticated</span></p>
+    <h1>🎉 You're in — this is the private content</h1>
+    <p>
+      If you can read this, your request carried a valid access cookie. A visitor
+      without one is redirected to the login page and never sees these bytes.
+    </p>
+    <p class="muted" id="loaded-by">Loading <code>app.js</code>…</p>
+
+    <h2>Ending your session</h2>
+    <p class="muted">
+      The access cookie is <strong>HttpOnly</strong>, so page scripts can't read
+      or delete it — a security property this design relies on. It's also a
+      <strong>session cookie</strong>, so closing the browser ends the session.
+      To cut off access immediately for everyone holding the token, the app owner
+      runs <code>revoke_token</code>.
+    </p>
+
+    <!-- A non-HTML asset, gated just like the page: a logged-out request for
+         /app.js gets a certified 401, not this script. -->
+    <script src="/app.js"></script>
+  </body>
+</html>

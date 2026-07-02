@@ -1,6 +1,11 @@
 /target
 /dist
-.icp/cache/
+
+# Local replica + deploy state written by icp-cli. A normal project ignores only
+# .icp/cache/ and keeps .icp/data/, which records the canister IDs of mainnet
+# deployments. This repo never deploys to mainnet (only local replicas — e.g.
+# examples deployed in place by their e2e tests), so the whole .icp/ is disposable.
+.icp/
 
 # canbench's cached PocketIC runtime binary (~100 MB), downloaded on first run.
 # The committed baseline is canbench_results.yml, not this cache.

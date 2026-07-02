@@ -1,4 +1,5 @@
 use crate::http::{HttpRequest, HttpResponse};
+use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
@@ -22,6 +23,11 @@ use wire_types::{
 
 // from ic-response-verification tests
 const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
+
+/// Fixed "now" (ns) used as the `http_request` time argument in tests. Matches
+/// [`mock_system_context`]; the access-protection gate compares token expiry
+/// against it.
+const TEST_NOW: u64 = 100_000_000_000;
 
 fn some_principal() -> Principal {
     Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
@@ -122,7 +128,14 @@ pub fn verify_response(
 }
 
 fn certified_http_request(state: &State, request: HttpRequest) -> HttpResponse {
-    let response = state.http_request(request.clone(), &[]);
+    certified_http_request_at(state, request, TEST_NOW)
+}
+
+/// Like [`certified_http_request`] but with an explicit gate "now" (ns), for
+/// exercising token expiry. The certificate itself is still minted at real
+/// wall-clock time inside [`verify_response`].
+fn certified_http_request_at(state: &State, request: HttpRequest, now: u64) -> HttpResponse {
+    let response = state.http_request(request.clone(), &[], now);
     match verify_response(state, &request, &response) {
         Err(err) => {
             panic!("Response verification failed with error {err:?}. Response: {response:#?}")
@@ -190,6 +203,18 @@ impl RequestBuilder {
             body: ByteBuf::new(),
             certificate_version: Some(2),
         }
+    }
+
+    fn post(resource: impl AsRef<str>) -> Self {
+        Self {
+            method: "POST".to_string(),
+            ..Self::get(resource)
+        }
+    }
+
+    fn with_body(mut self, body: impl AsRef<[u8]>) -> Self {
+        self.body = ByteBuf::from(body.as_ref().to_vec());
+        self
     }
 
     fn with_header(mut self, name: impl AsRef<str>, value: impl AsRef<str>) -> Self {
@@ -1032,7 +1057,7 @@ fn no_implicit_aliasing_without_rules() {
     );
 
     for missing in &["/foo", "/foo/", "/blog", "/blog/"] {
-        let response = state.http_request(RequestBuilder::get(*missing).build(), &[]);
+        let response = state.http_request(RequestBuilder::get(*missing).build(), &[], TEST_NOW);
         assert_eq!(
             response.status_code, 404,
             "expected 404 for {missing}, got {}",
@@ -1770,7 +1795,7 @@ fn rule_aliasing_persists_through_upgrade() {
     // "aliasing disabled" path); still install one for the subdirectory.
     set_exact_rewrite_rule(&mut state, "/subdirectory", "/subdirectory/index.html");
 
-    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[]);
+    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[], TEST_NOW);
     assert_eq!(no_alias.status_code, 404);
 
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
@@ -1778,7 +1803,7 @@ fn rule_aliasing_persists_through_upgrade() {
 
     let state = upgrade(state, memory.clone());
 
-    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[]);
+    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[], TEST_NOW);
     assert_eq!(no_alias.status_code, 404);
     let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
     assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
@@ -2721,7 +2746,7 @@ mod redirect_rules {
             })],
         )
         .unwrap();
-        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[]);
+        let inert = state.http_request(RequestBuilder::get("/foo").build(), &[], TEST_NOW);
         assert_eq!(inert.status_code, 404);
 
         // Add the asset → rule fires.
@@ -2749,7 +2774,7 @@ mod redirect_rules {
 
         // Delete the target → rule goes inert again.
         delete_asset_via_batch(&mut state, "/foo.html");
-        let after_delete = state.http_request(RequestBuilder::get("/foo").build(), &[]);
+        let after_delete = state.http_request(RequestBuilder::get("/foo").build(), &[], TEST_NOW);
         assert_eq!(after_delete.status_code, 404);
     }
 
@@ -2973,7 +2998,7 @@ mod redirect_rules {
         )
         .unwrap();
         // Target doesn't exist → rule inert → built-in fall-through 404.
-        let inert = state.http_request(RequestBuilder::get("/missing").build(), &[]);
+        let inert = state.http_request(RequestBuilder::get("/missing").build(), &[], TEST_NOW);
         assert_eq!(inert.status_code, 404);
         // The body is the built-in "not found", not the (missing) /404.html.
         assert_eq!(inert.body.as_ref(), b"not found");
@@ -3629,5 +3654,491 @@ mod env_cookie {
             !verify_response(&state, &req, &stale).unwrap_or(false),
             "the pre-change cookie must not verify after capture re-certified it"
         );
+    }
+}
+
+// ───────── access protection ─────────
+//
+// These tests drive real responses through the actual boundary-node verifier
+// (`certified_http_request` → `verify_response`), so a passing assertion means
+// the gateway would accept the response — the multi-response-per-path scheme the
+// feasibility study proved, now exercised end to end against `State`.
+mod access_protection {
+    use super::*;
+
+    const HTML: &[u8] = b"<!DOCTYPE html><html><body>secret</body></html>";
+    const JS: &[u8] = b"console.log(1)";
+    const LOGIN: &[u8] = b"<html><body>login form</body></html>";
+    const LOGIN_PAGE: &str = "/login.html";
+
+    fn html_asset(name: &str, body: &'static [u8]) -> AssetBuilder {
+        AssetBuilder::new(name, "text/html").with_encoding("identity", vec![body])
+    }
+
+    fn cookie(value: &str) -> String {
+        format!("certified_assets_access={value}")
+    }
+
+    /// index.html + app.js + the login page, protection on, one long-lived token
+    /// "secret" labelled "owner".
+    fn protected_state() -> State {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                html_asset("/index.html", HTML),
+                AssetBuilder::new("/app.js", "application/javascript")
+                    .with_encoding("identity", vec![JS]),
+                html_asset(LOGIN_PAGE, LOGIN),
+            ],
+        );
+        state.enable_protection(LOGIN_PAGE.into());
+        state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn public_app_is_unchanged() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(&mut state, &ctx, vec![html_asset("/index.html", HTML)]);
+        let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(r.status_code, 200);
+        // No gate, no forced no-store.
+        assert!(lookup_header(&r, "cache-control").is_none());
+        assert_eq!(state.check_protection_status(), ProtectionStatus::Disabled);
+    }
+
+    #[test]
+    fn unauthenticated_html_gets_certified_redirect() {
+        let state = protected_state();
+        let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(r.status_code, 307);
+        assert_eq!(lookup_header(&r, "location"), Some(LOGIN_PAGE));
+        assert_eq!(lookup_header(&r, "cache-control"), Some("no-store"));
+    }
+
+    #[test]
+    fn unauthenticated_non_html_gets_certified_401() {
+        let state = protected_state();
+        let r = certified_http_request(&state, RequestBuilder::get("/app.js").build());
+        assert_eq!(r.status_code, 401);
+        assert_eq!(lookup_header(&r, "cache-control"), Some("no-store"));
+    }
+
+    #[test]
+    fn valid_cookie_serves_asset_with_no_store() {
+        let state = protected_state();
+        let r = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie("secret"))
+                .build(),
+        );
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body.as_ref(), HTML);
+        assert_eq!(lookup_header(&r, "cache-control"), Some("no-store"));
+    }
+
+    #[test]
+    fn valid_cookie_among_other_cookies_serves_asset() {
+        // The browser concatenates ic_env + analytics + certified_assets_access; the gate picks
+        // ours out by plain string parsing.
+        let state = protected_state();
+        let r = certified_http_request(
+            &state,
+            RequestBuilder::get("/app.js")
+                .with_header(
+                    "Cookie",
+                    "ic_env=xyz; certified_assets_access=secret; analytics=1",
+                )
+                .build(),
+        );
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body.as_ref(), JS);
+    }
+
+    #[test]
+    fn wrong_cookie_is_rejected() {
+        let state = protected_state();
+        let r = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie("WRONG"))
+                .build(),
+        );
+        assert_eq!(r.status_code, 307);
+    }
+
+    #[test]
+    fn login_page_is_gate_exempt() {
+        let state = protected_state();
+        // GET the login page with no cookie still serves the page.
+        let r = certified_http_request(&state, RequestBuilder::get(LOGIN_PAGE).build());
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body.as_ref(), LOGIN);
+    }
+
+    #[test]
+    fn redeem_success_sets_cookie() {
+        let state = protected_state();
+        let r = certified_http_request(
+            &state,
+            RequestBuilder::post(LOGIN_PAGE)
+                .with_body("token=secret")
+                .build(),
+        );
+        assert_eq!(r.status_code, 302);
+        assert_eq!(lookup_header(&r, "location"), Some("/"));
+        let set_cookie = lookup_header(&r, "set-cookie").expect("Set-Cookie");
+        assert!(
+            set_cookie.contains("certified_assets_access=secret"),
+            "got: {set_cookie}"
+        );
+        assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
+    }
+
+    #[test]
+    fn redeem_failure_returns_401() {
+        let state = protected_state();
+        let r = certified_http_request(
+            &state,
+            RequestBuilder::post(LOGIN_PAGE)
+                .with_body("token=nope")
+                .build(),
+        );
+        assert_eq!(r.status_code, 401);
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                html_asset("/index.html", HTML),
+                html_asset(LOGIN_PAGE, LOGIN),
+            ],
+        );
+        state.enable_protection(LOGIN_PAGE.into());
+        state
+            .issue_token("secret".into(), "owner".into(), 1, TEST_NOW)
+            .unwrap();
+
+        // Valid at issue time.
+        let ok = certified_http_request_at(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie("secret"))
+                .build(),
+            TEST_NOW,
+        );
+        assert_eq!(ok.status_code, 200);
+
+        // Rejected once past expiry (the 307 still verifies).
+        let later = TEST_NOW + 5_000_000_000;
+        let expired = certified_http_request_at(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie("secret"))
+                .build(),
+            later,
+        );
+        assert_eq!(expired.status_code, 307);
+    }
+
+    #[test]
+    fn revoke_is_live() {
+        let mut state = protected_state();
+        let authed = || {
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie("secret"))
+                .build()
+        };
+        assert_eq!(certified_http_request(&state, authed()).status_code, 200);
+
+        state.revoke_token("owner");
+
+        assert_eq!(certified_http_request(&state, authed()).status_code, 307);
+        // The redeem response is gone too.
+        let redeem = certified_http_request(
+            &state,
+            RequestBuilder::post(LOGIN_PAGE)
+                .with_body("token=secret")
+                .build(),
+        );
+        assert_eq!(redeem.status_code, 401);
+    }
+
+    #[test]
+    fn spa_route_with_root_rule() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                html_asset("/index.html", HTML),
+                html_asset(LOGIN_PAGE, LOGIN),
+            ],
+        );
+        set_root_spa_rule(&mut state, "/index.html");
+        state.enable_protection(LOGIN_PAGE.into());
+        state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
+
+        // Unauthenticated SPA route -> certified root-wildcard 307.
+        let r = certified_http_request(&state, RequestBuilder::get("/some/spa/route").build());
+        assert_eq!(r.status_code, 307);
+        assert_eq!(lookup_header(&r, "location"), Some(LOGIN_PAGE));
+
+        // Authenticated SPA route -> the rewrite serves index.html.
+        let authed = certified_http_request(
+            &state,
+            RequestBuilder::get("/some/spa/route")
+                .with_header("Cookie", cookie("secret"))
+                .build(),
+        );
+        assert_eq!(authed.status_code, 200);
+        assert_eq!(authed.body.as_ref(), HTML);
+    }
+
+    #[test]
+    fn exact_rewrite_rule_path() {
+        // `/ -> /index.html` (200 rewrite): an unauthenticated GET `/` must get a
+        // certified 307 at the exact rule location (a root wildcard would be
+        // rejected for a path that has an exact entry).
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                html_asset("/index.html", HTML),
+                html_asset(LOGIN_PAGE, LOGIN),
+            ],
+        );
+        set_exact_rewrite_rule(&mut state, "/", "/index.html");
+        state.enable_protection(LOGIN_PAGE.into());
+        state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
+
+        let r = certified_http_request(&state, RequestBuilder::get("/").build());
+        assert_eq!(r.status_code, 307);
+        let authed = certified_http_request(
+            &state,
+            RequestBuilder::get("/")
+                .with_header("Cookie", cookie("secret"))
+                .build(),
+        );
+        assert_eq!(authed.status_code, 200);
+    }
+
+    #[test]
+    fn true_404_redirects_unauthenticated() {
+        let state = protected_state();
+        let r = certified_http_request(&state, RequestBuilder::get("/does-not-exist").build());
+        assert_eq!(r.status_code, 307);
+        assert_eq!(lookup_header(&r, "location"), Some(LOGIN_PAGE));
+    }
+
+    #[test]
+    fn enable_first_then_sync_heals_status() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        // Enable on an empty canister (the secure ordering): degraded until synced.
+        state.enable_protection(LOGIN_PAGE.into());
+        assert_eq!(
+            state.check_protection_status(),
+            ProtectionStatus::EnabledLoginPageMissing {
+                login_page: LOGIN_PAGE.into()
+            }
+        );
+        state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
+
+        // Sync content including the login page; assets are born protected.
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                html_asset("/index.html", HTML),
+                html_asset(LOGIN_PAGE, LOGIN),
+            ],
+        );
+        assert_eq!(
+            state.check_protection_status(),
+            ProtectionStatus::Enabled {
+                login_page: LOGIN_PAGE.into()
+            }
+        );
+
+        assert_eq!(
+            certified_http_request(&state, RequestBuilder::get("/index.html").build()).status_code,
+            307
+        );
+        let authed = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie("secret"))
+                .build(),
+        );
+        assert_eq!(authed.status_code, 200);
+        // The redeem cert was re-asserted after the page synced over its subtree.
+        let redeem = certified_http_request(
+            &state,
+            RequestBuilder::post(LOGIN_PAGE)
+                .with_body("token=secret")
+                .build(),
+        );
+        assert_eq!(redeem.status_code, 302);
+    }
+
+    #[test]
+    fn disable_returns_to_public() {
+        let mut state = protected_state();
+        state.disable_protection();
+        assert_eq!(state.check_protection_status(), ProtectionStatus::Disabled);
+        let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
+        assert_eq!(r.status_code, 200);
+        assert!(lookup_header(&r, "cache-control").is_none());
+        assert!(state.list_tokens().is_empty());
+    }
+
+    #[test]
+    fn protection_survives_upgrade() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                html_asset("/index.html", HTML),
+                html_asset(LOGIN_PAGE, LOGIN),
+            ],
+        );
+        state.enable_protection(LOGIN_PAGE.into());
+        state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
+
+        let state = upgrade(state, memory);
+
+        assert_eq!(
+            state.check_protection_status(),
+            ProtectionStatus::Enabled {
+                login_page: LOGIN_PAGE.into()
+            }
+        );
+        assert_eq!(
+            certified_http_request(&state, RequestBuilder::get("/index.html").build()).status_code,
+            307
+        );
+        let authed = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie("secret"))
+                .build(),
+        );
+        assert_eq!(authed.status_code, 200);
+        // Redeem leaf re-inserted from its stored path on upgrade.
+        let redeem = certified_http_request(
+            &state,
+            RequestBuilder::post(LOGIN_PAGE)
+                .with_body("token=secret")
+                .build(),
+        );
+        assert_eq!(redeem.status_code, 302);
+    }
+
+    #[test]
+    fn list_tokens_reports_labels() {
+        let mut state = protected_state();
+        state
+            .issue_token("preview-token".into(), "preview".into(), 60, TEST_NOW)
+            .unwrap();
+        let labels: Vec<String> = state.list_tokens().into_iter().map(|t| t.label).collect();
+        assert!(labels.contains(&"owner".to_string()));
+        assert!(labels.contains(&"preview".to_string()));
+    }
+
+    #[test]
+    fn reissuing_a_label_rotates_the_token() {
+        // The label is the unique identifier: re-issuing "owner" with a new value
+        // replaces the old one — old value stops working (gate + redeem), new works,
+        // and there's still exactly one token under that label.
+        let mut state = protected_state(); // token "secret" labelled "owner"
+        state
+            .issue_token("rotated".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
+
+        assert_eq!(state.list_tokens().len(), 1);
+
+        let with = |v: &str| {
+            RequestBuilder::get("/index.html")
+                .with_header("Cookie", cookie(v))
+                .build()
+        };
+        assert_eq!(
+            certified_http_request(&state, with("secret")).status_code,
+            307
+        );
+        assert_eq!(
+            certified_http_request(&state, with("rotated")).status_code,
+            200
+        );
+
+        // The old value's redeem cert was dropped; the new one's was added.
+        let redeem = |v: &str| {
+            certified_http_request(
+                &state,
+                RequestBuilder::post(LOGIN_PAGE)
+                    .with_body(format!("token={v}"))
+                    .build(),
+            )
+            .status_code
+        };
+        assert_eq!(redeem("secret"), 401);
+        assert_eq!(redeem("rotated"), 302);
+    }
+
+    #[test]
+    fn expired_tokens_swept_on_issue() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(&mut state, &ctx, vec![html_asset(LOGIN_PAGE, LOGIN)]);
+        state.enable_protection(LOGIN_PAGE.into());
+        state
+            .issue_token("old".into(), "old".into(), 1, TEST_NOW)
+            .unwrap();
+        assert_eq!(state.list_tokens().len(), 1);
+
+        // Issuing well after the first expired sweeps it.
+        let later = TEST_NOW + 5_000_000_000;
+        state
+            .issue_token("new".into(), "new".into(), 3600, later)
+            .unwrap();
+        let labels: Vec<String> = state.list_tokens().into_iter().map(|t| t.label).collect();
+        assert_eq!(labels, vec!["new".to_string()]);
+    }
+
+    #[test]
+    fn issue_token_requires_protection_enabled() {
+        let mut state = State::default();
+        let err = state
+            .issue_token("v".into(), "l".into(), 60, TEST_NOW)
+            .unwrap_err();
+        assert!(err.contains("not enabled"), "got: {err}");
     }
 }
