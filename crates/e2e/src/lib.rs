@@ -138,13 +138,23 @@ pub fn setup_example(name: &str) -> tempfile::TempDir {
     )
 }
 
+/// Set up an isolated copy of a recipe fixture (`tests/fixture/<name>`) and drop
+/// the local `recipe.hbs` it references next to its `icp.yaml`. The recipe must
+/// exist before the replica starts and before `icp deploy` resolves the manifest.
+/// Lets the e2e tests exercise icp-cli's recipe resolution end to end.
+pub fn setup_recipe_project(name: &str) -> tempfile::TempDir {
+    let tmp = setup_project(name);
+    write_local_recipe(tmp.path());
+    tmp
+}
+
 /// Generate a local `recipe.hbs` in `project` pinning the canister/plugin wasm by
 /// the `../../dist/*.wasm` paths that resolve from the copied project (see
 /// [`copy_project`]). The recipe is the real product produced by `recipe-gen`;
-/// writing the *local* variant here lets the e2e tests exercise icp-cli's recipe
-/// resolution end to end against the freshly built wasm. A fixture's `icp.yaml`
+/// writing the *local* variant lets the e2e tests exercise icp-cli's recipe
+/// resolution against the freshly built wasm. A recipe fixture's `icp.yaml`
 /// references it via `recipe: { type: "file://recipe.hbs", ... }`.
-pub fn write_local_recipe(project: &Path) {
+fn write_local_recipe(project: &Path) {
     let recipe = recipe_gen::render_recipe(&recipe_gen::WasmSource::Local {
         canister: "../../dist/canister.wasm".to_string(),
         plugin: "../../dist/plugin.wasm".to_string(),
