@@ -1,0 +1,38 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+body {
+  margin: 0;
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  background: Canvas;
+  color: CanvasText;
+}
+
+main {
+  max-width: 40rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+h1 {
+  font-size: clamp(2rem, 6vw, 3rem);
+  margin-bottom: 0.5rem;
+}
+
+.hint {
+  margin-top: 2rem;
+  opacity: 0.7;
+  font-size: 0.9rem;
+}
+
+code {
+  font-family: ui-monospace, monospace;
+  background: color-mix(in srgb, CanvasText 12%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 0.3em;
+}

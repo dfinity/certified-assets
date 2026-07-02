@@ -4,15 +4,15 @@
 //! HTTP gateway. The gateway validates the response's `IC-Certificate` before
 //! handing it back, so a successful fetch is also proof of certification.
 
-use e2e::{http_fetch, http_fetch_subdomain, icp_cmd, setup_project, LocalNetwork};
+use e2e::{http_fetch, http_fetch_subdomain, icp_cmd, setup_example, LocalNetwork};
 use reqwest::StatusCode;
 
-/// Deploy the `redirects` fixture and exercise every response kind:
+/// Deploy the `redirects` example and exercise every response kind:
 /// 3xx redirect (internal + external), 4xx custom error page, 200 rewrite
 /// (exact and subtree).
 #[test]
 fn redirect_rules_honoured() {
-    let tmp = setup_project("tests/fixture/redirects");
+    let tmp = setup_example("redirects");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -45,7 +45,7 @@ fn redirect_rules_honoured() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
     let body = r.text().expect("read body");
     assert!(
-        body.contains("custom not found"),
+        body.contains("Page not found"),
         "expected /404.html body, got: {body}"
     );
 
@@ -54,7 +54,7 @@ fn redirect_rules_honoured() {
     assert_eq!(r.status(), StatusCode::GONE);
     let body = r.text().expect("read body");
     assert!(
-        body.contains("tombstone"),
+        body.contains("Gone for good"),
         "expected /410.html body, got: {body}"
     );
 
@@ -63,7 +63,7 @@ fn redirect_rules_honoured() {
     assert_eq!(r.status(), StatusCode::OK);
     let body = r.text().expect("read body");
     assert!(
-        body.contains("about us"),
+        body.contains("About us"),
         "expected /about.html body, got: {body}"
     );
 
@@ -73,7 +73,7 @@ fn redirect_rules_honoured() {
         assert_eq!(r.status(), StatusCode::OK, "fetching {sub}");
         let body = r.text().expect("read body");
         assert!(
-            body.contains("blog index"),
+            body.contains("Blog index"),
             "fetching {sub}: expected blog index body, got: {body}"
         );
     }
@@ -81,7 +81,7 @@ fn redirect_rules_honoured() {
 
 /// Without a user-supplied `_redirects`, the plugin auto-synthesises
 /// Cloudflare's `auto-trailing-slash` rule set for every HTML asset (see
-/// `sync-core::html_handling`). This test deploys an HTML-only fixture
+/// `sync-core::html_handling`). This test deploys an HTML-only example
 /// and walks the full CF table for each of the three asset shapes:
 /// root index, directory index, and non-index HTML file.
 ///
@@ -92,35 +92,35 @@ fn redirect_rules_honoured() {
 /// The test asserts that observed behaviour rather than CF's strict 307.
 #[test]
 fn html_handling_auto_synthesis() {
-    let tmp = setup_project("tests/fixture/html-handling");
+    let tmp = setup_example("clean-urls");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
     icp_cmd(project).arg("deploy").assert().success();
 
     // ── /foo.html (non-index): canonical /foo ───────────────────────────────
-    expect_200(project, "/foo", "foo.html body");
+    expect_200(project, "/foo", "Foo page");
     // /foo.html: inert — asset shadows the synthesised 307.
-    expect_200(project, "/foo.html", "foo.html body");
+    expect_200(project, "/foo.html", "Foo page");
     expect_307(project, "/foo/", "/foo");
     expect_307(project, "/foo/index", "/foo");
     expect_307(project, "/foo/index.html", "/foo");
 
     // ── /blog/index.html (directory index): canonical /blog/ ───────────────
-    expect_200(project, "/blog/", "blog index body");
+    expect_200(project, "/blog/", "Blog index");
     expect_307(project, "/blog", "/blog/");
     // CF chains: /blog.html -> /blog -> /blog/. The 307 the canister emits
     // points at the bare form; the client follows it to land on /blog/.
     expect_307(project, "/blog.html", "/blog");
     expect_307(project, "/blog/index", "/blog");
     // /blog/index.html: inert — asset shadows the synthesised 307.
-    expect_200(project, "/blog/index.html", "blog index body");
+    expect_200(project, "/blog/index.html", "Blog index");
 
     // ── /index.html (root index): canonical / ───────────────────────────────
-    expect_200(project, "/", "root index body");
+    expect_200(project, "/", "Clean URLs");
     expect_307(project, "/index", "/");
     // /index.html: inert — asset shadows the synthesised 307.
-    expect_200(project, "/index.html", "root index body");
+    expect_200(project, "/index.html", "Clean URLs");
 }
 
 /// When a rule is removed from `_redirects` between deploys, the canister
@@ -136,7 +136,7 @@ fn html_handling_auto_synthesis() {
 /// now falls through cleanly to the catch-all 404 rather than 503-ing.
 #[test]
 fn removed_redirect_rule_clears_cert_tree() {
-    let tmp = setup_project("tests/fixture/html-handling-with-catchall");
+    let tmp = setup_example("catch-all-404");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -178,7 +178,7 @@ fn removed_redirect_rule_clears_cert_tree() {
     );
     let body = r.text().expect("read body");
     assert!(
-        body.contains("custom 404"),
+        body.contains("Custom 404 page"),
         "expected /404.html body from catch-all, got: {body}"
     );
 }
@@ -215,7 +215,7 @@ fn expect_200(project: &std::path::Path, path: &str, body_marker: &str) {
 /// verification) and the explicit `?canisterId=…` form.
 #[test]
 fn html_handling_with_catchall_redirect() {
-    let tmp = setup_project("tests/fixture/html-handling-with-catchall");
+    let tmp = setup_example("catch-all-404");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
     icp_cmd(project).arg("deploy").assert().success();
@@ -231,7 +231,7 @@ fn html_handling_with_catchall_redirect() {
     );
     let body = r.text().expect("read body");
     assert!(
-        body.contains("root index body"),
+        body.contains("Catch-all 404 demo"),
         "expected /index.html body, got: {body}"
     );
 
@@ -261,7 +261,7 @@ fn html_handling_with_catchall_redirect() {
     );
     let body = r.text().expect("read body");
     assert!(
-        body.contains("custom 404"),
+        body.contains("Custom 404 page"),
         "expected /404.html body, got: {body}"
     );
 }
@@ -274,9 +274,9 @@ fn html_handling_with_catchall_redirect() {
 /// error — is proof the injected fallback is certified.
 #[test]
 fn branded_404_injected_when_project_ships_none() {
-    // The `basic` fixture is just index.html + style.css: no 404.html, no
+    // The `static-site` example is just index.html + style.css: no 404.html, no
     // _redirects.
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
     icp_cmd(project).arg("deploy").assert().success();

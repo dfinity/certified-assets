@@ -1,12 +1,12 @@
 use candid::Principal;
-use e2e::{icp_cmd, list_assets, setup_project, AssetDetails, Encoding, LocalNetwork};
+use e2e::{icp_cmd, list_assets, setup_example, setup_project, AssetDetails, Encoding, LocalNetwork};
 use std::fs;
 
-/// Deploy the test fixture to a local replica and verify that `/index.html` appears
-/// in the canister's asset list.
+/// Deploy the `static-site` example to a local replica and verify that
+/// `/index.html` appears in the canister's asset list.
 #[test]
 fn basic_deploy() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -46,7 +46,7 @@ fn nested_dir_deploy() {
 
 #[test]
 fn basic_deploy_with_proxy() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
     let network_status = icp_cmd(project)
@@ -80,7 +80,7 @@ fn basic_deploy_with_proxy() {
 /// The second deploy must report "up to date" and must not change canister state.
 #[test]
 fn no_op_sync() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -135,7 +135,7 @@ fn identity_sha(assets: &[AssetDetails], key: &str) -> Option<Vec<u8>> {
 /// The updated file's identity SHA256 must change; the untouched file's must not.
 #[test]
 fn content_update() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -176,7 +176,7 @@ fn content_update() {
 /// The deleted key must disappear from the canister; the remaining key must survive.
 #[test]
 fn asset_deletion() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 

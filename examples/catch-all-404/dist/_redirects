@@ -1,0 +1,5 @@
+# A single catch-all: any path that no real asset — and no auto-synthesised
+# clean-URL rule — already claims is served from our own /404.html with a 404
+# status. Because the plugin puts the synthesised rules first, this only fires
+# for genuinely unknown URLs.
+/* /404.html 404

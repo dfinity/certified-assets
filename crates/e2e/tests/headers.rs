@@ -5,7 +5,7 @@
 //! handing it back, so a successful fetch is also proof of certification —
 //! and proof that the headers we set are the same ones the canister certified.
 
-use e2e::{http_fetch, icp_cmd, list_assets, setup_project, LocalNetwork};
+use e2e::{http_fetch, icp_cmd, list_assets, setup_example, LocalNetwork};
 use reqwest::StatusCode;
 use std::fs;
 
@@ -13,11 +13,11 @@ fn header_value<'a>(headers: &'a reqwest::header::HeaderMap, name: &str) -> Opti
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
-/// Deploy the `headers` fixture and check that exact, subtree, and global
+/// Deploy the `custom-headers` example and check that exact, subtree, and global
 /// header rules all reach the canister and survive certification.
 #[test]
 fn header_rules_honoured() {
-    let tmp = setup_project("tests/fixture/headers");
+    let tmp = setup_example("custom-headers");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -48,7 +48,7 @@ fn header_rules_honoured() {
 /// re-uploading content (drift detected via `SetAssetHeaders`).
 #[test]
 fn header_edit_propagates_via_set_asset_headers() {
-    let tmp = setup_project("tests/fixture/headers");
+    let tmp = setup_example("custom-headers");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
