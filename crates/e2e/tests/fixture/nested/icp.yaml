@@ -9,12 +9,12 @@ canisters:
     build:
       steps:
         - type: pre-built
-          path: wasms/canister.wasm
+          path: ../../dist/canister.wasm
 
     sync:
       steps:
         - type: plugin
-          path: wasms/plugin.wasm
+          path: ../../dist/plugin.wasm
           # A multi-component (nested) directory. The host preopens it under a
           # multi-segment WASI guest name, which broke `canonicalize`/`realpath`
           # in the plugin's scan step.

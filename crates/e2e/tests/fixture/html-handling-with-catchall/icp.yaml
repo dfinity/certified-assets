@@ -9,11 +9,11 @@ canisters:
     build:
       steps:
         - type: pre-built
-          path: wasms/canister.wasm
+          path: ../../dist/canister.wasm
 
     sync:
       steps:
         - type: plugin
-          path: wasms/plugin.wasm
+          path: ../../dist/plugin.wasm
           dirs:
             - dist

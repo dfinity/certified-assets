@@ -5,14 +5,16 @@
 //! against the production verifier, not just the in-process one the unit tests use.
 //!
 //! The project deployed here is the runnable showcase at
-//! `examples/access-protection/`, deployed *in place* (not a tempdir copy) so the
-//! committed `icp.yaml` — which references the repo's `dist/` wasms — works
-//! unchanged for both a human and CI. This test both verifies the feature and
-//! guarantees the example stays deployable (see its README).
+//! `examples/access-protection/`. It is deployed from a throwaway copy of that
+//! directory (see `setup_example`) using its committed `icp.yaml` *unchanged* —
+//! the same file, referencing the repo's `dist/` wasms, that a human runs. This
+//! test both verifies the feature and guarantees the example stays deployable
+//! (see its README), while a developer's own manual run of the example is never
+//! disturbed.
 
 use e2e::{
-    example_project, frontend_canister_id, http_fetch, http_fetch_with_headers, http_post_form,
-    icp_cmd, LocalNetwork,
+    frontend_canister_id, http_fetch, http_fetch_with_headers, http_post_form, icp_cmd,
+    setup_example, LocalNetwork,
 };
 use reqwest::StatusCode;
 
@@ -26,8 +28,8 @@ fn call(project: &std::path::Path, method: &str, args: &str) {
 
 #[test]
 fn protected_app_gates_unauthenticated_requests() {
-    let project = example_project("access-protection");
-    let project = project.as_path();
+    let tmp = setup_example("access-protection");
+    let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
     icp_cmd(project).arg("deploy").assert().success();
