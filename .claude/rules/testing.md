@@ -40,9 +40,16 @@ Tests are organized around these components. Each runs independently.
 
 ## End-to-end (`e2e`)
 
-- **Location**: [`crates/e2e/`](../../crates/e2e/)
+- **Location**: [`crates/e2e/`](../../crates/e2e/) — split across focused test files (e.g. `sync.rs`, `redirects.rs`, `etag.rs`, `streaming.rs`, `protection.rs`, `recipe.rs`)
 - **Run**: `cargo test -p e2e`
 
-E2E tests verify that the canister and plugin work correctly together through the `icp` CLI against a live local replica. Covers the basic sync workflow: deploy, no-op re-sync, content update, deletion, and multi-directory sync.
+E2E tests verify that the canister and plugin work correctly together through the `icp` CLI against a live local replica — deploy, re-sync, content update/deletion, serving, certification, redirects, headers, streaming/range, ETag, env cookie, upgrade persistence, access protection, and recipe resolution.
 
-**Add tests here when** you introduce a new top-level workflow or change how the plugin integrates with the CLI or canister in a way that unit tests cannot exercise — for example, a new deploy mode or wire-protocol changes. Keep this suite small; unit tests are preferred for logic coverage.
+Each test deploys a **project**, of which there are two kinds:
+
+- **Examples** — runnable, documented showcases under [`examples/`](../../examples/), loaded with `setup_example("<name>")`. Each is both what a human runs (`cd examples/<name> && icp deploy`) *and* a regression test, so it must stay clean and its README accurate.
+- **Fixtures** — throwaway, test-only inputs under [`crates/e2e/tests/fixture/`](../../crates/e2e/tests/fixture/), loaded with `setup_project("<name>")`. Use these for scenarios that aren't showcase-worthy (a rejection case, a WASI-path edge, offline-only recipe wiring).
+
+Both are deployed from a **throwaway copy** created two directory levels below the repo root (so the committed `../../dist/*.wasm` pins resolve), never in place — a test may freely mutate its copy, tests run in parallel, and a developer's own `.icp/` is never disturbed. The harness (`copy_project`, `setup_example`, `setup_project`) lives in [`crates/e2e/src/lib.rs`](../../crates/e2e/src/lib.rs).
+
+**Add tests here when** you introduce a new top-level workflow or change how the plugin integrates with the CLI or canister in a way unit tests cannot exercise — a new deploy mode, a wire-protocol change, or a user-facing feature worth showcasing. Prefer promoting a showcase-worthy scenario to an `examples/` project (with a README, via `setup_example`) over a bare fixture. Keep this suite small; unit tests are preferred for logic coverage.
