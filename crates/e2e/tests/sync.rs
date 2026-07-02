@@ -1,5 +1,7 @@
 use candid::Principal;
-use e2e::{icp_cmd, list_assets, setup_example, setup_project, AssetDetails, Encoding, LocalNetwork};
+use e2e::{
+    icp_cmd, list_assets, setup_example, setup_project, AssetDetails, Encoding, LocalNetwork,
+};
 use std::fs;
 
 /// Deploy the `static-site` example to a local replica and verify that
