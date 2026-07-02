@@ -23,7 +23,7 @@ fn content_type(headers: &reqwest::header::HeaderMap) -> &str {
 /// the HTTP gateway.
 #[test]
 fn content_type_overrides_land_on_canister() {
-    let tmp = setup_project("tests/fixture/headers-content-type");
+    let tmp = setup_project("headers-content-type");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -50,7 +50,7 @@ fn content_type_overrides_land_on_canister() {
 /// drift), and the gateway serves the updated value.
 #[test]
 fn content_type_edit_propagates_on_redeploy() {
-    let tmp = setup_project("tests/fixture/headers-content-type");
+    let tmp = setup_project("headers-content-type");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 

@@ -112,11 +112,16 @@ fn copy_project(src: &Path) -> tempfile::TempDir {
     tmp
 }
 
-/// Set up an isolated copy of a test fixture. `fixture_path` is relative to the
-/// e2e crate root (e.g. `"tests/fixture/basic"`). See [`copy_project`] for why
+/// Set up an isolated copy of a test-only fixture from `tests/fixture/<name>`
+/// (e.g. `setup_project("nested")`) — the sibling of [`setup_example`] for the
+/// throwaway fixtures that aren't showcase-worthy. See [`copy_project`] for why
 /// the copy resolves the fixture's `../../dist/*.wasm` pins to the repo's `dist/`.
-pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
-    copy_project(&Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture_path))
+pub fn setup_project(name: &str) -> tempfile::TempDir {
+    copy_project(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixture")
+            .join(name),
+    )
 }
 
 /// Set up an isolated copy of a runnable example from the repo's `examples/`.
