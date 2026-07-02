@@ -1,4 +1,4 @@
-use e2e::{http_fetch_with_headers, icp_cmd, setup_project, LocalNetwork};
+use e2e::{http_fetch_with_headers, icp_cmd, setup_example, LocalNetwork};
 use reqwest::StatusCode;
 use std::fs;
 
@@ -35,7 +35,7 @@ fn incompressible_bytes(len: usize) -> Vec<u8> {
 ///   also proves the streamed reassembly matches the certified content hash.
 #[test]
 fn streams_large_asset_through_gateway() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
 
     let body = incompressible_bytes(5_000_000);
@@ -81,7 +81,7 @@ fn streams_large_asset_through_gateway() {
 /// end-to-end — the central unknown this spike exists to settle.
 #[test]
 fn range_request_returns_certified_206() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
 
     let body = incompressible_bytes(5_000_000);
@@ -128,7 +128,7 @@ fn range_request_returns_certified_206() {
 /// (Flow A) — both through the verifying gateway.
 #[test]
 fn range_requests_work_through_a_200_rewrite_alias() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
 
     let body = incompressible_bytes(5_000_000);

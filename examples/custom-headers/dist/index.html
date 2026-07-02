@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>certified-assets · custom headers</title>
+    <script src="/_astro/app.js"></script>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }
+      body { margin: 0; display: grid; place-items: center; min-height: 100vh; }
+      main { max-width: 44rem; padding: 2rem; }
+      code { font-family: ui-monospace, monospace; }
+      table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+      th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid gray; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Custom headers</h1>
+      <p>
+        This response carries the headers declared in <code>dist/_headers</code>.
+        Open your browser's network panel and inspect the response for this page:
+      </p>
+      <table>
+        <tr><th>Header</th><th>Set by rule</th></tr>
+        <tr><td><code>X-Frame-Options: DENY</code></td><td><code>/index.html</code></td></tr>
+        <tr><td><code>X-Content-Type-Options: nosniff</code></td><td><code>/index.html</code></td></tr>
+        <tr><td><code>X-Robots-Tag: noindex</code></td><td><code>/*</code></td></tr>
+      </table>
+      <p>
+        The script <code>/_astro/app.js</code> is served with a one-year
+        <code>immutable</code> cache from the <code>/_astro/*</code> rule.
+      </p>
+    </main>
+  </body>
+</html>

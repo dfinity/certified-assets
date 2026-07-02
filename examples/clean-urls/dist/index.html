@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clean URLs</title>
+  </head>
+  <body>
+    <main>
+      <h1>Clean URLs</h1>
+      <p>No <code>_redirects</code> file here. The sync plugin auto-synthesises
+        extensionless routing for every HTML asset, so these links work without
+        a <code>.html</code> suffix:</p>
+      <ul>
+        <li><a href="/foo">/foo</a> &rarr; serves <code>foo.html</code></li>
+        <li><a href="/blog/">/blog/</a> &rarr; serves <code>blog/index.html</code></li>
+      </ul>
+      <p>Requesting <code>/foo.html</code> or <code>/index</code> redirects (307)
+        to the canonical clean URL.</p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+# Custom HTTP headers, in Cloudflare Pages `_headers` syntax. Rules are applied
+# from most specific to least specific and the matching sets are merged, so a
+# response can pick up headers from several blocks at once.
+
+# Exact path: lock the homepage down against clickjacking and MIME sniffing.
+/index.html
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+
+# Subtree: fingerprinted build assets never change, so cache them forever.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Global: applies to every response unless a more specific rule overrides it.
+/*
+  X-Robots-Tag: noindex

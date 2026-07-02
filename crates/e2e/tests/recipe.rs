@@ -10,22 +10,12 @@
 //! (`recipe_basic`), `build` (`recipe_build_step`), and `metadata`
 //! (`recipe_metadata`).
 
-use e2e::{icp_cmd, list_assets, setup_project, write_local_recipe, LocalNetwork};
-use tempfile::TempDir;
-
-/// Copy a recipe fixture into a temp project and generate the local `recipe.hbs`
-/// it references. The recipe must exist before the replica starts and before
-/// `icp deploy` resolves the manifest.
-fn setup_recipe_project(fixture: &str) -> TempDir {
-    let tmp = setup_project(fixture);
-    write_local_recipe(tmp.path());
-    tmp
-}
+use e2e::{icp_cmd, list_assets, setup_recipe_project, LocalNetwork};
 
 /// `dir` only: deploy through the recipe and confirm the asset is served.
 #[test]
 fn recipe_basic() {
-    let tmp = setup_recipe_project("tests/fixture/recipe-basic");
+    let tmp = setup_recipe_project("recipe-basic");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -41,7 +31,7 @@ fn recipe_basic() {
 /// `build`: a pre-sync command produces an extra asset, which must then sync.
 #[test]
 fn recipe_build_step() {
-    let tmp = setup_recipe_project("tests/fixture/recipe-build");
+    let tmp = setup_recipe_project("recipe-build");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -61,7 +51,7 @@ fn recipe_build_step() {
 /// serves assets proves the injected wasm installs and runs.
 #[test]
 fn recipe_metadata() {
-    let tmp = setup_recipe_project("tests/fixture/recipe-metadata");
+    let tmp = setup_recipe_project("recipe-metadata");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 

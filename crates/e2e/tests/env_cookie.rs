@@ -8,7 +8,7 @@
 //! response reaches the test, so a successful fetch that also carries the
 //! cookie is proof the cookie is part of the certified response.
 
-use e2e::{http_fetch, icp_cmd, setup_project, LocalNetwork};
+use e2e::{http_fetch, icp_cmd, setup_example, LocalNetwork};
 use reqwest::StatusCode;
 
 fn set_cookies(headers: &reqwest::header::HeaderMap) -> Vec<String> {
@@ -20,11 +20,11 @@ fn set_cookies(headers: &reqwest::header::HeaderMap) -> Vec<String> {
         .collect()
 }
 
-/// Deploy the `basic` fixture and confirm the sync publishes the certified
+/// Deploy the `static-site` example and confirm the sync publishes the certified
 /// `ic_env` cookie on the HTML response (and only there).
 #[test]
 fn sync_publishes_certified_ic_env_cookie_on_html() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 

@@ -1,0 +1,14 @@
+# Redirect and rewrite rules, in Cloudflare Pages `_redirects` syntax:
+#
+#   <request path>   <target>   <status>
+#
+# The status code decides the behavior. 3xx sends the browser elsewhere; 4xx
+# serves a custom error page with that status; 200 rewrites (serves another
+# asset's body at this URL without changing it). All of them are certified.
+
+/old              /new.html              301   # permanent redirect, internal
+/legacy           https://example.com/   302   # temporary redirect, external
+/missing-page     /404.html              404   # custom Not Found page
+/gone-page        /410.html              410   # custom Gone page
+/about            /about.html            200   # rewrite: pretty URL for a file
+/blog/*           /blog/index.html       200   # rewrite: whole subtree to one page

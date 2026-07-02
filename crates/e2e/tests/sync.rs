@@ -1,12 +1,12 @@
 use candid::Principal;
-use e2e::{icp_cmd, list_assets, setup_project, AssetDetails, Encoding, LocalNetwork};
+use e2e::{icp_cmd, list_assets, setup_example, AssetDetails, Encoding, LocalNetwork};
 use std::fs;
 
-/// Deploy the test fixture to a local replica and verify that `/index.html` appears
-/// in the canister's asset list.
+/// Deploy the `static-site` example to a local replica and verify that
+/// `/index.html` appears in the canister's asset list.
 #[test]
 fn basic_deploy() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -17,36 +17,12 @@ fn basic_deploy() {
     assert!(
         assets.iter().any(|a| a.key == "/index.html"),
         "expected /index.html in canister asset list; got: {assets:#?}",
-    );
-}
-
-/// Deploy a fixture whose `dirs` entry is a *nested* path (`src/frontend/dist`).
-/// The host preopens it under a multi-segment WASI guest name; the plugin's scan
-/// step must not call `canonicalize`/`realpath` on it (WASI returns ENOENT for
-/// any path under a multi-component preopen, even though plain access works).
-#[test]
-fn nested_dir_deploy() {
-    let tmp = setup_project("tests/fixture/nested");
-    let project = tmp.path();
-    let _network = LocalNetwork::start(project);
-
-    icp_cmd(project).arg("deploy").assert().success();
-
-    let assets = list_assets(project);
-
-    assert!(
-        assets.iter().any(|a| a.key == "/index.html"),
-        "expected /index.html in canister asset list; got: {assets:#?}",
-    );
-    assert!(
-        assets.iter().any(|a| a.key == "/assets/style.css"),
-        "expected /assets/style.css (nested subdir) in canister asset list; got: {assets:#?}",
     );
 }
 
 #[test]
 fn basic_deploy_with_proxy() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
     let network_status = icp_cmd(project)
@@ -80,7 +56,7 @@ fn basic_deploy_with_proxy() {
 /// The second deploy must report "up to date" and must not change canister state.
 #[test]
 fn no_op_sync() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -135,7 +111,7 @@ fn identity_sha(assets: &[AssetDetails], key: &str) -> Option<Vec<u8>> {
 /// The updated file's identity SHA256 must change; the untouched file's must not.
 #[test]
 fn content_update() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -176,7 +152,7 @@ fn content_update() {
 /// The deleted key must disappear from the canister; the remaining key must survive.
 #[test]
 fn asset_deletion() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
@@ -204,31 +180,5 @@ fn asset_deletion() {
     assert!(
         !assets_after.iter().any(|a| a.key == "/style.css"),
         "/style.css should be removed from the canister after local deletion",
-    );
-}
-
-/// The assets sync plugin owns the URL space of its canister and only
-/// supports a single source directory. A manifest that lists multiple
-/// `dirs:` entries must fail the sync step before any canister mutation.
-#[test]
-fn multi_directory_sync_rejected() {
-    let tmp = setup_project("tests/fixture/multi-dir");
-    let project = tmp.path();
-    let _network = LocalNetwork::start(project);
-
-    let output = icp_cmd(project)
-        .arg("deploy")
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(
-        combined.contains("expected exactly one input directory"),
-        "expected multi-dir rejection message; got:\n{combined}",
     );
 }

@@ -17,7 +17,8 @@ fn main() {
 
     // Delegate to the workspace Makefile so the tests exercise the exact same
     // wasm artifacts — same profiles and targets — that the release workflow
-    // ships. It builds both modules and copies them to dist/.
+    // ships. It builds both modules and copies them to dist/, which every test
+    // project's `icp.yaml` references by relative path (`../../dist/*.wasm`).
     let status = Command::new("make")
         .arg("wasm")
         // Prevent the nested cargo (spawned by make) from inheriting the
@@ -27,13 +28,4 @@ fn main() {
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn `make wasm`: {e}"));
     assert!(status.success(), "`make wasm` failed");
-
-    println!(
-        "cargo:rustc-env=CANISTER_WASM={}",
-        workspace_root.join("dist/canister.wasm").display()
-    );
-    println!(
-        "cargo:rustc-env=PLUGIN_WASM={}",
-        workspace_root.join("dist/plugin.wasm").display()
-    );
 }

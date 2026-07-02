@@ -6,7 +6,7 @@
 //! certified-response tree. This test proves an in-place upgrade preserves the
 //! assets and that they still serve with a valid certificate afterward.
 
-use e2e::{http_fetch, icp_cmd, list_assets, setup_project, AssetDetails, LocalNetwork};
+use e2e::{http_fetch, icp_cmd, list_assets, setup_example, AssetDetails, LocalNetwork};
 use reqwest::StatusCode;
 
 fn sorted_assets(project: &std::path::Path) -> Vec<AssetDetails> {
@@ -24,7 +24,7 @@ fn sorted_assets(project: &std::path::Path) -> Vec<AssetDetails> {
 /// us, so a 200 here means `post_upgrade` rebuilt the certified tree correctly).
 #[test]
 fn assets_persist_across_canister_upgrade() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 

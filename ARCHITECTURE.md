@@ -39,7 +39,7 @@ A few dependency-light **support libraries** are shared across modules, and one
 | [`sync-plugin`](crates/sync-plugin/) | `cdylib`, `wasm32-wasip2` | Thin `icp-cli` sync plugin that wraps `sync-core`. |
 | [`state-hash-cli`](crates/state-hash-cli/) | bin (native) | Standalone offline verifier (`state-hash <dist>`): computes a directory's state hash to compare against a canister's `state_hash()`. Depends only on `asset-prep` (+ `state-hash`), so it carries no canister-call, identity, or deploy code — a minimal trusted surface. |
 | [`recipe-gen`](crates/recipe-gen/) | library + bin | Renders the `icp-cli` recipe (`recipe.hbs`) that wires the canister build and the sync plugin together. |
-| [`e2e`](crates/e2e/) | tests | End-to-end tests driving the canister and plugin together through the `icp` CLI. |
+| [`e2e`](crates/e2e/) | tests | End-to-end tests driving the canister and plugin together through the `icp` CLI, by deploying the runnable [`examples/`](examples/) (and a few test-only fixtures) to a local replica. |
 
 The local preparation (`asset-prep`) is deliberately split from the canister-call
 orchestration (`sync-core`) so the verifier can reuse the *exact* preparation a sync
@@ -95,4 +95,6 @@ reported number. User-facing details: [Verifying contents](docs/verifying-conten
 - **The state-hash format** → [`crates/state-hash/src/`](crates/state-hash/src/); the
   **offline verifier** → [`crates/state-hash-cli/`](crates/state-hash-cli/).
 - **The public Candid interface** → [`certified-assets.did`](certified-assets.did).
+- **Runnable examples**, each doubling as an e2e test → [`examples/`](examples/),
+  deployed by [`crates/e2e/`](crates/e2e/).
 - **Build, release, and recipe mechanics** → [`README.md`](README.md).

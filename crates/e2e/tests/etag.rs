@@ -5,7 +5,7 @@
 //! 304 — exactly the property that lets ETag work without any gateway-side
 //! support (BOUN-446 was closed "won't do" for this reason).
 
-use e2e::{http_fetch, http_fetch_with_headers, icp_cmd, setup_project, LocalNetwork};
+use e2e::{http_fetch, http_fetch_with_headers, icp_cmd, setup_example, LocalNetwork};
 use reqwest::StatusCode;
 
 fn etag_of(headers: &reqwest::header::HeaderMap) -> String {
@@ -21,7 +21,7 @@ fn etag_of(headers: &reqwest::header::HeaderMap) -> String {
 /// stale validator still serves the full 200.
 #[test]
 fn conditional_request_yields_certified_304() {
-    let tmp = setup_project("tests/fixture/basic");
+    let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 

@@ -54,14 +54,21 @@ impl Drop for LocalNetwork {
     }
 }
 
-pub fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Recursively copy the contents of `src` into `dst`, skipping any `.icp/`
+/// directory. `.icp/` holds a project's local replica + deploy state; a developer
+/// who ran the project by hand leaves one behind, and copying it would drag a
+/// stale replica (and its canister ids) into the test's throwaway project.
+fn copy_project_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        if entry.file_name() == ".icp" {
+            continue;
+        }
         let ty = entry.file_type()?;
         let dst_path = dst.join(entry.file_name());
         if ty.is_dir() {
             fs::create_dir_all(&dst_path)?;
-            copy_dir_contents(&entry.path(), &dst_path)?;
+            copy_project_contents(&entry.path(), &dst_path)?;
         } else {
             fs::copy(entry.path(), dst_path)?;
         }
@@ -69,68 +76,90 @@ pub fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Set up an isolated copy of a fixture in a temporary directory, with
-/// pre-built WASM modules placed at `wasms/canister.wasm` and
-/// `wasms/plugin.wasm` (paths supplied by the build script).
+/// Copy a project directory into a fresh throwaway dir and return the guarding
+/// [`tempfile::TempDir`]. Every e2e test runs against such a copy — never a
+/// committed directory in place — so a developer's manual `icp deploy` and the
+/// test suite never fight over one `.icp/`, and tests are free to mutate files
+/// and run in parallel.
 ///
-/// `fixture_path` is relative to the e2e crate root (e.g. `"tests/fixture/basic"`).
-/// The returned `TempDir` must be kept alive for the duration of the test.
-pub fn setup_project(fixture_path: &str) -> tempfile::TempDir {
-    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tmp = tempfile::TempDir::new().expect("failed to create tempdir");
+/// The copy is created **two directory levels below the repo root** (under the
+/// workspace `target/`), which is the whole trick that lets one committed
+/// `icp.yaml` serve both humans and tests: a project pins its wasms as
+/// `../../dist/{canister,plugin}.wasm`, and from a two-deep location that
+/// resolves to the repo's real `dist/` (populated by `make wasm`) — the exact
+/// bytes, via the exact path, a human runs. No wasm injection, no path rewriting.
+///
+/// The returned `TempDir` deletes the copy on drop; keep it alive for the whole
+/// test, and declare the [`LocalNetwork`] *after* it so the replica is stopped
+/// before the directory is removed.
+fn copy_project(src: &Path) -> tempfile::TempDir {
+    // CARGO_MANIFEST_DIR = <repo>/crates/e2e, so the repo root is two levels up.
+    // The copy must land exactly two levels below it for `../../dist` to resolve
+    // to the repo's dist/ — hence a tempdir directly under the workspace target/.
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/e2e must sit two levels below the repo root");
+    let target = repo_root.join("target");
+    fs::create_dir_all(&target).expect("failed to create workspace target/ dir");
 
-    copy_dir_contents(&crate_root.join(fixture_path), tmp.path())
-        .expect("failed to copy fixture into tempdir");
-
-    let wasms_dir = tmp.path().join("wasms");
-    fs::create_dir_all(&wasms_dir).expect("failed to create wasms/ dir");
-
-    fs::copy(env!("CANISTER_WASM"), wasms_dir.join("canister.wasm"))
-        .expect("failed to copy canister.wasm");
-    fs::copy(env!("PLUGIN_WASM"), wasms_dir.join("plugin.wasm"))
-        .expect("failed to copy plugin.wasm");
-
+    let tmp = tempfile::Builder::new()
+        .prefix("e2e-")
+        .tempdir_in(&target)
+        .expect("failed to create tempdir under target/");
+    copy_project_contents(src, tmp.path())
+        .unwrap_or_else(|e| panic!("failed to copy project {}: {e}", src.display()));
     tmp
 }
 
-/// Generate a local `recipe.hbs` in `project` that pins the canister/plugin wasm
-/// by the relative paths `setup_project` placed under `wasms/`. The recipe is the
-/// real product produced by `recipe-gen`; writing the *local* variant here lets
-/// the e2e tests exercise icp-cli's recipe resolution end to end against the
-/// freshly built wasm. A fixture's `icp.yaml` references it via
-/// `recipe: { type: "file://recipe.hbs", ... }`.
-pub fn write_local_recipe(project: &Path) {
-    let recipe = recipe_gen::render_recipe(&recipe_gen::WasmSource::Local {
-        canister: "wasms/canister.wasm".to_string(),
-        plugin: "wasms/plugin.wasm".to_string(),
-    });
-    fs::write(project.join("recipe.hbs"), recipe).expect("failed to write recipe.hbs");
+/// Set up an isolated copy of a test-only fixture from `tests/fixture/<name>`
+/// (e.g. `setup_project("nested")`) — the sibling of [`setup_example`] for the
+/// throwaway fixtures that aren't showcase-worthy. See [`copy_project`] for why
+/// the copy resolves the fixture's `../../dist/*.wasm` pins to the repo's `dist/`.
+pub fn setup_project(name: &str) -> tempfile::TempDir {
+    copy_project(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixture")
+            .join(name),
+    )
 }
 
-/// Absolute path to a runnable example project under the repo's `examples/`.
+/// Set up an isolated copy of a runnable example from the repo's `examples/`.
 ///
-/// Unlike [`setup_project`], this does **not** copy into a tempdir or inject
-/// wasms. The example's committed `icp.yaml` references the repo's `dist/`
-/// canister + plugin wasms by relative path (`../../dist/...`) — exactly the way
-/// a human runs it — so the test deploys the example *in place* and exercises the
-/// same bytes a reader would. `dist/` is populated by `make wasm`, which this
-/// crate's build script already runs before the tests compile.
-///
-/// The example directory is the project root. The caller must not mutate its
-/// committed files (canister-state-only tests like protection are fine); the only
-/// artifact left behind is a gitignored `.icp/`, which this removes up front so
-/// each run starts from clean network/deploy state.
-pub fn example_project(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples")
-        .join(name)
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("example `{name}` not found under examples/: {e}"));
-    // Best-effort: drop any prior local replica/deploy state so the deploy is
-    // reproducible and a previous run (or a manual `icp deploy`) can't leak
-    // canister ids into this one.
-    let _ = fs::remove_dir_all(dir.join(".icp"));
-    dir
+/// The example's committed `icp.yaml` is used **unchanged** — the same file, with
+/// the same `../../dist/*.wasm` pins, that a human runs by hand (see the example's
+/// README). Running from a throwaway copy rather than in place means the test
+/// never disturbs a developer's own `examples/<name>/.icp/`. See [`copy_project`].
+pub fn setup_example(name: &str) -> tempfile::TempDir {
+    copy_project(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(name),
+    )
+}
+
+/// Set up an isolated copy of a recipe fixture (`tests/fixture/<name>`) and drop
+/// the local `recipe.hbs` it references next to its `icp.yaml`. The recipe must
+/// exist before the replica starts and before `icp deploy` resolves the manifest.
+/// Lets the e2e tests exercise icp-cli's recipe resolution end to end.
+pub fn setup_recipe_project(name: &str) -> tempfile::TempDir {
+    let tmp = setup_project(name);
+    write_local_recipe(tmp.path());
+    tmp
+}
+
+/// Generate a local `recipe.hbs` in `project` pinning the canister/plugin wasm by
+/// the `../../dist/*.wasm` paths that resolve from the copied project (see
+/// [`copy_project`]). The recipe is the real product produced by `recipe-gen`;
+/// writing the *local* variant lets the e2e tests exercise icp-cli's recipe
+/// resolution against the freshly built wasm. A recipe fixture's `icp.yaml`
+/// references it via `recipe: { type: "file://recipe.hbs", ... }`.
+fn write_local_recipe(project: &Path) {
+    let recipe = recipe_gen::render_recipe(&recipe_gen::WasmSource::Local {
+        canister: "../../dist/canister.wasm".to_string(),
+        plugin: "../../dist/plugin.wasm".to_string(),
+    });
+    fs::write(project.join("recipe.hbs"), recipe).expect("failed to write recipe.hbs");
 }
 
 /// Return the canister ID of `frontend` as printed by `icp canister status --id-only`.

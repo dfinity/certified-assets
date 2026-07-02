@@ -8,6 +8,8 @@ canisters:
   - name: frontend
     build:
       steps:
+        # The canister + sync-plugin wasms are built from this repo by `make wasm`,
+        # which writes them to the repo-root `dist/` directory.
         - type: pre-built
           path: ../../dist/canister.wasm
 
@@ -16,5 +18,4 @@ canisters:
         - type: plugin
           path: ../../dist/plugin.wasm
           dirs:
-            - dist-a
-            - dist-b
+            - dist # the site to serve (this example's own dist/)
