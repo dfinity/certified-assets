@@ -19,7 +19,7 @@ use wire_types::{
 impl State {
     // ---- asset mutations ----
 
-    pub fn create_asset(&mut self, arg: CreateAssetArguments) -> Result<(), String> {
+    pub(super) fn create_asset(&mut self, arg: CreateAssetArguments) -> Result<(), String> {
         if self.store.contains_asset(&arg.key) {
             return Err("asset already exists".to_string());
         }
@@ -39,7 +39,10 @@ impl State {
     /// [`Self::complete_set_asset_content`]. The live sync path collects chunks
     /// in `execute_operations` and calls that method directly.
     #[cfg(test)]
-    pub fn set_asset_content(&mut self, arg: SetAssetContentArguments) -> Result<(), String> {
+    pub(super) fn set_asset_content(
+        &mut self,
+        arg: SetAssetContentArguments,
+    ) -> Result<(), String> {
         if arg.chunk_ids.is_empty() {
             return Err("encoding must have at least one chunk".to_string());
         }
@@ -67,7 +70,7 @@ impl State {
     /// chunk) are **trusted, not recomputed** — see [`SetAssetContentArguments`]
     /// for why that's safe. The canister therefore does no content hashing on the
     /// commit path; it only validates the hashes' shape before storing them.
-    pub fn complete_set_asset_content(
+    pub(super) fn complete_set_asset_content(
         &mut self,
         arg: SetAssetContentArguments,
         content_chunks: Vec<ByteBuf>,
@@ -133,7 +136,10 @@ impl State {
         Ok(())
     }
 
-    pub fn unset_asset_content(&mut self, arg: UnsetAssetContentArguments) -> Result<(), String> {
+    pub(super) fn unset_asset_content(
+        &mut self,
+        arg: UnsetAssetContentArguments,
+    ) -> Result<(), String> {
         let mut meta = self
             .store
             .get_asset(&arg.key)
@@ -148,7 +154,7 @@ impl State {
         Ok(())
     }
 
-    pub fn delete_asset(&mut self, arg: DeleteAssetArguments) {
+    pub(super) fn delete_asset(&mut self, arg: DeleteAssetArguments) {
         if let Some(meta) = self.store.remove_asset(&arg.key) {
             self.certifier.remove_responses_for_path(&arg.key);
             for enc in meta.encodings.values() {
@@ -157,7 +163,10 @@ impl State {
         }
     }
 
-    pub fn set_asset_headers(&mut self, arg: SetAssetHeadersArguments) -> Result<(), String> {
+    pub(super) fn set_asset_headers(
+        &mut self,
+        arg: SetAssetHeadersArguments,
+    ) -> Result<(), String> {
         let mut meta = self
             .store
             .get_asset(&arg.key)

@@ -10,9 +10,6 @@ mod state;
 mod store;
 mod sync;
 
-#[cfg(test)]
-mod tests;
-
 #[cfg(feature = "canbench-rs")]
 mod benches;
 

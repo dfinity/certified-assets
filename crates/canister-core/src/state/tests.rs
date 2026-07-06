@@ -1891,32 +1891,6 @@ fn headers_candid_hashmap_btreemap_roundtrip() {
 #[cfg(test)]
 mod certificate_expression {
     use super::*;
-    use crate::cert::build_ic_certificate_expression_from_headers_and_encoding;
-    use ic_representation_independent_hash::Value;
-
-    #[test]
-    fn ic_certificate_expression_value_from_headers() {
-        let h = [
-            ("a".into(), Value::String("".into())),
-            ("b".into(), Value::String("".into())),
-            ("c".into(), Value::String("".into())),
-        ]
-        .to_vec();
-        // `Some(value)` certifies a `content-encoding` header (a real encoding,
-        // e.g. `Encoding::Gzip.header_name()` == `Some("gzip")`).
-        let c = build_ic_certificate_expression_from_headers_and_encoding(&h, Some("gzip"));
-        assert_eq!(
-            c.expression,
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "a", "b", "c"]}}}})"#
-        );
-        // `None` — which identity maps to via `Encoding::header_name` —
-        // omits the `content-encoding` header.
-        let c2 = build_ic_certificate_expression_from_headers_and_encoding(&h, None);
-        assert_eq!(
-            c2.expression,
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "a", "b", "c"]}}}})"#
-        );
-    }
 
     #[test]
     fn ic_certificate_expression_present_for_new_assets() {
@@ -3290,46 +3264,6 @@ mod env_cookie {
 
     fn html_asset(key: &str, body: &'static [u8]) -> AssetBuilder {
         AssetBuilder::new(key, "text/html").with_encoding("identity", vec![body])
-    }
-
-    #[test]
-    fn render_env_cookie_orders_and_encodes() {
-        use crate::asset::render_env_cookie;
-        let vars = BTreeMap::from([
-            ("PUBLIC_B".to_string(), "2".to_string()),
-            // A value containing `=` must survive: only the structural `&`/`=`
-            // separators are escaped, and the client splits each entry on its
-            // first `=` so the rest of the value is preserved verbatim.
-            ("PUBLIC_A".to_string(), "v=with=eq".to_string()),
-        ]);
-        let rendered = render_env_cookie(&[0xab, 0xcd], &vars);
-
-        assert!(rendered.ends_with("; Secure; SameSite=None; Partitioned"));
-        let value = rendered
-            .strip_prefix("ic_env=")
-            .unwrap()
-            .strip_suffix("; Secure; SameSite=None; Partitioned")
-            .unwrap();
-        // Separators are percent-encoded, so the payload rides in one cookie value.
-        assert!(!value.contains('&') && !value.contains('='));
-        // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
-        assert_eq!(
-            client_decode(value),
-            "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2"
-        );
-    }
-
-    #[test]
-    fn from_raw_keeps_only_public_vars() {
-        let env = CanisterEnv::from_raw(
-            mock_root_key(),
-            [
-                ("PUBLIC_A".to_string(), "1".to_string()),
-                ("SECRET_KEY".to_string(), "leak".to_string()),
-                ("PATH".to_string(), "/bin".to_string()),
-            ],
-        );
-        assert_eq!(env.public_vars.keys().collect::<Vec<_>>(), vec!["PUBLIC_A"]);
     }
 
     #[test]

@@ -144,7 +144,7 @@ impl State {
     /// but agree on *which* rule wins. A rule without a certified entry (shadowed
     /// by an asset, or an alias to a missing target) is skipped, exactly as
     /// serving requires — the gateway rejects a witness for an uncertified path.
-    pub(crate) fn matching_rule(
+    pub(super) fn matching_rule(
         &self,
         path: &str,
     ) -> Option<(&RedirectRule, &crate::redirect::CertifiedRuleEntry)> {

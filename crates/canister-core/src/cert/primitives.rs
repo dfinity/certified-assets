@@ -467,3 +467,33 @@ impl CertifiedResponses {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_ic_certificate_expression_from_headers_and_encoding;
+    use ic_representation_independent_hash::Value;
+
+    #[test]
+    fn ic_certificate_expression_value_from_headers() {
+        let h = [
+            ("a".into(), Value::String("".into())),
+            ("b".into(), Value::String("".into())),
+            ("c".into(), Value::String("".into())),
+        ]
+        .to_vec();
+        // `Some(value)` certifies a `content-encoding` header (a real encoding,
+        // e.g. `Encoding::Gzip.header_name()` == `Some("gzip")`).
+        let c = build_ic_certificate_expression_from_headers_and_encoding(&h, Some("gzip"));
+        assert_eq!(
+            c.expression,
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "a", "b", "c"]}}}})"#
+        );
+        // `None` — which identity maps to via `Encoding::header_name` —
+        // omits the `content-encoding` header.
+        let c2 = build_ic_certificate_expression_from_headers_and_encoding(&h, None);
+        assert_eq!(
+            c2.expression,
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "a", "b", "c"]}}}})"#
+        );
+    }
+}

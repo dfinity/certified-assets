@@ -52,7 +52,7 @@ impl State {
     /// Whether the request carries a currently-valid `certified_assets_access` cookie: some
     /// presented value hashes to a stored, unexpired token. Plain string parsing
     /// of the `Cookie` header, so `ic_env` and any other cookie are irrelevant.
-    pub(crate) fn cookie_token_valid(&self, req: &HttpRequest, now: u64) -> bool {
+    pub(super) fn cookie_token_valid(&self, req: &HttpRequest, now: u64) -> bool {
         access_cookie_values(req).into_iter().any(|value| {
             self.token_index
                 .get(&token_id(&value))
@@ -64,7 +64,7 @@ impl State {
     /// resolution order of [`State::http_request`]'s serve path so the witness
     /// lands at the most-specific certified location: an asset's sibling, a
     /// matching rule's `307`, or the universal root `<*>` `307`.
-    pub(crate) fn serve_unauthenticated(
+    pub(super) fn serve_unauthenticated(
         &self,
         path: &str,
         login_page: &str,
@@ -97,7 +97,7 @@ impl State {
     /// Handles `POST <login_page>` (a certified query — no upgrade). Reads the
     /// presented value from the form body and returns this token's certified
     /// `302 + Set-Cookie` on success, or the certified `401` re-prompt otherwise.
-    pub(crate) fn serve_redeem(
+    pub(super) fn serve_redeem(
         &self,
         req: &HttpRequest,
         login_page: &str,

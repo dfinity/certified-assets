@@ -54,6 +54,9 @@ mod serving;
 mod sync;
 mod upgrade;
 
+#[cfg(test)]
+mod tests;
+
 use crate::cert::{AssetKey, Certifier};
 use crate::store::Store;
 use crate::sync::SyncSession;
@@ -67,7 +70,7 @@ use wire_types::SessionId;
 /// Maximum number of items the canister returns from a single paginated query
 /// (`get_asset_details`, `get_redirect_rules`). The caller follows the cursor
 /// until it sees a short or empty page; it never needs to know this value.
-pub const PAGE_SIZE: usize = 100;
+const PAGE_SIZE: usize = 100;
 
 pub struct State {
     /// Durable state: everything persisted in stable memory. All storage access
@@ -138,12 +141,12 @@ impl State {
     // ---- settings accessors ----
 
     /// Allocates a fresh, never-reused sync session id.
-    pub fn alloc_session_id(&mut self) -> SessionId {
+    fn alloc_session_id(&mut self) -> SessionId {
         self.store.alloc_session_id()
     }
 
     /// Whether an asset exists at `key`.
-    pub fn contains_asset(&self, key: &AssetKey) -> bool {
+    fn contains_asset(&self, key: &AssetKey) -> bool {
         self.store.contains_asset(key)
     }
 
@@ -151,7 +154,7 @@ impl State {
     /// chunk. A 4xx custom-error-page rule can only serve a single-chunk target
     /// (see the alias-rule certification in [`Certifier`]), so the sync op guard
     /// rejects 4xx rules whose target is already multi-chunk.
-    pub fn target_is_multichunk(&self, key: &str) -> bool {
+    fn target_is_multichunk(&self, key: &str) -> bool {
         self.store
             .get_asset(&key.to_string())
             .is_some_and(|meta| meta.encodings.values().any(|e| e.num_chunks > 1))
@@ -181,7 +184,7 @@ impl State {
 
     /// The configured login-page path when access protection is on, else `None`. Reads
     /// the in-memory `StableCell`, so it is cheap enough to call per request.
-    pub fn protection_login_page(&self) -> Option<String> {
+    fn protection_login_page(&self) -> Option<String> {
         self.store.protection_login_page()
     }
 

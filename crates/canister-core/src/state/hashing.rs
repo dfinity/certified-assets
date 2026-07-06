@@ -18,7 +18,7 @@ impl State {
 
     /// Number of assets the staged hash will fold in — the `asset_count` written
     /// into the digest header (see `state_hash::StateHasher::begin`).
-    pub(crate) fn state_hash_asset_count(&self) -> u64 {
+    pub(super) fn state_hash_asset_count(&self) -> u64 {
         self.store.asset_count()
     }
 
@@ -27,7 +27,7 @@ impl State {
     /// returning its key so the caller can resume after it. `None` once the
     /// keyspace is exhausted. Folding one asset per step keeps a many-asset state
     /// within the per-message instruction limit.
-    pub(crate) fn next_manifest_asset(
+    pub(super) fn next_manifest_asset(
         &self,
         resume_after: &Option<AssetKey>,
     ) -> Option<(AssetKey, state_hash::ManifestAsset)> {
@@ -81,12 +81,12 @@ impl State {
 
     /// Folds the stored redirect rules (in match order) into `hasher` — the final
     /// step of the staged digest, after every asset.
-    pub(crate) fn fold_redirect_rules(&self, hasher: &mut state_hash::StateHasher) {
+    pub(super) fn fold_redirect_rules(&self, hasher: &mut state_hash::StateHasher) {
         hasher.write_redirect_rules(self.store.redirect_rules());
     }
 
     /// Stores a freshly-computed state hash in its cell.
-    pub(crate) fn cache_state_hash(&mut self, hash: [u8; 32]) {
+    pub(super) fn cache_state_hash(&mut self, hash: [u8; 32]) {
         self.store.cache_state_hash(hash);
     }
 
@@ -94,7 +94,7 @@ impl State {
     /// path used by tests; production finalizes via the staged
     /// `ExecuteOperationsProgress::HashingState` machine.
     #[cfg(test)]
-    pub(crate) fn recompute_state_hash(&mut self) -> [u8; 32] {
+    pub(super) fn recompute_state_hash(&mut self) -> [u8; 32] {
         let mut hasher = state_hash::StateHasher::begin(self.state_hash_asset_count());
         let mut resume_after: Option<AssetKey> = None;
         while let Some((key, asset)) = self.next_manifest_asset(&resume_after) {

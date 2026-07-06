@@ -39,12 +39,12 @@ impl State {
     /// afterwards.
     ///
     /// [`Certifier`]: crate::cert::Certifier
-    pub fn on_redirect_rules_change(&mut self) {
+    pub(super) fn on_redirect_rules_change(&mut self) {
         self.certifier.on_redirect_rules_change(&self.store);
     }
 
     /// Replaces the redirect rules and rebuilds their certified entries.
-    pub fn set_redirect_rules(&mut self, rules: Vec<RedirectRule>) {
+    pub(super) fn set_redirect_rules(&mut self, rules: Vec<RedirectRule>) {
         self.store.set_redirect_rules(rules);
         self.on_redirect_rules_change();
     }

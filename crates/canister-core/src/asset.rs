@@ -301,10 +301,46 @@ fn build_headers(
 
 #[cfg(test)]
 mod tests {
-    use super::url_encode;
+    use super::{render_env_cookie, url_encode};
+    use std::collections::BTreeMap;
+
+    /// Client-side `decodeURIComponent`, reproduced for assertions: percent-decodes
+    /// the visible cookie value exactly as the browser does before the lib parses it.
+    fn client_decode(value: &str) -> String {
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8()
+            .unwrap()
+            .to_string()
+    }
 
     #[test]
     fn url_encode_escapes_cookie_separators() {
         assert_eq!(url_encode("a=b&c=d"), "a%3Db%26c%3Dd");
+    }
+
+    #[test]
+    fn render_env_cookie_orders_and_encodes() {
+        let vars = BTreeMap::from([
+            ("PUBLIC_B".to_string(), "2".to_string()),
+            // A value containing `=` must survive: only the structural `&`/`=`
+            // separators are escaped, and the client splits each entry on its
+            // first `=` so the rest of the value is preserved verbatim.
+            ("PUBLIC_A".to_string(), "v=with=eq".to_string()),
+        ]);
+        let rendered = render_env_cookie(&[0xab, 0xcd], &vars);
+
+        assert!(rendered.ends_with("; Secure; SameSite=None; Partitioned"));
+        let value = rendered
+            .strip_prefix("ic_env=")
+            .unwrap()
+            .strip_suffix("; Secure; SameSite=None; Partitioned")
+            .unwrap();
+        // Separators are percent-encoded, so the payload rides in one cookie value.
+        assert!(!value.contains('&') && !value.contains('='));
+        // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
+        assert_eq!(
+            client_decode(value),
+            "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2"
+        );
     }
 }
