@@ -2,6 +2,7 @@
 mod asset;
 mod blob_store;
 mod certification;
+mod certifier;
 mod http;
 mod nested_tree;
 mod protection;
