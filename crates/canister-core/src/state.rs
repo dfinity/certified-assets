@@ -18,7 +18,6 @@ use crate::asset::{
     certificate_expression_for, headers_for, range_certificate_expression_for, range_headers_for,
     range_response_hash, response_hashes_for,
 };
-use crate::blob_store::BlobStore;
 use crate::certification::{
     build_ic_certificate_expression_header, response_hash, AssetKey, AssetPath,
     CertificateExpression, CertifiedResponses, HashTreePath, NestedTreeKey, RequestHash,
@@ -26,17 +25,14 @@ use crate::certification::{
 };
 use crate::http::{HeaderField, HttpRequest, HttpResponse};
 use crate::protection::{ProtectionResponse, ProtectionStatus, TokenInfo};
-use crate::stable_store::{
-    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, EncodingMeta, ProtectionSettings,
-    RedirectRules, StateHash, TokenMeta,
-};
+use crate::stable_store::{AssetMeta, EncodingMeta, TokenMeta};
+use crate::store::Store;
 use crate::sync::{Chunk, SyncSession};
 use crate::url::url_decode;
 use candid::Principal;
 use ic_certification::{AsHashTree, Hash};
 use ic_representation_independent_hash::Value;
-use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
-use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
+use ic_stable_structures::DefaultMemoryImpl;
 use serde_bytes::ByteBuf;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
@@ -85,67 +81,11 @@ fn parse_range_start(value: &str) -> Option<usize> {
     start.trim().parse::<usize>().ok()
 }
 
-type Mem = VirtualMemory<DefaultMemoryImpl>;
-
-const AUTHORIZED_MEMORY: MemoryId = MemoryId::new(0);
-const REDIRECT_RULES_MEMORY: MemoryId = MemoryId::new(1);
-const NEXT_SESSION_ID_MEMORY: MemoryId = MemoryId::new(2);
-const NEXT_CONTENT_ID_MEMORY: MemoryId = MemoryId::new(3);
-const METADATA_MEMORY: MemoryId = MemoryId::new(4);
-/// Content chunk index (`ContentChunkKey -> BlobRef`); the bytes live in
-/// `CONTENT_DATA_MEMORY`. See [`crate::blob_store`].
-const CONTENT_INDEX_MEMORY: MemoryId = MemoryId::new(5);
-/// Raw contiguous chunk bytes managed by the [`BlobStore`] allocator.
-const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(6);
-/// Per-chunk certification data (`ContentChunkKey -> ChunkCert`); read by the
-/// 206 certify/serve paths so neither has to re-hash or fully read content.
-const CHUNK_CERT_MEMORY: MemoryId = MemoryId::new(7);
-/// Cached canonical state hash (`StateHash`), recomputed at the end of every
-/// final sync. Its own cell so the frequent counter bumps don't touch it.
-const STATE_HASH_MEMORY: MemoryId = MemoryId::new(8);
-/// Access-protection settings (`ProtectionSettings`): one small cell that flips
-/// the canister between public and private. `None` login page ⇒ public.
-const PROTECTION_MEMORY: MemoryId = MemoryId::new(9);
-/// Live access tokens, keyed by their unique **label** (`label -> TokenMeta`).
-/// The management view: issue/revoke/list. Empty unless protection is on. The
-/// hot-path gate index is *derived* from this (in heap; see `token_index`).
-const TOKENS_MEMORY: MemoryId = MemoryId::new(10);
-
 pub struct State {
-    // ---- durable (stable memory) ----
-    /// Principals authorized to sync (controllers are always allowed, unstored).
-    authorized: StableCell<AuthorizedSet, Mem>,
-    /// Ordered redirect-rule list. Its own cell so a counter bump doesn't
-    /// reserialize it (it can be large; the counters are bumped frequently).
-    redirect_rules: StableCell<RedirectRules, Mem>,
-    /// Monotonic, never-reused sync session id allocator.
-    next_session_id: StableCell<u64, Mem>,
-    /// Monotonic, never-reused chunk-group id allocator.
-    next_content_id: StableCell<u64, Mem>,
-    /// Per-asset metadata, ordered by key so `get_asset_details` can page with a
-    /// key cursor (a `range` seek) instead of sorting the keyspace per query.
-    metadata: StableBTreeMap<AssetKey, AssetMeta, Mem>,
-    /// Raw content bytes, one chunk per `(content_id, index)`, stored contiguously
-    /// in a stable region (not inline in a BTree) so reads/writes are a single
-    /// `stable64_read`/`write` instead of an overflow-page walk. See
-    /// [`crate::blob_store`].
-    content: BlobStore<Mem>,
-    /// Per-chunk certification data (length + SHA-256), keyed by the same
-    /// `(content_id, chunk_index)` as the content blob. Lets the 206 certify path
-    /// stay content-free (no re-hash in `post_upgrade`) and the serve path avoid
-    /// reading every chunk to locate a range. Freed alongside its content group.
-    chunk_certs: StableBTreeMap<ContentChunkKey, ChunkCert, Mem>,
-    /// Cached canonical state hash, recomputed at the end of every final sync and
-    /// returned verbatim by the public `state_hash` endpoint. `[0; 32]` until the
-    /// first sync finalizes. See [`State::cached_state_hash`].
-    state_hash: StableCell<StateHash, Mem>,
-    /// Access-protection settings. `login_page == None` (the default) ⇒ a fully
-    /// public app: the gate, the no-store override, and the certified
-    /// unauthenticated siblings are all absent. See the access-protection design.
-    protection: StableCell<ProtectionSettings, Mem>,
-    /// Live access tokens keyed by their unique **label** — the management view
-    /// (issue/revoke/list, all O(log n) by label). Empty when protection is off.
-    tokens: StableBTreeMap<String, TokenMeta, Mem>,
+    /// Durable state: everything persisted in stable memory. All storage access
+    /// funnels through this typed interface — `State` never touches a
+    /// `StableCell`/`StableBTreeMap`/`MemoryId` directly. See [`Store`].
+    store: Store,
 
     // ---- transient heap (lost on upgrade) ----
     /// Chunks staged by `upload_chunks` for the current sync, in upload order:
@@ -154,30 +94,31 @@ pub struct State {
     /// freed incrementally without renumbering the surviving slots. Cleared on
     /// sync start/finish. The plugin reproduces these same indices locally, so
     /// they are never sent over the wire.
-    pub chunks: Vec<Option<Chunk>>,
+    pub(crate) chunks: Vec<Option<Chunk>>,
     /// The single in-progress sync, if any. At most one runs at a time.
-    pub sync_session: Option<SyncSession>,
+    pub(crate) sync_session: Option<SyncSession>,
 
     // ---- derived heap (rebuilt in post_upgrade) ----
-    pub asset_hashes: CertifiedResponses,
-    /// Per-rule certified-tree entries, parallel to `settings.redirect_rules`. A
+    asset_hashes: CertifiedResponses,
+    /// Per-rule certified-tree entries, parallel to the stored redirect rules. A
     /// `None` slot means the rule has no certified entry — either because an
     /// asset shadows an exact rule at the same path, or because an alias rule
     /// (200/4xx) points at a target asset that doesn't exist yet.
-    pub rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
+    rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
     /// The fully rendered `Set-Cookie: ic_env=…` value layered onto every
     /// `text/html` response, or `None` before any env snapshot has been
     /// captured. Owned by the canister (never stored in `meta.headers`) and
     /// recomputed on capture; rebuilt from the live system API in `post_upgrade`
     /// (the env vars themselves survive as canister settings), exactly like
     /// `asset_hashes`. See [`State::effective_headers`].
-    pub env_cookie: Option<String>,
+    env_cookie: Option<String>,
     /// Hot-path gate index: `SHA-256(value) -> expires_at`. The per-request gate
     /// hashes the presented cookie and looks it up here — a heap-map read, no
     /// stable access or `TokenMeta` deserialize. Pure derived state (every entry
-    /// is reconstructable from `tokens`, which carries each token's `token_id` and
-    /// expiry), so it lives in heap and is rebuilt on upgrade like `asset_hashes`.
-    /// Kept one-to-one with `tokens`; revocation/expiry are live.
+    /// is reconstructable from the token store, which carries each token's
+    /// `token_id` and expiry), so it lives in heap and is rebuilt on upgrade like
+    /// `asset_hashes`. Kept one-to-one with the token store; revocation/expiry
+    /// are live.
     token_index: HashMap<[u8; 32], u64>,
 }
 
@@ -188,30 +129,19 @@ impl Default for State {
 }
 
 impl State {
-    /// Builds a `State` over the given stable memory. `StableCell`/`StableBTreeMap`
-    /// init transparently picks up existing data if the memory was already
-    /// populated (e.g. after an upgrade), or starts empty over fresh memory.
+    /// Builds a `State` over the given stable memory. The durable [`Store`]
+    /// transparently picks up existing data if the memory was already populated
+    /// (e.g. after an upgrade), or starts empty over fresh memory; the heap
+    /// fields start empty and are rebuilt from that durable state in
+    /// `post_upgrade`.
     ///
     /// The explicit-memory constructor is what makes the upgrade-roundtrip unit
     /// test possible: off-wasm `DefaultMemoryImpl` is a cheaply-cloneable handle
     /// to a shared byte buffer, so a test can build two `State`s over the same
     /// memory to simulate an upgrade.
     pub fn new(memory: DefaultMemoryImpl) -> Self {
-        let mm = MemoryManager::init(memory);
         Self {
-            authorized: StableCell::init(mm.get(AUTHORIZED_MEMORY), AuthorizedSet::default()),
-            redirect_rules: StableCell::init(
-                mm.get(REDIRECT_RULES_MEMORY),
-                RedirectRules::default(),
-            ),
-            next_session_id: StableCell::init(mm.get(NEXT_SESSION_ID_MEMORY), 0),
-            next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
-            metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
-            content: BlobStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
-            chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
-            state_hash: StableCell::init(mm.get(STATE_HASH_MEMORY), StateHash::default()),
-            protection: StableCell::init(mm.get(PROTECTION_MEMORY), ProtectionSettings::default()),
-            tokens: StableBTreeMap::init(mm.get(TOKENS_MEMORY)),
+            store: Store::new(memory),
             chunks: Vec::new(),
             sync_session: None,
             asset_hashes: CertifiedResponses::default(),
@@ -223,24 +153,14 @@ impl State {
 
     // ---- settings accessors ----
 
-    /// Allocates a fresh, never-reused content group id. Bumps only the
-    /// counter's own cell — no other state is reserialized.
-    fn alloc_content_id(&mut self) -> u64 {
-        let id = *self.next_content_id.get();
-        self.next_content_id.set(id + 1);
-        id
-    }
-
     /// Allocates a fresh, never-reused sync session id.
     pub fn alloc_session_id(&mut self) -> SessionId {
-        let id = *self.next_session_id.get();
-        self.next_session_id.set(id + 1);
-        id
+        self.store.alloc_session_id()
     }
 
     /// Whether an asset exists at `key`.
     pub fn contains_asset(&self, key: &AssetKey) -> bool {
-        self.metadata.contains_key(key)
+        self.store.contains_asset(key)
     }
 
     /// Whether the asset at `key` exists and stores any encoding as more than one
@@ -248,69 +168,39 @@ impl State {
     /// (see [`State::build_alias_rule_entry`]), so the sync op guard rejects 4xx
     /// rules whose target is already multi-chunk.
     pub fn target_is_multichunk(&self, key: &str) -> bool {
-        self.metadata
-            .get(&key.to_string())
+        self.store
+            .get_asset(&key.to_string())
             .is_some_and(|meta| meta.encodings.values().any(|e| e.num_chunks > 1))
     }
 
     pub fn authorize(&mut self, principal: Principal) {
-        let mut authorized = self.authorized.get().clone();
-        authorized.0.insert(principal);
-        self.authorized.set(authorized);
+        self.store.authorize(principal);
     }
 
     pub fn deauthorize(&mut self, principal: &Principal) {
-        let mut authorized = self.authorized.get().clone();
-        authorized.0.remove(principal);
-        self.authorized.set(authorized);
+        self.store.deauthorize(principal);
     }
 
     pub fn list_authorized(&self) -> Vec<Principal> {
-        self.authorized.get().0.iter().copied().collect()
+        self.store.list_authorized()
     }
 
     pub fn is_authorized(&self, principal: &Principal) -> bool {
-        self.authorized.get().0.contains(principal)
+        self.store.is_authorized(principal)
     }
 
     pub fn root_hash(&self) -> Hash {
         self.asset_hashes.root_hash()
     }
 
-    // ---- chunk store helpers ----
-
-    /// Fetches one chunk's bytes from the content store as `ByteBuf`. A missing
-    /// chunk yields empty bytes (callers only request indices the metadata
-    /// claims exist).
-    fn chunk_bytes(&self, content_id: u64, chunk_index: usize) -> ByteBuf {
-        self.content
-            .get(content_id, chunk_index as u32)
-            .map(ByteBuf::from)
-            .unwrap_or_default()
-    }
-
-    /// Frees every chunk belonging to a content group, including its per-chunk
-    /// certification entries.
-    fn delete_content(&mut self, content_id: u64) {
-        self.content.delete_group(content_id);
-        let keys: Vec<ContentChunkKey> = self
-            .chunk_certs
-            .range(ContentChunkKey::range(content_id))
-            .map(|e| e.into_pair().0)
-            .collect();
-        for key in keys {
-            self.chunk_certs.remove(&key);
-        }
-    }
-
     // ---- asset mutations ----
 
     pub fn create_asset(&mut self, arg: CreateAssetArguments) -> Result<(), String> {
-        if self.metadata.contains_key(&arg.key) {
+        if self.store.contains_asset(&arg.key) {
             return Err("asset already exists".to_string());
         }
 
-        self.metadata.insert(
+        self.store.put_asset(
             arg.key,
             AssetMeta {
                 content_type: arg.content_type,
@@ -329,7 +219,7 @@ impl State {
         if arg.chunk_ids.is_empty() {
             return Err("encoding must have at least one chunk".to_string());
         }
-        if !self.metadata.contains_key(&arg.key) {
+        if !self.store.contains_asset(&arg.key) {
             return Err("asset not found".to_string());
         }
 
@@ -390,30 +280,19 @@ impl State {
         };
 
         let mut meta = self
-            .metadata
-            .get(&arg.key)
+            .store
+            .get_asset(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
         // Free the chunks of any encoding we're replacing.
         if let Some(old) = meta.encodings.get(&arg.encoding) {
-            self.delete_content(old.content_id);
+            self.store.delete_content_group(old.content_id);
         }
 
-        let content_id = self.alloc_content_id();
-        let mut content_len = 0u64;
-        for (index, chunk) in content_chunks.iter().enumerate() {
-            self.content.insert(content_id, index as u32, chunk);
-            if multi_chunk {
-                self.chunk_certs.insert(
-                    ContentChunkKey::new(content_id, index as u32),
-                    ChunkCert {
-                        len: chunk.len() as u32,
-                        sha256: chunk_hashes[index],
-                    },
-                );
-            }
-            content_len += chunk.len() as u64;
-        }
+        // Write the chunks (and, for multi-chunk encodings, their per-chunk cert
+        // data) under a fresh content-group id. `chunk_hashes` is empty for
+        // single-chunk encodings, so the store skips the `chunk_certs` write.
+        let (content_id, content_len) = self.store.store_content(&content_chunks, &chunk_hashes);
 
         meta.encodings.insert(
             arg.encoding,
@@ -425,44 +304,44 @@ impl State {
             },
         );
         self.recertify_asset(&arg.key, &meta);
-        self.metadata.insert(arg.key, meta);
+        self.store.put_asset(arg.key, meta);
 
         Ok(())
     }
 
     pub fn unset_asset_content(&mut self, arg: UnsetAssetContentArguments) -> Result<(), String> {
         let mut meta = self
-            .metadata
-            .get(&arg.key)
+            .store
+            .get_asset(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
         if let Some(old) = meta.encodings.remove(&arg.encoding) {
-            self.delete_content(old.content_id);
+            self.store.delete_content_group(old.content_id);
             self.recertify_asset(&arg.key, &meta);
-            self.metadata.insert(arg.key, meta);
+            self.store.put_asset(arg.key, meta);
         }
 
         Ok(())
     }
 
     pub fn delete_asset(&mut self, arg: DeleteAssetArguments) {
-        if let Some(meta) = self.metadata.remove(&arg.key) {
+        if let Some(meta) = self.store.remove_asset(&arg.key) {
             self.asset_hashes.remove_responses_for_path(&arg.key);
             for enc in meta.encodings.values() {
-                self.delete_content(enc.content_id);
+                self.store.delete_content_group(enc.content_id);
             }
         }
     }
 
     pub fn set_asset_headers(&mut self, arg: SetAssetHeadersArguments) -> Result<(), String> {
         let mut meta = self
-            .metadata
-            .get(&arg.key)
+            .store
+            .get_asset(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
         meta.headers = arg.headers;
         self.recertify_asset(&arg.key, &meta);
-        self.metadata.insert(arg.key, meta);
+        self.store.put_asset(arg.key, meta);
 
         Ok(())
     }
@@ -501,12 +380,12 @@ impl State {
     /// The configured login-page path when the gate is on, else `None`. Reads
     /// the in-memory `StableCell`, so it is cheap enough to call per request.
     pub fn protection_login_page(&self) -> Option<String> {
-        self.protection.get().login_page.clone()
+        self.store.protection_login_page()
     }
 
     /// Whether access protection is enabled (the gate is on).
     pub fn protection_enabled(&self) -> bool {
-        self.protection.get().login_page.is_some()
+        self.store.protection_enabled()
     }
 
     /// Removes and recomputes every certified response for one asset from its
@@ -599,12 +478,9 @@ impl State {
             range_certificate_expression_for(effective_headers, encoding, &enc.sha256);
         let total = enc.content_len;
         let chunk_infos: Vec<(u32, [u8; 32])> = self
-            .chunk_certs
-            .range(ContentChunkKey::range(enc.content_id))
-            .map(|e| {
-                let cc = e.into_pair().1;
-                (cc.len, cc.sha256)
-            })
+            .store
+            .chunk_certs_of(enc.content_id)
+            .map(|(_, cc)| (cc.len, cc.sha256))
             .collect();
         let mut resp_hashes = Vec::with_capacity(chunk_infos.len());
         let mut offset: u64 = 0;
@@ -632,17 +508,10 @@ impl State {
     /// `PAGE_SIZE` assets are returned; an empty result means there is nothing
     /// after `start_after`.
     pub fn get_asset_details(&self, start_after: Option<AssetKey>) -> Vec<AssetDetails> {
-        use std::ops::Bound::{Excluded, Unbounded};
-        let lower = match start_after {
-            Some(key) => Excluded(key),
-            None => Unbounded,
-        };
-
-        self.metadata
-            .range((lower, Unbounded))
+        self.store
+            .assets_from(start_after.as_ref())
             .take(PAGE_SIZE)
-            .map(|entry| {
-                let (key, meta) = entry.into_pair();
+            .map(|(key, meta)| {
                 let mut encodings: Vec<_> = meta
                     .encodings
                     .iter()
@@ -671,9 +540,8 @@ impl State {
     /// at or after `start_index`.
     pub fn get_redirect_rules(&self, start_index: u64) -> Vec<RedirectRule> {
         let start = start_index as usize;
-        self.redirect_rules
-            .get()
-            .0
+        self.store
+            .redirect_rules()
             .get(start..)
             .unwrap_or_default()
             .iter()
@@ -687,13 +555,13 @@ impl State {
     /// The cached canonical state hash (see the `state-hash` crate). `[0; 32]`
     /// before the first sync finalizes. Read by the public `state_hash` endpoint.
     pub fn cached_state_hash(&self) -> [u8; 32] {
-        self.state_hash.get().0
+        self.store.cached_state_hash()
     }
 
     /// Number of assets the staged hash will fold in — the `asset_count` written
     /// into the digest header (see `state_hash::StateHasher::begin`).
     pub(crate) fn state_hash_asset_count(&self) -> u64 {
-        self.metadata.len()
+        self.store.asset_count()
     }
 
     /// The next asset (in ascending key order) strictly after `resume_after`,
@@ -705,12 +573,7 @@ impl State {
         &self,
         resume_after: &Option<AssetKey>,
     ) -> Option<(AssetKey, state_hash::ManifestAsset)> {
-        use std::ops::Bound::{Excluded, Unbounded};
-        let lower = match resume_after {
-            Some(key) => Excluded(key.clone()),
-            None => Unbounded,
-        };
-        let (key, meta) = self.metadata.range((lower, Unbounded)).next()?.into_pair();
+        let (key, meta) = self.store.assets_from(resume_after.as_ref()).next()?;
         let asset = self.manifest_asset(&key, &meta);
         Some((key, asset))
     }
@@ -726,14 +589,11 @@ impl State {
             .map(|(&encoding, enc)| {
                 if enc.num_chunks > 1 {
                     let chunks = self
-                        .chunk_certs
-                        .range(ContentChunkKey::range(enc.content_id))
-                        .map(|entry| {
-                            let (_key, cert) = entry.into_pair();
-                            state_hash::ManifestChunk {
-                                len: cert.len,
-                                sha256: cert.sha256,
-                            }
+                        .store
+                        .chunk_certs_of(enc.content_id)
+                        .map(|(_, cert)| state_hash::ManifestChunk {
+                            len: cert.len,
+                            sha256: cert.sha256,
                         })
                         .collect();
                     state_hash::ManifestEncoding {
@@ -764,12 +624,12 @@ impl State {
     /// Folds the stored redirect rules (in match order) into `hasher` — the final
     /// step of the staged digest, after every asset.
     pub(crate) fn fold_redirect_rules(&self, hasher: &mut state_hash::StateHasher) {
-        hasher.write_redirect_rules(&self.redirect_rules.get().0);
+        hasher.write_redirect_rules(self.store.redirect_rules());
     }
 
     /// Stores a freshly-computed state hash in its cell.
     pub(crate) fn cache_state_hash(&mut self, hash: [u8; 32]) {
-        self.state_hash.set(StateHash(hash));
+        self.store.cache_state_hash(hash);
     }
 
     /// Recomputes the canonical state hash in one pass and caches it. Off-staging
@@ -800,7 +660,7 @@ impl State {
         range_start: Option<usize>,
     ) -> HttpResponse {
         // Asset at the requested path wins.
-        if let Some(meta) = self.metadata.get(&path.to_string()) {
+        if let Some(meta) = self.store.get_asset(&path.to_string()) {
             let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
             if let Some(response) = self.build_asset_response(
                 &meta,
@@ -815,8 +675,8 @@ impl State {
         }
 
         // Scan redirect rules in declaration order; first match wins.
-        let redirect_rules = self.redirect_rules.get();
-        for (idx, rule) in redirect_rules.0.iter().enumerate() {
+        let redirect_rules = self.store.redirect_rules();
+        for (idx, rule) in redirect_rules.iter().enumerate() {
             if !crate::redirect::matches(rule, path) {
                 continue;
             }
@@ -936,12 +796,15 @@ impl State {
         // canister-managed `etag` header is already in `headers` (and certified),
         // so both the 200 and the 304 carry it.
         let (status_code, body) = if let Some(status) = status_override {
-            (status, self.chunk_bytes(enc.content_id, 0))
+            (
+                status,
+                ByteBuf::from(self.store.read_chunk(enc.content_id, 0)),
+            )
         } else if etags.contains(&enc.sha256) {
             // Conditional request matched: serve the certified 304 (empty body).
             (304, ByteBuf::new())
         } else {
-            (200, self.chunk_bytes(enc.content_id, 0))
+            (200, ByteBuf::from(self.store.read_chunk(enc.content_id, 0)))
         };
 
         HttpResponse {
@@ -978,24 +841,17 @@ impl State {
         // Find the chunk whose [offset, offset+len) contains `start`.
         let mut offset = 0usize;
         let mut target: Option<(u32, usize, usize)> = None; // (chunk_index, chunk_start, len)
-        for entry in self
-            .chunk_certs
-            .range(ContentChunkKey::range(enc.content_id))
-        {
-            let (key, cc) = entry.into_pair();
+        for (chunk_index, cc) in self.store.chunk_certs_of(enc.content_id) {
             let len = cc.len as usize;
             if start < offset + len {
-                target = Some((key.chunk_index, offset, len));
+                target = Some((chunk_index, offset, len));
                 break;
             }
             offset += len;
         }
         let (chunk_index, chunk_start, len) = target?;
 
-        let chunk = self
-            .content
-            .get(enc.content_id, chunk_index)
-            .unwrap_or_default();
+        let chunk = self.store.read_chunk(enc.content_id, chunk_index);
         let content_range = format!("bytes {}-{}/{}", chunk_start, chunk_start + len - 1, total);
         let mut headers = range_headers_for(
             &self.effective_headers(meta),
@@ -1046,7 +902,7 @@ impl State {
                 }
             }
             crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status } => {
-                let Some(meta) = self.metadata.get(target_key) else {
+                let Some(meta) = self.store.get_asset(target_key) else {
                     return HttpResponse::build_404(cert_header);
                 };
                 let status_override = (*status != 200).then_some(*status);
@@ -1130,9 +986,9 @@ impl State {
         let location = AssetPath::from(login_page).asset_hash_path_root();
         self.certify_protection_response(&location, &ProtectionResponse::redeem_failure());
         let paths: Vec<Vec<NestedTreeKey>> = self
-            .tokens
-            .iter()
-            .map(|e| e.into_pair().1.redeem_path)
+            .store
+            .iter_tokens()
+            .map(|(_, meta)| meta.redeem_path)
             .collect();
         for path in paths {
             self.asset_hashes
@@ -1164,7 +1020,7 @@ impl State {
         certificate: &[u8],
     ) -> HttpResponse {
         // 1. Exact asset at this path → its 307/401 sibling.
-        if let Some(meta) = self.metadata.get(&path.to_string()) {
+        if let Some(meta) = self.store.get_asset(&path.to_string()) {
             let resp = if crate::asset::is_html_content_type(&meta.content_type) {
                 ProtectionResponse::redirect_to_login(login_page)
             } else {
@@ -1175,8 +1031,8 @@ impl State {
         }
         // 2. Matching redirect rule → a 307 at the rule's location instead of
         //    following the rule (which could leak content).
-        let redirect_rules = self.redirect_rules.get();
-        for (idx, rule) in redirect_rules.0.iter().enumerate() {
+        let redirect_rules = self.store.redirect_rules();
+        for (idx, rule) in redirect_rules.iter().enumerate() {
             if !crate::redirect::matches(rule, path) {
                 continue;
             }
@@ -1257,9 +1113,9 @@ impl State {
     /// Re-certifies every asset from its metadata. Shared by the protection
     /// toggles and `post_upgrade_rebuild`.
     fn recertify_all_assets(&mut self) {
-        let keys: Vec<AssetKey> = self.metadata.keys().collect();
+        let keys = self.store.asset_keys();
         for key in keys {
-            if let Some(meta) = self.metadata.get(&key) {
+            if let Some(meta) = self.store.get_asset(&key) {
                 self.recertify_asset(&key, &meta);
             }
         }
@@ -1273,10 +1129,7 @@ impl State {
         // shot, so per-token cert removal isn't needed — just empty the store and
         // the (heap) gate index.
         self.asset_hashes.remove_responses_for_path(login_page);
-        let labels: Vec<String> = self.tokens.keys().collect();
-        for label in labels {
-            self.tokens.remove(&label);
-        }
+        self.store.clear_tokens();
         self.token_index.clear();
     }
 
@@ -1294,14 +1147,13 @@ impl State {
         if let Some(old) = previous {
             self.clear_tokens_and_login_responses(&old);
         }
-        self.protection.set(ProtectionSettings {
-            login_page: Some(login_page.clone()),
-        });
+        self.store
+            .set_protection_login_page(Some(login_page.clone()));
         self.recertify_all_assets();
         self.on_redirect_rules_change();
         // Enable-first: if the page isn't synced yet, the asset loop didn't touch
         // it, but the redeem endpoint must still work — assert its responses.
-        if !self.metadata.contains_key(&login_page) {
+        if !self.store.contains_asset(&login_page) {
             self.reassert_login_responses(&login_page);
         }
     }
@@ -1312,7 +1164,7 @@ impl State {
         let Some(login_page) = self.protection_login_page() else {
             return;
         };
-        self.protection.set(ProtectionSettings { login_page: None });
+        self.store.set_protection_login_page(None);
         self.clear_tokens_and_login_responses(&login_page);
         self.recertify_all_assets();
         self.on_redirect_rules_change();
@@ -1344,7 +1196,7 @@ impl State {
             .certify_protection_response(&location, &ProtectionResponse::redeem_success(&value));
         let token_id = crate::protection::token_id(&value);
         self.token_index.insert(token_id, expires_at);
-        self.tokens.insert(
+        self.store.insert_token(
             label,
             TokenMeta {
                 token_id,
@@ -1360,7 +1212,7 @@ impl State {
     /// shared by `revoke_token`, the rotate path of `issue_token`, and the GC
     /// sweep. O(log n).
     fn remove_token(&mut self, label: &str) {
-        if let Some(meta) = self.tokens.remove(&label.to_string()) {
+        if let Some(meta) = self.store.remove_token(label) {
             self.token_index.remove(&meta.token_id);
             self.asset_hashes
                 .remove_response_precomputed(&HashTreePath(meta.redeem_path));
@@ -1372,12 +1224,9 @@ impl State {
     /// rare management map, not the hot gate path.
     fn sweep_expired_tokens(&mut self, now: u64) {
         let expired: Vec<String> = self
-            .tokens
-            .iter()
-            .filter_map(|e| {
-                let (label, meta) = e.into_pair();
-                (meta.expires_at <= now).then_some(label)
-            })
+            .store
+            .iter_tokens()
+            .filter_map(|(label, meta)| (meta.expires_at <= now).then_some(label))
             .collect();
         for label in expired {
             self.remove_token(&label);
@@ -1393,14 +1242,11 @@ impl State {
     /// Live tokens (label + expiry) for the management UI. Controller-guarded at
     /// the endpoint.
     pub fn list_tokens(&self) -> Vec<TokenInfo> {
-        self.tokens
-            .iter()
-            .map(|e| {
-                let (label, meta) = e.into_pair();
-                TokenInfo {
-                    label,
-                    expires_at: meta.expires_at,
-                }
+        self.store
+            .iter_tokens()
+            .map(|(label, meta)| TokenInfo {
+                label,
+                expires_at: meta.expires_at,
             })
             .collect()
     }
@@ -1411,7 +1257,7 @@ impl State {
         match self.protection_login_page() {
             None => ProtectionStatus::Disabled,
             Some(login_page) => {
-                if self.metadata.contains_key(&login_page) {
+                if self.store.contains_asset(&login_page) {
                     ProtectionStatus::Enabled { login_page }
                 } else {
                     ProtectionStatus::EnabledLoginPageMissing { login_page }
@@ -1503,7 +1349,7 @@ impl State {
         // safe — we re-add below if `<*>` ends up rule-free).
         self.asset_hashes.remove_fallback_responses();
 
-        let rules = self.redirect_rules.get().0.clone();
+        let rules = self.store.redirect_rules().to_vec();
         let mut new_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>> =
             Vec::with_capacity(rules.len());
         for rule in &rules {
@@ -1543,7 +1389,7 @@ impl State {
 
     /// Replaces the redirect rules and rebuilds their certified entries.
     pub fn set_redirect_rules(&mut self, rules: Vec<RedirectRule>) {
-        self.redirect_rules.set(RedirectRules(rules));
+        self.store.set_redirect_rules(rules);
         self.on_redirect_rules_change();
     }
 
@@ -1552,7 +1398,7 @@ impl State {
         rule: &RedirectRule,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         if let RulePattern::Exact(src) = &rule.from {
-            if self.metadata.contains_key(src) {
+            if self.store.contains_asset(src) {
                 // Asset at the source path shadows the rule.
                 return None;
             }
@@ -1580,7 +1426,7 @@ impl State {
         status: u16,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
         let target_key = rule.to.clone();
-        let meta = self.metadata.get(&target_key)?;
+        let meta = self.store.get_asset(&target_key)?;
         // Mirror the target asset's effective headers (incl. the env cookie on
         // an HTML target) so the alias reuses the same certified response the
         // direct hit / serve path produces.
@@ -1696,9 +1542,9 @@ impl State {
     /// `on_redirect_rules_change`.
     pub fn refresh_env(&mut self, env: &crate::runtime::CanisterEnv) {
         self.store_env(env);
-        let keys: Vec<AssetKey> = self.metadata.keys().collect();
+        let keys = self.store.asset_keys();
         for key in keys {
-            if let Some(meta) = self.metadata.get(&key) {
+            if let Some(meta) = self.store.get_asset(&key) {
                 if crate::asset::is_html_content_type(&meta.content_type) {
                     self.recertify_asset(&key, &meta);
                 }
@@ -1724,7 +1570,7 @@ impl State {
         // loop above didn't re-assert its redeem responses — do it explicitly so
         // the redeem endpoint survives the upgrade even in the degraded state.
         if let Some(login_page) = self.protection_login_page() {
-            if !self.metadata.contains_key(&login_page) {
+            if !self.store.contains_asset(&login_page) {
                 self.reassert_login_responses(&login_page);
             }
         }
@@ -1735,12 +1581,9 @@ impl State {
     /// `TokenMeta`. Cheap — the token set is small.
     fn rebuild_token_index(&mut self) {
         self.token_index = self
-            .tokens
-            .iter()
-            .map(|e| {
-                let meta = e.into_pair().1;
-                (meta.token_id, meta.expires_at)
-            })
+            .store
+            .iter_tokens()
+            .map(|(_, meta)| (meta.token_id, meta.expires_at))
             .collect();
     }
 }

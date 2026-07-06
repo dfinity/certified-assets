@@ -9,6 +9,7 @@ mod redirect;
 mod runtime;
 mod stable_store;
 mod state;
+mod store;
 mod sync;
 mod url;
 
