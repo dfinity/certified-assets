@@ -651,6 +651,34 @@ impl State {
 
     // ---- HTTP serving ----
 
+    /// The first redirect rule (declaration order) that matches `path` and has a
+    /// certified entry, or `None`. This is the shared spine of both request
+    /// resolvers — the normal serve path ([`Self::build_http_response`]) and the
+    /// access-protection gate ([`Self::serve_unauthenticated`]) — which each do
+    /// their own thing with the match (serve it vs. serve a 307 at its location)
+    /// but agree on *which* rule wins. A rule without a certified entry (shadowed
+    /// by an asset, or an alias to a missing target) is skipped, exactly as
+    /// serving requires — the gateway rejects a witness for an uncertified path.
+    fn matching_rule(
+        &self,
+        path: &str,
+    ) -> Option<(&RedirectRule, &crate::redirect::CertifiedRuleEntry)> {
+        self.store
+            .redirect_rules()
+            .iter()
+            .enumerate()
+            .find_map(|(idx, rule)| {
+                if !crate::redirect::matches(rule, path) {
+                    return None;
+                }
+                let entry = self
+                    .rule_certified_entries
+                    .get(idx)
+                    .and_then(|e| e.as_ref())?;
+                Some((rule, entry))
+            })
+    }
+
     fn build_http_response(
         &self,
         certificate: &[u8],
@@ -659,7 +687,9 @@ impl State {
         etags: Vec<Hash>,
         range_start: Option<usize>,
     ) -> HttpResponse {
-        // Asset at the requested path wins.
+        // Asset at the requested path wins. A content-less asset (no encoding to
+        // serve) yields `None` here and falls through to the rule scan, so a
+        // wildcard rule can still cover it.
         if let Some(meta) = self.store.get_asset(&path.to_string()) {
             let (cert_header, _) = self.asset_hashes.witness_to_header(path, certificate);
             if let Some(response) = self.build_asset_response(
@@ -674,19 +704,8 @@ impl State {
             }
         }
 
-        // Scan redirect rules in declaration order; first match wins.
-        let redirect_rules = self.store.redirect_rules();
-        for (idx, rule) in redirect_rules.iter().enumerate() {
-            if !crate::redirect::matches(rule, path) {
-                continue;
-            }
-            let Some(entry) = self
-                .rule_certified_entries
-                .get(idx)
-                .and_then(|e| e.as_ref())
-            else {
-                continue;
-            };
+        // Scan redirect rules in declaration order; first certified match wins.
+        if let Some((rule, entry)) = self.matching_rule(path) {
             return self.build_redirect_rule_response(
                 rule,
                 entry,
@@ -1030,20 +1049,9 @@ impl State {
             return self.serve_protection_response(&resp, path, &location, certificate);
         }
         // 2. Matching redirect rule → a 307 at the rule's location instead of
-        //    following the rule (which could leak content).
-        let redirect_rules = self.store.redirect_rules();
-        for (idx, rule) in redirect_rules.iter().enumerate() {
-            if !crate::redirect::matches(rule, path) {
-                continue;
-            }
-            if self
-                .rule_certified_entries
-                .get(idx)
-                .and_then(|e| e.as_ref())
-                .is_none()
-            {
-                continue;
-            }
+        //    following the rule (which could leak content). Same rule the serve
+        //    path would pick; here we only need that one exists.
+        if let Some((rule, _entry)) = self.matching_rule(path) {
             let resp = ProtectionResponse::redirect_to_login(login_page);
             let location = crate::redirect::tree_location(rule);
             return self.serve_protection_response(&resp, path, &location, certificate);
