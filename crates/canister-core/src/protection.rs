@@ -75,12 +75,17 @@ pub fn token_id(value: &str) -> [u8; 32] {
 }
 
 /// The `Set-Cookie` value handed back on a successful redeem. Host-only (no
-/// `Domain`), `HttpOnly` (page scripts can't read it), `Secure`, `SameSite=Lax`,
-/// and a session cookie (no `Max-Age` → dies on tab close). Must be byte-identical
-/// between the certify path (`issue_token`) and the serve path (redeem), since it
-/// is part of the certified response hash.
+/// `Domain`), `HttpOnly` (page scripts can't read it), `Secure`, and a session
+/// cookie (no `Max-Age` → dies on tab close). `SameSite=None; Partitioned` (CHIPS)
+/// so the credential is delivered when the app is shown inside a **cross-site
+/// iframe** (e.g. a preview embedded in another site): a plain cross-site cookie is
+/// blocked by Safari and restricted by Chrome/Firefox, whereas a partitioned cookie
+/// is scoped to the embedding top-level site and delivered there. `Partitioned` also
+/// keeps the cookie from riding along to arbitrary *other* embedders. Must be
+/// byte-identical between the certify path (`issue_token`) and the serve path
+/// (redeem), since it is part of the certified response hash.
 pub fn access_cookie(value: &str) -> String {
-    format!("{ACCESS_COOKIE}={value}; HttpOnly; Secure; SameSite=Lax; Path=/")
+    format!("{ACCESS_COOKIE}={value}; HttpOnly; Secure; SameSite=None; Partitioned; Path=/")
 }
 
 /// Every `certified_assets_access=` value present in the request's `Cookie` header(s). The
@@ -277,6 +282,17 @@ mod tests {
             Some("a b c".to_string())
         );
         assert_eq!(parse_form_token(b"password=x"), None);
+    }
+
+    #[test]
+    fn access_cookie_is_embeddable_by_default() {
+        // The default must work inside a cross-site iframe out of the box (the
+        // Caffeine preview use case): `SameSite=None; Secure; Partitioned` (CHIPS).
+        // Host-only (no `Domain`) and a session cookie (no `Max-Age`).
+        assert_eq!(
+            access_cookie("tok"),
+            "certified_assets_access=tok; HttpOnly; Secure; SameSite=None; Partitioned; Path=/"
+        );
     }
 
     #[test]

@@ -40,9 +40,13 @@ fn sync_publishes_certified_ic_env_cookie_on_html() {
         .iter()
         .find(|c| c.starts_with("ic_env="))
         .unwrap_or_else(|| panic!("expected an ic_env cookie on /index.html, got: {cookies:?}"));
+    // Embeddable by default: `SameSite=None; Secure; Partitioned` (CHIPS) so page
+    // scripts can read it inside a cross-site iframe (Caffeine-style preview).
     assert!(
-        ic_env.contains("SameSite=Lax"),
-        "ic_env cookie should carry SameSite=Lax, got: {ic_env}"
+        ic_env.contains("SameSite=None")
+            && ic_env.contains("Secure")
+            && ic_env.contains("Partitioned"),
+        "ic_env cookie should carry SameSite=None; Secure; Partitioned, got: {ic_env}"
     );
 
     // A non-HTML asset carries no env cookie.

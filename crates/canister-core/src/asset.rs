@@ -26,21 +26,29 @@ pub const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 /// (`@icp-sdk/core/agent/canister-env`) parses:
 ///
 /// ```text
-/// ic_env=<url_encode(payload)>; SameSite=Lax
+/// ic_env=<url_encode(payload)>; Secure; SameSite=None; Partitioned
 /// payload = "ic_root_key=<hex(DER root key)>" + ("&" + "<name>=<value>")*
 /// ```
 ///
 /// The root key always comes first; `public_vars` follow in sorted (BTreeMap)
 /// order. `url_encode` percent-encodes the `&`/`=` separators so the whole
 /// payload rides inside one cookie value; `decodeURIComponent` restores them
-/// client-side. Pure (no system-API access) so it can be unit-tested directly.
+/// client-side. `SameSite=None; Secure; Partitioned` (CHIPS) so page scripts can
+/// still read it when the app is shown inside a **cross-site iframe** — a plain
+/// cross-site cookie would be dropped by the browser before the client lib runs.
+/// (`ic_env` is read-only client state, never sent back to the canister, so
+/// `SameSite=None` only affects whether the browser stores it, not any request.)
+/// Pure (no system-API access) so it can be unit-tested directly.
 pub fn render_env_cookie(root_key: &[u8], public_vars: &BTreeMap<String, String>) -> String {
     let mut entries = vec![format!("ic_root_key={}", hex::encode(root_key))];
     for (name, value) in public_vars {
         entries.push(format!("{name}={value}"));
     }
     let payload = entries.join("&");
-    format!("ic_env={}; SameSite=Lax", url_encode(&payload))
+    format!(
+        "ic_env={}; Secure; SameSite=None; Partitioned",
+        url_encode(&payload)
+    )
 }
 
 /// Whether an asset's content-type denotes HTML — i.e. whether it should carry
