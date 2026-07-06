@@ -1,6 +1,5 @@
 //! This module declares canister methods expected by the assets canister client.
 mod asset;
-mod blob_store;
 mod cert;
 mod http;
 mod protection;

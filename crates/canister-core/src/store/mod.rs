@@ -3,23 +3,27 @@
 //! [`Store`] owns every piece of state persisted in stable memory via
 //! `ic-stable-structures`: the authorized set, the redirect-rule list, the two
 //! monotonic id counters, per-asset metadata, content chunk bytes (through
-//! [`BlobStore`]), per-chunk cert data, the cached state hash, and the
+//! [`ChunkStore`]), per-chunk cert data, the cached state hash, and the
 //! access-protection settings + token store. It is the single owner of the
 //! `MemoryId` layout (the constants below) and the only place that touches
-//! `StableCell`/`StableBTreeMap`/`BlobStore` directly.
+//! `StableCell`/`StableBTreeMap`/`ChunkStore` directly.
 //!
 //! The durable *types* are defined in their domain modules ([`AssetMeta`] in
 //! [`crate::asset`], [`TokenMeta`] in [`crate::protection`], [`ContentChunkKey`]
-//! in [`crate::blob_store`], …); their **stable-memory encodings** (the
-//! `Storable` impls) live at the bottom of *this* module, so the store owns both
-//! the memory layout and the byte format. Two encoding-only newtypes with no
-//! domain of their own ([`AuthorizedSet`], [`StateHash`]) are defined here too.
+//! in the private [`chunks`] submodule, …); their **stable-memory encodings**
+//! (the `Storable` impls) live at the bottom of *this* module, so the store owns
+//! both the memory layout and the byte format. A few types with no domain module
+//! of their own are defined here too: the encoding-only newtypes [`AuthorizedSet`]
+//! and [`StateHash`], and [`ChunkCert`] (the per-chunk cert record that is the
+//! value type of the `chunk_certs` map).
 //!
 //! Everything *above* the store — asset CRUD, certification, HTTP serving, the
 //! access-protection state machine, the sync harness — lives on
 //! [`crate::state::State`], which holds one `Store` plus the derived/transient
 //! heap state and calls these typed methods rather than reaching into stable
 //! structures.
+
+mod chunks;
 
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
@@ -30,8 +34,8 @@ use serde_bytes::ByteBuf;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
+use chunks::{ChunkStore, ContentChunkKey};
 use crate::asset::AssetMeta;
-use crate::blob_store::{BlobStore, ChunkCert, ContentChunkKey};
 use crate::cert::AssetKey;
 use crate::protection::{ProtectionSettings, TokenMeta};
 use crate::redirect::RedirectRules;
@@ -44,10 +48,10 @@ const REDIRECT_RULES_MEMORY: MemoryId = MemoryId::new(1);
 const NEXT_SESSION_ID_MEMORY: MemoryId = MemoryId::new(2);
 const NEXT_CONTENT_ID_MEMORY: MemoryId = MemoryId::new(3);
 const METADATA_MEMORY: MemoryId = MemoryId::new(4);
-/// Content chunk index (`ContentChunkKey -> BlobRef`); the bytes live in
-/// `CONTENT_DATA_MEMORY`. See [`crate::blob_store`].
+/// Content chunk index (`ContentChunkKey -> ChunkRef`); the bytes live in
+/// `CONTENT_DATA_MEMORY`. See [`chunks`].
 const CONTENT_INDEX_MEMORY: MemoryId = MemoryId::new(5);
-/// Raw contiguous chunk bytes managed by the [`BlobStore`] allocator.
+/// Raw contiguous chunk bytes managed by the [`ChunkStore`] allocator.
 const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(6);
 /// Per-chunk certification data (`ContentChunkKey -> ChunkCert`); read by the
 /// 206 certify/serve paths so neither has to re-hash or fully read content.
@@ -79,6 +83,19 @@ pub struct AuthorizedSet(pub BTreeSet<Principal>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct StateHash(pub [u8; 32]);
 
+/// Per-chunk certification data — the value type of the `chunk_certs` map below,
+/// keyed by the same [`ContentChunkKey`] as the content chunk (that key lives with
+/// the chunk index in [`chunks`]). Holds exactly what the 206 certify path and
+/// serve path need *without* reading chunk bytes: the chunk's length (for
+/// `Content-Range`/offset math) and its SHA-256 (the 206 body hash). Kept out of
+/// [`AssetMeta`] so the per-request metadata decode stays small. Its `Storable`
+/// byte encoding lives with the other encodings at the bottom of this module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChunkCert {
+    pub(crate) len: u32,
+    pub(crate) sha256: [u8; 32],
+}
+
 /// The canister's durable state, one field per stable-memory region.
 ///
 /// Every method here is a typed operation over one (or, for content, a paired
@@ -102,10 +119,10 @@ pub struct Store {
     metadata: StableBTreeMap<AssetKey, AssetMeta, Mem>,
     /// Raw content bytes, one chunk per `(content_id, index)`, stored
     /// contiguously in a stable region (not inline in a BTree) so reads/writes
-    /// are a single `stable64_read`/`write`. See [`crate::blob_store`].
-    content: BlobStore<Mem>,
+    /// are a single `stable64_read`/`write`. See [`chunks`].
+    content: ChunkStore<Mem>,
     /// Per-chunk certification data (length + SHA-256), keyed by the same
-    /// `(content_id, chunk_index)` as the content blob. Lets the 206 certify
+    /// `(content_id, chunk_index)` as the content chunk. Lets the 206 certify
     /// path stay content-free and the serve path avoid reading every chunk to
     /// locate a range. Freed alongside its content group.
     chunk_certs: StableBTreeMap<ContentChunkKey, ChunkCert, Mem>,
@@ -142,7 +159,7 @@ impl Store {
             next_session_id: StableCell::init(mm.get(NEXT_SESSION_ID_MEMORY), 0),
             next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
             metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
-            content: BlobStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
+            content: ChunkStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
             chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
             state_hash: StableCell::init(mm.get(STATE_HASH_MEMORY), StateHash::default()),
             protection: StableCell::init(mm.get(PROTECTION_MEMORY), ProtectionSettings::default()),
