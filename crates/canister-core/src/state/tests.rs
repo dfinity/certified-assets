@@ -46,7 +46,9 @@ fn upgrade(state: State, memory: DefaultMemoryImpl) -> State {
 }
 
 fn mock_system_context() -> SystemContext {
-    SystemContext::new_with_options(TEST_NOW)
+    SystemContext {
+        current_timestamp_ns: TEST_NOW,
+    }
 }
 
 /// Synchronous test driver for incremental computations.

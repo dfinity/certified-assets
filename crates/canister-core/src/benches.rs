@@ -64,7 +64,9 @@ const REBUILD_ASSET_BYTES: usize = 4 * 1024;
 const FIXED_TS_NS: u64 = 1_700_000_000_000_000_000;
 
 fn ctx() -> SystemContext {
-    SystemContext::new_with_options(FIXED_TS_NS)
+    SystemContext {
+        current_timestamp_ns: FIXED_TS_NS,
+    }
 }
 
 fn caller() -> Principal {
