@@ -32,7 +32,7 @@ use std::collections::BTreeSet;
 
 use crate::asset::AssetMeta;
 use crate::blob_store::{BlobStore, ChunkCert, ContentChunkKey};
-use crate::certification::AssetKey;
+use crate::cert::AssetKey;
 use crate::protection::{ProtectionSettings, TokenMeta};
 use crate::redirect::RedirectRules;
 use wire_types::{RedirectRule, SessionId};

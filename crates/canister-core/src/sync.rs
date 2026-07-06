@@ -11,7 +11,7 @@
 //! helpers they rely on. State methods unrelated to syncing stay in the
 //! state machine module.
 
-use crate::certification::AssetKey;
+use crate::cert::AssetKey;
 use crate::redirect;
 use crate::runtime::SystemContext;
 use crate::state::State;

@@ -7,8 +7,13 @@
 //! - The helpers that compute response hashes and build certificate expressions.
 //! - [`CertifiedResponses`], the in-memory tree of certified responses, and its
 //!   operations.
+//!
+//! Sibling of [`super::certifier`] within the `cert` module; the addressing and
+//! hashing helpers are re-exported to the crate through `cert`, while the tree
+//! wrapper and its internals ([`RequestHash`], `WitnessResult`) stay inside
+//! `cert`.
 
-use crate::nested_tree::NestedTree;
+use super::nested_tree::NestedTree;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::CandidType;
 use ic_certification::merge_hash_trees;

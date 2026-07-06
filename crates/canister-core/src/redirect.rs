@@ -1,6 +1,6 @@
 //! User-supplied redirect/rewrite/error rules expressed as `_redirects` entries.
 
-use crate::certification::{
+use crate::cert::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
     response_hash, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
 };

@@ -2,7 +2,7 @@
 //!
 //! This is the `impl State` half that turns a request into a certified
 //! response. It reads content from [`crate::store::Store`] and witnesses from
-//! [`crate::certifier::Certifier`] but never mutates either — serving is
+//! [`crate::cert::Certifier`] but never mutates either — serving is
 //! read-only over the state the sync/certify paths (in `state.rs`,
 //! `certifier.rs`) build up. The access-protection *gate* that runs ahead of
 //! resolution lives here in `http_request`; the responses it serves are built in
@@ -359,7 +359,7 @@ impl State {
             crate::redirect::CertifiedRuleEntryKind::Synthetic { expression } => {
                 // Synthetic entries only cover 3xx redirects — empty body.
                 let cert_expr_header =
-                    crate::certification::build_ic_certificate_expression_header(expression);
+                    crate::cert::build_ic_certificate_expression_header(expression);
                 let mut headers = crate::redirect::certified_headers(rule);
                 headers.push((cert_expr_header.0, cert_expr_header.1));
                 headers.push(cert_header);

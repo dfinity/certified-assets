@@ -6,10 +6,10 @@
 //! runs in [`State::http_request`], in [`crate::serving`]), and it owns the
 //! enable/disable/issue/revoke lifecycle. Byte-level response *shapes* and the
 //! cookie/form parsing live in [`crate::protection`]; the *tree* mutations
-//! (certifying/removing those leaves) go through [`crate::certifier::Certifier`].
+//! (certifying/removing those leaves) go through [`crate::cert::Certifier`].
 //! The hot-path gate index (`token_index`) lives on `State` and is read here.
 
-use crate::certification::{build_ic_certificate_expression_header, AssetPath, HashTreePath};
+use crate::cert::{build_ic_certificate_expression_header, AssetPath, HashTreePath};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::{ProtectionResponse, ProtectionStatus, TokenInfo, TokenMeta};
 use crate::state::State;

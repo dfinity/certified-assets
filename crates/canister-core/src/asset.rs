@@ -11,7 +11,7 @@
 //! impls) lives with the [`crate::store::Store`]; response building lives on
 //! [`crate::state::State`], which owns the chunk store.
 
-use crate::certification::{
+use crate::cert::{
     build_ic_certificate_expression_from_headers_and_encoding,
     build_ic_certificate_expression_header, response_hash, CertificateExpression, ResponseHash,
 };

@@ -14,7 +14,7 @@
 //! Nothing here reads canister state or the system API, so it is all directly
 //! unit-testable. (`State` implements the behavior these types describe.)
 
-use crate::certification::{
+use crate::cert::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
     response_hash, CertificateExpression, NestedTreeKey,
 };

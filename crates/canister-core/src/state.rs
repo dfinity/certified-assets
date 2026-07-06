@@ -7,7 +7,7 @@
 //! - [`crate::store::Store`] — all durable state in stable memory (settings,
 //!   per-asset metadata, content chunks, tokens). The sole owner of the
 //!   `ic-stable-structures` handles and the memory layout.
-//! - [`crate::certifier::Certifier`] — the derived certified-response tree, the
+//! - [`crate::cert::Certifier`] — the derived certified-response tree, the
 //!   per-rule certified entries, the env cookie, and the policy that maintains
 //!   them so the certified leaf always matches the served response.
 //! - transient upload state (staged chunks, the active sync session) and the
@@ -27,8 +27,8 @@
 //! upgrade roundtrip over a shared memory handle).
 
 use crate::asset::{AssetMeta, EncodingMeta};
-use crate::certification::AssetKey;
-use crate::certifier::Certifier;
+use crate::cert::AssetKey;
+use crate::cert::Certifier;
 use crate::store::Store;
 use crate::sync::{Chunk, SyncSession};
 use candid::Principal;

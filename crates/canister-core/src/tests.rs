@@ -1922,7 +1922,7 @@ fn headers_candid_hashmap_btreemap_roundtrip() {
 #[cfg(test)]
 mod certificate_expression {
     use super::*;
-    use crate::certification::build_ic_certificate_expression_from_headers_and_encoding;
+    use crate::cert::build_ic_certificate_expression_from_headers_and_encoding;
     use ic_representation_independent_hash::Value;
 
     #[test]

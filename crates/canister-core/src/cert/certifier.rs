@@ -31,13 +31,13 @@
 use ic_certification::{AsHashTree, Hash};
 use ic_representation_independent_hash::Value;
 
+use super::primitives::{
+    response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, HashTreePath,
+    NestedTreeKey, RequestHash, ResponseHash,
+};
 use crate::asset::{
     certificate_expression_for, headers_for, range_certificate_expression_for, range_response_hash,
     response_hashes_for, AssetMeta, EncodingMeta,
-};
-use crate::certification::{
-    response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, HashTreePath,
-    NestedTreeKey, RequestHash, ResponseHash,
 };
 use crate::http::{HeaderField, HttpResponse};
 use crate::protection::ProtectionResponse;

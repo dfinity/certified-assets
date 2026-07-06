@@ -2,10 +2,8 @@
 mod access;
 mod asset;
 mod blob_store;
-mod certification;
-mod certifier;
+mod cert;
 mod http;
-mod nested_tree;
 mod protection;
 mod redirect;
 mod runtime;
