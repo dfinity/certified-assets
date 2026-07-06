@@ -15,12 +15,20 @@ use crate::cert::{
     build_ic_certificate_expression_from_headers_and_encoding,
     build_ic_certificate_expression_header, response_hash, CertificateExpression, ResponseHash,
 };
-use crate::url::url_encode;
 use ic_representation_independent_hash::Value;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, HashMap};
 use wire_types::Encoding;
+
+/// Percent-encodes every non-alphanumeric byte (the `NON_ALPHANUMERIC` set),
+/// matching what `decodeURIComponent` reverses on the client. Used to render the
+/// `ic_env` cookie payload: it encodes the `&`/`=` separators so they survive
+/// transport inside a single cookie value and are restored client-side.
+fn url_encode(url: &str) -> String {
+    utf8_percent_encode(url, NON_ALPHANUMERIC).to_string()
+}
 
 /// Per-asset metadata. Content bytes live in the chunk store, grouped by each
 /// encoding's `content_id`. Persisted as CBOR (see the `Storable` impl in
@@ -289,4 +297,14 @@ fn build_headers(
         headers.push((k, v));
     }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_encode;
+
+    #[test]
+    fn url_encode_escapes_cookie_separators() {
+        assert_eq!(url_encode("a=b&c=d"), "a%3Db%26c%3Dd");
+    }
 }

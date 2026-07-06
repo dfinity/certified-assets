@@ -3,7 +3,6 @@ use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
-use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::Principal;
@@ -1538,36 +1537,6 @@ fn supports_cache_control_via_headers() {
         lookup_header(&response, "Cache-Control"),
         Some("max-age=604800"),
         "No matching Cache-Control header in response: {response:#?}",
-    );
-}
-
-#[test]
-fn check_url_decode() {
-    assert_eq!(url_decode("/%"), Ok("/%".to_string()));
-    assert_eq!(url_decode("/%%"), Ok("/%%".to_string()));
-    assert_eq!(url_decode("/%e%"), Ok("/%e%".to_string()));
-
-    assert_eq!(url_decode("/%20%a"), Ok("/ %a".to_string()));
-    assert_eq!(url_decode("/%%+a%20+%@"), Ok("/%%+a +%@".to_string()));
-    assert_eq!(
-        url_decode("/has%percent.txt"),
-        Ok("/has%percent.txt".to_string())
-    );
-
-    assert_eq!(url_decode("/%%2"), Ok("/%%2".to_string()));
-    assert_eq!(url_decode("/%C3%A6"), Ok("/æ".to_string()));
-    assert_eq!(url_decode("/%c3%a6"), Ok("/æ".to_string()));
-
-    assert_eq!(url_decode("/a+b+c%20d"), Ok("/a+b+c d".to_string()));
-
-    assert_eq!(
-        url_decode("/capture-d%E2%80%99e%CC%81cran-2023-10-26-a%CC%80.txt"),
-        Ok("/capture-d’écran-2023-10-26-à.txt".to_string())
-    );
-
-    assert_eq!(
-        url_decode("/%FF%FF"),
-        Err(UrlDecodeError::InvalidPercentEncoding)
     );
 }
 
@@ -3278,6 +3247,15 @@ mod env_cookie {
             .collect()
     }
 
+    /// Client-side `decodeURIComponent`, reproduced for assertions: percent-decodes
+    /// the visible cookie value exactly as the browser does before the lib parses it.
+    fn client_decode(value: &str) -> String {
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8()
+            .unwrap()
+            .to_string()
+    }
+
     /// Reproduces the `@icp-sdk/core/agent/canister-env` parse exactly: the
     /// browser exposes only the part of `Set-Cookie` before the first `;` via
     /// `document.cookie`; the lib then strips `ic_env=`, `decodeURIComponent`s,
@@ -3285,7 +3263,7 @@ mod env_cookie {
     fn parse_like_client(set_cookie: &str) -> (Vec<u8>, BTreeMap<String, String>) {
         let visible = set_cookie.split(';').next().unwrap().trim();
         let encoded = visible.strip_prefix("ic_env=").expect("ic_env= prefix");
-        let decoded = url_decode(encoded).unwrap();
+        let decoded = client_decode(encoded);
         let mut root_key = None;
         let mut vars = BTreeMap::new();
         for entry in decoded.split('&') {
@@ -3336,15 +3314,9 @@ mod env_cookie {
         assert!(!value.contains('&') && !value.contains('='));
         // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
         assert_eq!(
-            url_decode(value).unwrap(),
+            client_decode(value),
             "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2"
         );
-    }
-
-    #[test]
-    fn url_encode_escapes_cookie_separators() {
-        use crate::url::url_encode;
-        assert_eq!(url_encode("a=b&c=d"), "a%3Db%26c%3Dd");
     }
 
     #[test]
@@ -3498,7 +3470,7 @@ mod env_cookie {
 
         // Entries are emitted in sorted order: root key first, then sorted vars.
         let visible = cookie.split(';').next().unwrap().trim();
-        let decoded = url_decode(visible.strip_prefix("ic_env=").unwrap()).unwrap();
+        let decoded = client_decode(visible.strip_prefix("ic_env=").unwrap());
         let keys: Vec<&str> = decoded
             .split('&')
             .map(|e| &e[..e.find('=').unwrap()])

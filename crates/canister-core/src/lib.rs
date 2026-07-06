@@ -11,7 +11,6 @@ mod serving;
 mod state;
 mod store;
 mod sync;
-mod url;
 
 #[cfg(test)]
 mod tests;

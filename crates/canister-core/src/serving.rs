@@ -11,10 +11,42 @@
 use crate::asset::{headers_for, range_headers_for, AssetMeta, EncodingMeta};
 use crate::http::{HeaderField, HttpRequest, HttpResponse};
 use crate::state::State;
-use crate::url::url_decode;
 use ic_certification::Hash;
+use percent_encoding::percent_decode_str;
 use serde_bytes::ByteBuf;
+use std::fmt;
 use wire_types::{Encoding, RedirectRule};
+
+#[derive(Debug, PartialEq, Eq)]
+enum UrlDecodeError {
+    InvalidPercentEncoding,
+}
+
+impl fmt::Display for UrlDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPercentEncoding => write!(f, "invalid percent encoding"),
+        }
+    }
+}
+
+/// Decodes a percent encoded string according to https://url.spec.whatwg.org/#percent-decode
+///
+/// This is a wrapper around the percent-encoding crate.
+///
+/// The rules that it follow by are:
+/// - Start with an empty sequence of bytes of the output
+/// - Convert the input to a sequence of bytes
+/// - if the byte is `%` and the next two bytes are hex, convet the hex value to a byte
+///   and add it to the output, otherwise add the byte to the output
+/// - convert the output byte sequence to a UTF-8 string and return it. If the conversion
+///   fails return an error.
+fn url_decode(url: &str) -> Result<String, UrlDecodeError> {
+    match percent_decode_str(url).decode_utf8() {
+        Ok(result) => Ok(result.to_string()),
+        Err(_) => Err(UrlDecodeError::InvalidPercentEncoding),
+    }
+}
 
 /// Parse an `If-None-Match` request header into the content hashes the client
 /// already holds. Our `ETag` is `"<hex sha256>"` (see [`crate::asset::etag_value`]),
@@ -387,5 +419,42 @@ impl State {
                 .unwrap_or_else(|| HttpResponse::build_404(cert_header))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{url_decode, UrlDecodeError};
+
+    #[test]
+    fn check_url_decode() {
+        assert_eq!(url_decode("/%"), Ok("/%".to_string()));
+        assert_eq!(url_decode("/%%"), Ok("/%%".to_string()));
+        assert_eq!(url_decode("/%e%"), Ok("/%e%".to_string()));
+
+        assert_eq!(url_decode("/%20%a"), Ok("/ %a".to_string()));
+        assert_eq!(url_decode("/%%+a%20+%@"), Ok("/%%+a +%@".to_string()));
+        assert_eq!(
+            url_decode("/has%percent.txt"),
+            Ok("/has%percent.txt".to_string())
+        );
+
+        assert_eq!(url_decode("/%%2"), Ok("/%%2".to_string()));
+        assert_eq!(url_decode("/%C3%A6"), Ok("/æ".to_string()));
+        assert_eq!(url_decode("/%c3%a6"), Ok("/æ".to_string()));
+
+        assert_eq!(url_decode("/a+b+c%20d"), Ok("/a+b+c d".to_string()));
+
+        assert_eq!(
+            url_decode("/capture-d%E2%80%99e%CC%81cran-2023-10-26-a%CC%80.txt"),
+            // `%CC%81`/`%CC%80` are combining acute/grave, so the decoded form is
+            // NFD (base letter + combining mark), written here as explicit escapes.
+            Ok("/capture-d\u{2019}e\u{301}cran-2023-10-26-a\u{300}.txt".to_string())
+        );
+
+        assert_eq!(
+            url_decode("/%FF%FF"),
+            Err(UrlDecodeError::InvalidPercentEncoding)
+        );
     }
 }
