@@ -1,12 +1,15 @@
-//! Pure helpers that derive an asset encoding's certified-response data.
+//! The asset domain: the persisted per-asset metadata types ([`AssetMeta`],
+//! [`EncodingMeta`]) plus the pure helpers that derive an asset encoding's
+//! certified-response data.
 //!
-//! Asset metadata and content now live in stable memory (see
-//! [`crate::stable_store`]); the certificate expression and response hashes are
-//! **not** stored — they are recomputed on demand from the persisted metadata.
-//! These functions take plain data (custom headers, content type, encoding
-//! name, sha256) so the same logic runs both when an encoding is written and
-//! when the certified-response tree is rebuilt after an upgrade. Response
-//! building itself lives on [`crate::state::State`], which owns the chunk store.
+//! Metadata and content live in stable memory; the certificate expression and
+//! response hashes are **not** stored — they are recomputed on demand from the
+//! metadata here. The derivation helpers take plain data (custom headers,
+//! content type, encoding name, sha256) so the same logic runs both when an
+//! encoding is written and when the certified-response tree is rebuilt after an
+//! upgrade. How these types are encoded into stable memory (their `Storable`
+//! impls) lives with the [`crate::store::Store`]; response building lives on
+//! [`crate::state::State`], which owns the chunk store.
 
 use crate::certification::{
     build_ic_certificate_expression_from_headers_and_encoding,
@@ -14,9 +17,36 @@ use crate::certification::{
 };
 use crate::url::url_encode;
 use ic_representation_independent_hash::Value;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, HashMap};
 use wire_types::Encoding;
+
+/// Per-asset metadata. Content bytes live in the chunk store, grouped by each
+/// encoding's `content_id`. Persisted as CBOR (see the `Storable` impl in
+/// [`crate::store`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssetMeta {
+    pub content_type: String,
+    pub headers: Vec<(String, String)>,
+    pub encodings: BTreeMap<Encoding, EncodingMeta>,
+}
+
+/// Per-encoding metadata. The certificate expression and response hashes are
+/// **not** stored — they are recomputed on demand from these fields plus the
+/// asset's `headers`/`content_type`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EncodingMeta {
+    /// Groups this encoding's chunks in the content store.
+    pub content_id: u64,
+    /// Number of chunks, so streaming tokens can be built without a range scan.
+    pub num_chunks: u32,
+    pub sha256: [u8; 32],
+    /// Total encoded length, i.e. the sum of all chunk lengths. Used as the
+    /// `/total` in a 206 `Content-Range` and to reject out-of-range requests,
+    /// without re-reading the chunks.
+    pub content_len: u64,
+}
 
 /// Status codes we certify for every asset encoding.
 pub const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];

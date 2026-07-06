@@ -16,12 +16,13 @@
 
 use crate::certification::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
-    response_hash, CertificateExpression,
+    response_hash, CertificateExpression, NestedTreeKey,
 };
 use crate::http::HttpRequest;
 use candid::CandidType;
 use ic_representation_independent_hash::Value;
 use percent_encoding::percent_decode_str;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Reported by `check_protection_status` so the platform UI can tell a healthy
@@ -220,6 +221,40 @@ impl ProtectionResponse {
         let body_hash: [u8; 32] = Sha256::digest(&self.body).into();
         response_hash(&certified, self.status, &body_hash).0
     }
+}
+
+/// Access-protection configuration. When `login_page` is `Some`, the gate is
+/// **on**: unauthenticated requests get a certified redirect/401 instead of asset
+/// content, and the named asset is the gate-exempt login surface. `None` (the
+/// default) means a fully public app — the gate, the no-store override, and the
+/// unauthenticated certified siblings are all absent, so a public canister is
+/// bit-for-bit unchanged. Persisted in its own `StableCell` (see the `Storable`
+/// impl in [`crate::store`]) so toggling protection is a single small write.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProtectionSettings {
+    pub login_page: Option<String>,
+}
+
+/// Per-token metadata, keyed by the token's **label** — the unique identifier a
+/// controller uses to issue/revoke/list. (The hot-path gate doesn't read this; it
+/// uses the in-heap `token_index`, rebuilt from these records on upgrade.) Holds
+/// the value hash (so revoke/GC can drop the matching `token_index` entry, and the
+/// index can be rebuilt), the expiry, and the certified-tree path of this token's
+/// `POST <login_page>` redeem response (`302 → "/"` + `Set-Cookie`). The redeem
+/// leaf's hash is derived from the plaintext cookie value, so storing the *path*
+/// lets the canister re-insert it on upgrade and remove it on revoke/GC **without**
+/// ever holding the plaintext. `token_id = SHA-256(value)`, so the plaintext is
+/// never stored either. Persisted as CBOR (see [`crate::store`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TokenMeta {
+    /// `SHA-256(value)` — links this token to its `token_index` entry and lets the
+    /// index be reconstructed on upgrade.
+    pub token_id: [u8; 32],
+    /// Absolute expiry in nanoseconds; the gate rejects once `now >= expires_at`.
+    pub expires_at: u64,
+    /// Full `HashTreePath` (as a `Vec<NestedTreeKey>`) of the certified redeem
+    /// response for this token, at the `login_page` subtree.
+    pub redeem_path: Vec<NestedTreeKey>,
 }
 
 #[cfg(test)]

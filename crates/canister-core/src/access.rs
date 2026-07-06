@@ -11,8 +11,7 @@
 
 use crate::certification::{build_ic_certificate_expression_header, AssetPath, HashTreePath};
 use crate::http::{HttpRequest, HttpResponse};
-use crate::protection::{ProtectionResponse, ProtectionStatus, TokenInfo};
-use crate::stable_store::TokenMeta;
+use crate::protection::{ProtectionResponse, ProtectionStatus, TokenInfo, TokenMeta};
 use crate::state::State;
 use serde_bytes::ByteBuf;
 

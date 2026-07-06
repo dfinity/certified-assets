@@ -26,9 +26,9 @@
 //! in-process `VectorMemory` off-wasm (which is what lets the tests drive a full
 //! upgrade roundtrip over a shared memory handle).
 
+use crate::asset::{AssetMeta, EncodingMeta};
 use crate::certification::AssetKey;
 use crate::certifier::Certifier;
-use crate::stable_store::{AssetMeta, EncodingMeta};
 use crate::store::Store;
 use crate::sync::{Chunk, SyncSession};
 use candid::Principal;

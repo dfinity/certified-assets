@@ -10,7 +10,6 @@ mod protection;
 mod redirect;
 mod runtime;
 mod serving;
-mod stable_store;
 mod state;
 mod store;
 mod sync;

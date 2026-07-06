@@ -8,9 +8,8 @@
 //! resolution lives here in `http_request`; the responses it serves are built in
 //! [`crate::access`].
 
-use crate::asset::{headers_for, range_headers_for};
+use crate::asset::{headers_for, range_headers_for, AssetMeta, EncodingMeta};
 use crate::http::{HeaderField, HttpRequest, HttpResponse};
-use crate::stable_store::{AssetMeta, EncodingMeta};
 use crate::state::State;
 use crate::url::url_decode;
 use ic_certification::Hash;

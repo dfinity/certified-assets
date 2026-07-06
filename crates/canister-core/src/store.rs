@@ -8,24 +8,33 @@
 //! `MemoryId` layout (the constants below) and the only place that touches
 //! `StableCell`/`StableBTreeMap`/`BlobStore` directly.
 //!
+//! The durable *types* are defined in their domain modules ([`AssetMeta`] in
+//! [`crate::asset`], [`TokenMeta`] in [`crate::protection`], [`ContentChunkKey`]
+//! in [`crate::blob_store`], …); their **stable-memory encodings** (the
+//! `Storable` impls) live at the bottom of *this* module, so the store owns both
+//! the memory layout and the byte format. Two encoding-only newtypes with no
+//! domain of their own ([`AuthorizedSet`], [`StateHash`]) are defined here too.
+//!
 //! Everything *above* the store — asset CRUD, certification, HTTP serving, the
 //! access-protection state machine, the sync harness — lives on
 //! [`crate::state::State`], which holds one `Store` plus the derived/transient
 //! heap state and calls these typed methods rather than reaching into stable
-//! structures. Why each piece gets its own memory region is documented on the
-//! types in [`crate::stable_store`].
+//! structures.
 
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
-use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
+use ic_stable_structures::storable::Bound;
+use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell, Storable};
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 
-use crate::blob_store::BlobStore;
+use crate::asset::AssetMeta;
+use crate::blob_store::{BlobStore, ChunkCert, ContentChunkKey};
 use crate::certification::AssetKey;
-use crate::stable_store::{
-    AssetMeta, AuthorizedSet, ChunkCert, ContentChunkKey, ProtectionSettings, RedirectRules,
-    StateHash, TokenMeta,
-};
+use crate::protection::{ProtectionSettings, TokenMeta};
+use crate::redirect::RedirectRules;
 use wire_types::{RedirectRule, SessionId};
 
 type Mem = VirtualMemory<DefaultMemoryImpl>;
@@ -53,6 +62,22 @@ const PROTECTION_MEMORY: MemoryId = MemoryId::new(9);
 /// The management view: issue/revoke/list. Empty unless protection is on. The
 /// hot-path gate index is *derived* from this (in heap; see `State::token_index`).
 const TOKENS_MEMORY: MemoryId = MemoryId::new(10);
+
+// Two newtypes with no domain module of their own: they exist only to give a
+// storage-internal value a `Storable` impl (the orphan rule forbids implementing
+// it on the bare `BTreeSet`/`[u8; 32]`), so they live here in the storage layer.
+
+/// Principals authorized to sync (controllers are always allowed and are not
+/// stored). Persisted as CBOR.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AuthorizedSet(pub BTreeSet<Principal>);
+
+/// The cached canonical **state hash** (see the `state-hash` crate). Recomputed
+/// at the end of every final `execute_operations` and stored so the public
+/// `state_hash` endpoint returns it with no recomputation. `[0; 32]` before the
+/// first sync. Its own fixed 32-byte cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct StateHash(pub [u8; 32]);
 
 /// The canister's durable state, one field per stable-memory region.
 ///
@@ -347,5 +372,152 @@ impl Store {
         for label in labels {
             self.tokens.remove(&label);
         }
+    }
+}
+
+// ---- stable-memory encodings ----
+//
+// The `Storable` impl is a persistence concern: it defines the exact bytes each
+// durable type is written as. It lives here in the storage layer (not with the
+// domain type defs) so the store fully owns *how* state is encoded — the memory
+// layout (the `MemoryId` constants above) and the byte encoding in one place. A
+// format change is therefore visible entirely within this module.
+
+/// `Storable` via CBOR (`ciborium`), unbounded. Used for the small/medium structs
+/// whose size we don't need to bound for stable-structure node sizing.
+macro_rules! impl_cbor_storable {
+    ($t:ty) => {
+        impl Storable for $t {
+            fn to_bytes(&self) -> Cow<'_, [u8]> {
+                let mut buf = Vec::new();
+                ciborium::into_writer(self, &mut buf).expect("cbor serialize");
+                Cow::Owned(buf)
+            }
+
+            fn into_bytes(self) -> Vec<u8> {
+                let mut buf = Vec::new();
+                ciborium::into_writer(&self, &mut buf).expect("cbor serialize");
+                buf
+            }
+
+            fn from_bytes(bytes: Cow<[u8]>) -> Self {
+                ciborium::from_reader(&bytes[..]).expect("cbor deserialize")
+            }
+
+            const BOUND: Bound = Bound::Unbounded;
+        }
+    };
+}
+
+impl_cbor_storable!(AuthorizedSet);
+impl_cbor_storable!(RedirectRules);
+impl_cbor_storable!(AssetMeta);
+impl_cbor_storable!(ProtectionSettings);
+impl_cbor_storable!(TokenMeta);
+
+impl Storable for StateHash {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.to_vec())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes);
+        Self(hash)
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 32,
+        is_fixed_size: true,
+    };
+}
+
+impl Storable for ChunkCert {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = [0u8; 36];
+        buf[..4].copy_from_slice(&self.len.to_le_bytes());
+        buf[4..].copy_from_slice(&self.sha256);
+        Cow::Owned(buf.to_vec())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_bytes().into_owned()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let len = u32::from_le_bytes(bytes[..4].try_into().expect("36-byte ChunkCert"));
+        let mut sha256 = [0u8; 32];
+        sha256.copy_from_slice(&bytes[4..36]);
+        Self { len, sha256 }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 36,
+        is_fixed_size: true,
+    };
+}
+
+impl Storable for ContentChunkKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = [0u8; 12];
+        buf[..8].copy_from_slice(&self.content_id.to_be_bytes());
+        buf[8..].copy_from_slice(&self.chunk_index.to_be_bytes());
+        Cow::Owned(buf.to_vec())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_bytes().into_owned()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let content_id = u64::from_be_bytes(bytes[..8].try_into().expect("12-byte chunk key"));
+        let chunk_index = u32::from_be_bytes(bytes[8..12].try_into().expect("12-byte chunk key"));
+        Self {
+            content_id,
+            chunk_index,
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 12,
+        is_fixed_size: true,
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_chunk_key_roundtrips_and_orders_by_bytes() {
+        let k = ContentChunkKey::new(0x0102_0304_0506_0708, 0x0a0b_0c0d);
+        let bytes = k.to_bytes();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(ContentChunkKey::from_bytes(bytes), k);
+
+        // Byte (lexicographic) order must match (content_id, chunk_index) order,
+        // which is what StableBTreeMap relies on for ordered range scans.
+        let a = ContentChunkKey::new(1, 5).to_bytes().into_owned();
+        let b = ContentChunkKey::new(1, 6).to_bytes().into_owned();
+        let c = ContentChunkKey::new(2, 0).to_bytes().into_owned();
+        assert!(a < b);
+        assert!(b < c);
+    }
+
+    #[test]
+    fn redirect_rules_cbor_roundtrips() {
+        use wire_types::RulePattern;
+        let rules = RedirectRules(vec![RedirectRule {
+            from: RulePattern::Exact("/old".into()),
+            to: "/new".into(),
+            status: 301,
+            headers: vec![],
+        }]);
+        let restored = RedirectRules::from_bytes(rules.to_bytes());
+        assert_eq!(restored.0, rules.0);
     }
 }

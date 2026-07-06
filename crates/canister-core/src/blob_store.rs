@@ -38,9 +38,45 @@ use std::borrow::Cow;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{Memory, StableBTreeMap, Storable};
 
-use crate::stable_store::ContentChunkKey;
-
 const WASM_PAGE_SIZE: u64 = 65536;
+
+/// Key into the content chunk store, encoded big-endian (`content_id` then
+/// `chunk_index`) as a fixed 12-byte key. `StableBTreeMap` orders keys by their
+/// serialized bytes, so big-endian makes byte order match numeric order: a
+/// range scan over one `content_id` returns its chunks in `chunk_index` order.
+/// (Its `Storable` byte encoding lives in [`crate::store`].)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContentChunkKey {
+    pub content_id: u64,
+    pub chunk_index: u32,
+}
+
+impl ContentChunkKey {
+    pub fn new(content_id: u64, chunk_index: u32) -> Self {
+        Self {
+            content_id,
+            chunk_index,
+        }
+    }
+
+    /// Inclusive bounds covering every chunk of `content_id`, for range scans
+    /// and range deletes: `range(ContentChunkKey::range(cid))`.
+    pub fn range(content_id: u64) -> std::ops::RangeInclusive<Self> {
+        Self::new(content_id, 0)..=Self::new(content_id, u32::MAX)
+    }
+}
+
+/// Per-chunk certification data, keyed by the same `(content_id, chunk_index)`
+/// as the content blob. Holds exactly what the 206 certify path and serve path
+/// need *without* reading chunk bytes: the chunk's length (for
+/// `Content-Range`/offset math) and its SHA-256 (the 206 body hash). Kept out of
+/// `AssetMeta` so the per-request metadata decode stays small. (Its `Storable`
+/// byte encoding lives in [`crate::store`].)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkCert {
+    pub len: u32,
+    pub sha256: [u8; 32],
+}
 
 /// A fixed 12-byte `(offset, len)` reference into the data region. `len` is a
 /// `u32` because a single chunk never exceeds `MAX_CHUNK_SIZE` (~1.9 MB).

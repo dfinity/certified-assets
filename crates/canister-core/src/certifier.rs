@@ -33,7 +33,7 @@ use ic_representation_independent_hash::Value;
 
 use crate::asset::{
     certificate_expression_for, headers_for, range_certificate_expression_for, range_response_hash,
-    response_hashes_for,
+    response_hashes_for, AssetMeta, EncodingMeta,
 };
 use crate::certification::{
     response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, HashTreePath,
@@ -41,7 +41,6 @@ use crate::certification::{
 };
 use crate::http::{HeaderField, HttpResponse};
 use crate::protection::ProtectionResponse;
-use crate::stable_store::{AssetMeta, EncodingMeta};
 use crate::store::Store;
 use wire_types::{Encoding, RedirectRule, RulePattern};
 

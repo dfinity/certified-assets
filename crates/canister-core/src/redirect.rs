@@ -6,8 +6,18 @@ use crate::certification::{
 };
 use http::{HeaderName, HeaderValue, StatusCode};
 use ic_representation_independent_hash::Value;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use wire_types::{RedirectRule, RulePattern};
+
+/// The ordered redirect-rule list as persisted in one `StableCell` (see the
+/// `Storable` impl in [`crate::store`]). A newtype so it can carry that impl (the
+/// orphan rule forbids implementing `Storable` for the bare `Vec`). Stored as one
+/// cell — not a per-rule map — because serving scans the whole list in order on
+/// every request and reads the cached value for free, and `SetRedirectRules`
+/// replaces the list wholesale.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RedirectRules(pub Vec<RedirectRule>);
 
 // Convention: `http::StatusCode` is used wherever this module *reasons about* a
 // status — `from_u16` to validate untrusted rule input, `is_redirection` /
