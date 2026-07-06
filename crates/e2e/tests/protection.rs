@@ -99,6 +99,10 @@ fn protected_app_gates_unauthenticated_requests() {
         "got: {set_cookie}"
     );
     assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
+    // Embeddable by default: the credential must survive a cross-site iframe
+    // (Caffeine-style preview), so it is a partitioned cross-site cookie.
+    assert!(set_cookie.contains("SameSite=None"), "got: {set_cookie}");
+    assert!(set_cookie.contains("Partitioned"), "got: {set_cookie}");
 
     // A wrong password re-prompts with a certified 401.
     assert_eq!(

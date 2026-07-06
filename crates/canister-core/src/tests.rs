@@ -3326,11 +3326,11 @@ mod env_cookie {
         ]);
         let rendered = render_env_cookie(&[0xab, 0xcd], &vars);
 
-        assert!(rendered.ends_with("; SameSite=Lax"));
+        assert!(rendered.ends_with("; Secure; SameSite=None; Partitioned"));
         let value = rendered
             .strip_prefix("ic_env=")
             .unwrap()
-            .strip_suffix("; SameSite=Lax")
+            .strip_suffix("; Secure; SameSite=None; Partitioned")
             .unwrap();
         // Separators are percent-encoded, so the payload rides in one cookie value.
         assert!(!value.contains('&') && !value.contains('='));
@@ -3395,7 +3395,7 @@ mod env_cookie {
         let cookies = all_headers(&resp, "set-cookie");
         assert_eq!(cookies.len(), 1);
         assert!(cookies[0].starts_with("ic_env="), "got: {}", cookies[0]);
-        assert!(cookies[0].ends_with("; SameSite=Lax"));
+        assert!(cookies[0].ends_with("; Secure; SameSite=None; Partitioned"));
     }
 
     #[test]
@@ -3800,6 +3800,10 @@ mod access_protection {
             "got: {set_cookie}"
         );
         assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
+        // Embedding-friendly by default: the credential must survive a cross-site
+        // iframe (Caffeine-style preview), so it is a partitioned cross-site cookie.
+        assert!(set_cookie.contains("SameSite=None"), "got: {set_cookie}");
+        assert!(set_cookie.contains("Partitioned"), "got: {set_cookie}");
     }
 
     #[test]

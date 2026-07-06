@@ -25,11 +25,13 @@ the real HTTP gateway.
 
 ```
 access-protection
-├── icp.yaml          # the `frontend` asset canister config
-└── dist              # the site that gets synced
-    ├── index.html    # the private content (served only when authenticated)
-    ├── app.js        # a non-HTML asset — gated too (401 when logged out)
-    └── login.html    # the gate-exempt login page (fully self-contained)
+├── icp.yaml            # the `frontend` asset canister config
+├── dist                # the site that gets synced
+│   ├── index.html      # the private content (served only when authenticated)
+│   ├── app.js          # a non-HTML asset — gated too (401 when logged out)
+│   └── login.html      # the gate-exempt login page (fully self-contained)
+└── preview-harness     # optional local iframe check (Chromium only)
+    └── serve.sh
 ```
 
 ## Prerequisites
@@ -79,6 +81,27 @@ Make it public again, then stop the replica when you're done:
 icp canister call frontend disable_protection '()'
 icp network stop
 ```
+
+## Preview it in an embedded iframe (local, Chromium only)
+
+The access cookie is `SameSite=None; Secure; Partitioned`, so a private app also
+works when shown inside a **cross-site iframe** (e.g. an embedded preview). To
+check this locally:
+
+```sh
+cd examples/access-protection
+icp network start -d && icp deploy
+./preview-harness/serve.sh --setup   # enables protection + issues token "secret"
+```
+
+Open <http://harness.localhost:8000/> in a **Chromium-based** browser
+(Chrome/Edge/Brave): the page frames this canister as a cross-site iframe.
+**PASS** = the private content renders in the frame; **FAIL** = you get the
+login page (the cookie was blocked as a third-party cookie).
+
+Only Chromium browsers can be checked this way — they resolve `*.localhost` and
+honour `Secure` cookies over local `http`. Safari and Firefox behave correctly
+only over real HTTPS, so verify those against a deployed `https://<id>.icp0.io`.
 
 ## Managing access
 
