@@ -1,85 +1,22 @@
-//! Sync / chunk machinery for the assets canister.
-//!
-//! Holds the data types for a sync and its chunked uploads ([`Chunk`],
-//! [`SyncSession`]) and the incremental-computation harness used by
-//! `execute_operations` to spread work across multiple canister calls
-//! ([`ComputationStatus`], [`ExecuteOperationsProgress`]) — one operation per
-//! step, so a many-operation commit can yield between operations.
-//!
 //! The `impl State` methods that drive a sync — `start_sync`, `upload_chunks`,
-//! `execute_operations` — live here too, alongside the small helpers they rely
-//! on. Other `State` behavior lives in the sibling submodules of
-//! [`crate::state`].
+//! `execute_operations` — alongside the small helpers they rely on.
+//!
+//! This is the `State`-bound half of the sync domain; the pure data types it
+//! operates on — [`SyncSession`], [`ComputationStatus`],
+//! [`ExecuteOperationsProgress`], and [`SYNC_IDLE_TIMEOUT_NANOS`] — live in the
+//! `State`-free data layer at [`crate::sync`]. Other `State` behavior lives in
+//! the sibling submodules of [`crate::state`].
 
 use super::State;
-use crate::cert::AssetKey;
 use crate::redirect;
 use crate::runtime::SystemContext;
+use crate::sync::{
+    ComputationStatus, ExecuteOperationsProgress, SyncSession, SYNC_IDLE_TIMEOUT_NANOS,
+};
 use candid::Principal;
-use serde_bytes::ByteBuf;
 use wire_types::{
     ExecuteOperationsArguments, Operation, SessionId, StartSyncResult, UploadChunksArguments,
 };
-
-/// How long a sync may sit idle (no calls carrying its session id) before a
-/// *different* caller is allowed to reclaim it. Comfortably shorter than any
-/// real deploy's inter-call gap; the owner can always reclaim their own sync
-/// immediately regardless of this.
-pub const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
-
-/// A single chunk of content staged under a sync, before it is stitched into an
-/// asset encoding. Just the bytes: a chunk's id is its slot index in
-/// [`State::chunks`](crate::state::State), not anything stored here.
-pub type Chunk = ByteBuf;
-
-/// The single in-progress sync. The canister holds at most one at a time;
-/// `start_sync` rejects a second caller while this is present and non-stale.
-pub struct SyncSession {
-    pub id: SessionId,
-    pub owner: Principal,
-    pub last_activity_ns: u64,
-}
-
-/// Status of an incremental computation
-#[derive(Clone, Debug)]
-pub enum ComputationStatus<D, P, E> {
-    /// Computation completed successfully
-    Done(D),
-    /// Computation in progress, with progress state to resume from
-    InProgress(P),
-    /// Computation failed with an error
-    Error(E),
-}
-
-#[derive(Debug, Default)]
-pub enum ExecuteOperationsProgress {
-    /// Initial state when `execute_operations` is first called.
-    ///
-    /// This phase validates that the call belongs to the active sync (and
-    /// records activity), then transitions to `ProcessingOperations` with the
-    /// first operation.
-    #[default]
-    Starting,
-    /// Processing operations one at a time. Each call applies a single operation
-    /// (including writing a `SetAssetContent` encoding's chunks to stable memory
-    /// and re-certifying the asset), then yields so the driver can reset the
-    /// instruction counter between operations. Content is no longer hashed here:
-    /// the client supplies the hashes and the canister trusts them (see
-    /// [`State::complete_set_asset_content`](crate::state::State)).
-    ProcessingOperations { operation_index: usize },
-    /// After all operations of a **final** call are applied, recompute the cached
-    /// canonical state hash (see the `state-hash` crate), folding in one asset per
-    /// step so a many-asset state stays within the per-message instruction limit.
-    /// The streaming hasher and a key cursor ride across steps; when the keyspace
-    /// is exhausted the redirect rules are folded in, the hash is cached, and the
-    /// computation is `Done`.
-    HashingState {
-        hasher: state_hash::StateHasher,
-        /// The last asset key folded in; the next step resumes strictly after it
-        /// (`None` ⇒ start from the first key).
-        resume_after: Option<AssetKey>,
-    },
-}
 
 impl State {
     /// Begins a sync, returning a fresh session id.
@@ -219,23 +156,27 @@ impl State {
                             );
                         }
 
-                        // Collect all chunks, taking each out of self.chunks so
-                        // its bytes are freed as soon as it's consumed (the slot
-                        // is left as a `None` hole, preserving later indices).
-                        let mut content_chunks = vec![];
-                        for &chunk_id in arg.chunk_ids.iter() {
-                            let chunk = match self
-                                .chunks
-                                .get_mut(chunk_id as usize)
-                                .and_then(Option::take)
-                            {
-                                Some(c) => c,
-                                None => {
-                                    return ComputationStatus::Error("chunk not found".to_string());
-                                }
-                            };
-                            content_chunks.push(chunk);
+                        // A chunk id is a slot index into the staging area.
+                        // Reject the whole op up front if any id doesn't point at
+                        // a still-present chunk, so a bad id fails cleanly rather
+                        // than leaving earlier chunks half-consumed.
+                        let staged = self.chunks();
+                        if arg
+                            .chunk_ids
+                            .iter()
+                            .any(|&id| !matches!(staged.get(id as usize), Some(Some(_))))
+                        {
+                            return ComputationStatus::Error("chunk not found".to_string());
                         }
+
+                        // Take each chunk out of the staging area so its bytes are
+                        // freed as soon as it's consumed (the slot is left as a
+                        // `None` hole, preserving later indices).
+                        let content_chunks: Vec<_> = arg
+                            .chunk_ids
+                            .iter()
+                            .map(|&id| self.chunks[id as usize].take().expect("validated above"))
+                            .collect();
 
                         // The client supplied the content hashes; the canister
                         // trusts them, so there's no per-chunk hashing pass to

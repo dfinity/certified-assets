@@ -1,8 +1,8 @@
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
-use crate::state::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::state::State;
+use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::UploadChunksArguments;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::Principal;
@@ -312,7 +312,7 @@ fn assemble_create_assets_and_set_contents_operations(
             // Chunk ids are not returned; they're the slot indices the canister
             // assigns in upload order. Mirror that: ids run from the current
             // staging length for as many chunks as we upload.
-            let base = state.chunks.len() as u64;
+            let base = state.chunks().len() as u64;
             let chunk_ids: Vec<u64> = (base..base + chunks.len() as u64).collect();
             let mut hasher = sha2::Sha256::new();
             for chunk in &chunks {
@@ -559,7 +559,7 @@ fn apply_prepared(state: &mut State, ctx: &SystemContext, prepared: &asset_prep:
         }));
         for enc in &pa.encodings {
             // Stage this encoding's chunks; ids are their staging slots.
-            let base = state.chunks.len() as u64;
+            let base = state.chunks().len() as u64;
             let chunk_ids: Vec<u64> = (base..base + enc.chunks.len() as u64).collect();
             let chunks: Vec<ByteBuf> = enc
                 .chunks
@@ -889,7 +889,7 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
             &system_context,
         )
         .unwrap();
-    assert!(!state.chunks.is_empty(), "chunk should be staged");
+    assert!(!state.chunks().is_empty(), "chunk should be staged");
 
     // Advance past the idle timeout, then a different principal reclaims it.
     system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS + 1;
@@ -898,7 +898,7 @@ fn stale_sync_can_be_reclaimed_by_another_principal() {
         other => panic!("expected Started, got {other:?}"),
     }
     assert!(
-        state.chunks.is_empty(),
+        state.chunks().is_empty(),
         "reclaim must drop the previous session's chunks"
     );
 

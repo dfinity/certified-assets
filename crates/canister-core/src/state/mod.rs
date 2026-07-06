@@ -28,13 +28,15 @@
 //! - [`env`](mod@env) — the env cookie capture / re-certify path
 //! - [`hashing`] — the canonical state-hash computation
 //! - [`serving`] — the HTTP read path (`http_request` and its resolvers)
-//! - [`sync`] — start/upload/execute sync orchestration (and the sync data types)
+//! - [`sync`] — start/upload/execute sync orchestration (the `impl State` half of
+//!   the sync domain; its data types live in [`crate::sync`])
 //! - [`protection`] — access protection (the "private app" feature)
 //! - [`upgrade`] — rebuilding all derived heap state after an upgrade
 //!
 //! Because all of them are submodules here, `State`'s owned pieces
-//! (`store`, `certifier`, `sync_session`, `token_index`) are **private** to this
-//! module tree — no other part of the crate can reach into them.
+//! (`store`, `certifier`, `chunks`, `sync_session`, `token_index`) are
+//! **private** to this module tree — no other part of the crate can reach into
+//! them.
 //!
 //! NB. This module does not depend on `ic_cdk` for environment access (time,
 //! certificates): those are passed in as formal arguments so the state machine
@@ -45,25 +47,21 @@
 
 mod assets;
 mod env;
-mod protection;
 mod hashing;
+mod protection;
 mod rules;
 mod serving;
+mod sync;
 mod upgrade;
-
-// `pub(crate)` (not `mod`) because its data types cross the state boundary:
-// `ComputationStatus` (the sync-driver result, used in `lib`),
-// `ExecuteOperationsProgress` (benches), and `SYNC_IDLE_TIMEOUT_NANOS` (tests)
-// are reached as `crate::state::sync::…`.
-pub(crate) mod sync;
 
 use crate::cert::{AssetKey, Certifier};
 use crate::store::Store;
+use crate::sync::SyncSession;
 use candid::Principal;
 use ic_certification::Hash;
 use ic_stable_structures::DefaultMemoryImpl;
+use serde_bytes::ByteBuf;
 use std::collections::HashMap;
-use sync::{Chunk, SyncSession};
 use wire_types::SessionId;
 
 /// Maximum number of items the canister returns from a single paginated query
@@ -86,9 +84,10 @@ pub struct State {
     /// each slot as it consumes the bytes, leaving a `None` hole, so memory is
     /// freed incrementally without renumbering the surviving slots. Cleared on
     /// sync start/finish. The plugin reproduces these same indices locally, so
-    /// they are never sent over the wire. `pub(crate)` because the unit tests and
-    /// benches stage chunks directly before driving a sync.
-    pub(crate) chunks: Vec<Option<Chunk>>,
+    /// they are never sent over the wire. Private like the other owned pieces;
+    /// read-only access (for the sync logic and for tests/benches that stage
+    /// chunks directly) goes through [`State::chunks`].
+    chunks: Vec<Option<ByteBuf>>,
     /// The single in-progress sync, if any. At most one runs at a time.
     sync_session: Option<SyncSession>,
 
@@ -184,5 +183,16 @@ impl State {
     /// the in-memory `StableCell`, so it is cheap enough to call per request.
     pub fn protection_login_page(&self) -> Option<String> {
         self.store.protection_login_page()
+    }
+
+    /// The chunk staging area for the active sync, in upload order: each slot's
+    /// index is that chunk's id (`ChunkId`), and a `None` slot is one already
+    /// consumed by `SetAssetContent`. Read-only view — staging, consuming, and
+    /// clearing all happen inside the [`sync`] methods; `execute_operations`
+    /// reads it here to resolve a `SetAssetContent`'s chunk ids, and callers
+    /// derive whatever else they need (the next id to assign, whether anything
+    /// is staged) from the slice.
+    pub fn chunks(&self) -> &[Option<ByteBuf>] {
+        &self.chunks
     }
 }

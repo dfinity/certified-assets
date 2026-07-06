@@ -8,6 +8,7 @@ mod redirect;
 mod runtime;
 mod state;
 mod store;
+mod sync;
 
 #[cfg(test)]
 mod tests;
@@ -17,7 +18,8 @@ mod benches;
 
 use crate::{
     runtime::{CanisterEnv, SystemContext},
-    state::{sync::ComputationStatus, State},
+    state::State,
+    sync::ComputationStatus,
 };
 use candid::Principal;
 use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, time, trap};

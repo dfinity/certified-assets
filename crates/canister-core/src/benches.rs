@@ -24,8 +24,8 @@
 
 use crate::http::HttpRequest;
 use crate::runtime::SystemContext;
-use crate::state::sync::{ComputationStatus, ExecuteOperationsProgress};
 use crate::state::State;
+use crate::sync::{ComputationStatus, ExecuteOperationsProgress};
 use canbench_rs::{bench, bench_fn, BenchResult};
 use candid::Principal;
 use ic_stable_structures::DefaultMemoryImpl;
@@ -148,7 +148,7 @@ fn stage_assets(
         let chunk_sha256 = chunk_sha256_of(std::slice::from_ref(&chunk));
         // Chunk ids are the staging slot indices the canister assigns in upload
         // order; one chunk per asset means the next id is the current length.
-        let chunk_id = state.chunks.len() as u64;
+        let chunk_id = state.chunks().len() as u64;
         state
             .upload_chunks(
                 UploadChunksArguments {

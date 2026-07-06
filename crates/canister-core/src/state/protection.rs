@@ -12,11 +12,11 @@
 
 use super::State;
 use crate::cert::{build_ic_certificate_expression_header, AssetPath, HashTreePath};
+use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::{
     access_cookie_values, parse_form_token, token_id, ProtectionResponse, ProtectionStatus,
     TokenInfo, TokenMeta,
 };
-use crate::http::{HttpRequest, HttpResponse};
 use serde_bytes::ByteBuf;
 
 impl State {
