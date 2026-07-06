@@ -18,7 +18,7 @@
 //!   that keeps the certified leaf byte-identical to the served response.
 //!
 //! Only the names re-exported below cross this module's boundary. The tree type,
-//! its addressing internals ([`RequestHash`], `WitnessResult`), and the whole
+//! its addressing internals ([`primitives::RequestHash`], `WitnessResult`), and the whole
 //! `nested_tree` are implementation details.
 //!
 //! [`AsHashTree`]: ic_certification::AsHashTree

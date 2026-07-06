@@ -1,8 +1,8 @@
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
+use crate::state::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::state::State;
-use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
 use crate::UploadChunksArguments;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::Principal;
@@ -24,7 +24,7 @@ use wire_types::{
 const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
 
 /// Fixed "now" (ns) used as the `http_request` time argument in tests. Matches
-/// [`mock_system_context`]; the access-protection gate compares token expiry
+/// [`mock_system_context`]; access protection compares token expiry
 /// against it.
 const TEST_NOW: u64 = 100_000_000_000;
 
@@ -130,7 +130,7 @@ fn certified_http_request(state: &State, request: HttpRequest) -> HttpResponse {
     certified_http_request_at(state, request, TEST_NOW)
 }
 
-/// Like [`certified_http_request`] but with an explicit gate "now" (ns), for
+/// Like [`certified_http_request`] but with an explicit access-protection "now" (ns), for
 /// exercising token expiry. The certificate itself is still minted at real
 /// wall-clock time inside [`verify_response`].
 fn certified_http_request_at(state: &State, request: HttpRequest, now: u64) -> HttpResponse {
@@ -3680,7 +3680,7 @@ mod access_protection {
         create_assets(&mut state, &ctx, vec![html_asset("/index.html", HTML)]);
         let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
         assert_eq!(r.status_code, 200);
-        // No gate, no forced no-store.
+        // No access protection, no forced no-store.
         assert!(lookup_header(&r, "cache-control").is_none());
         assert_eq!(state.check_protection_status(), ProtectionStatus::Disabled);
     }
@@ -3718,7 +3718,7 @@ mod access_protection {
 
     #[test]
     fn valid_cookie_among_other_cookies_serves_asset() {
-        // The browser concatenates ic_env + analytics + certified_assets_access; the gate picks
+        // The browser concatenates ic_env + analytics + certified_assets_access; access protection picks
         // ours out by plain string parsing.
         let state = protected_state();
         let r = certified_http_request(
@@ -3747,7 +3747,7 @@ mod access_protection {
     }
 
     #[test]
-    fn login_page_is_gate_exempt() {
+    fn login_page_is_exempt() {
         let state = protected_state();
         // GET the login page with no cookie still serves the page.
         let r = certified_http_request(&state, RequestBuilder::get(LOGIN_PAGE).build());
@@ -4052,7 +4052,7 @@ mod access_protection {
     #[test]
     fn reissuing_a_label_rotates_the_token() {
         // The label is the unique identifier: re-issuing "owner" with a new value
-        // replaces the old one — old value stops working (gate + redeem), new works,
+        // replaces the old one — old value stops working (access protection + redeem), new works,
         // and there's still exactly one token under that label.
         let mut state = protected_state(); // token "secret" labelled "owner"
         state

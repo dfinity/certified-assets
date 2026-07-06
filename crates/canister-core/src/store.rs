@@ -60,7 +60,7 @@ const STATE_HASH_MEMORY: MemoryId = MemoryId::new(8);
 const PROTECTION_MEMORY: MemoryId = MemoryId::new(9);
 /// Live access tokens, keyed by their unique **label** (`label -> TokenMeta`).
 /// The management view: issue/revoke/list. Empty unless protection is on. The
-/// hot-path gate index is *derived* from this (in heap; see `State::token_index`).
+/// hot-path access-protection index is *derived* from this (in heap; see `State::token_index`).
 const TOKENS_MEMORY: MemoryId = MemoryId::new(10);
 
 // Two newtypes with no domain module of their own: they exist only to give a
@@ -332,17 +332,17 @@ impl Store {
 
     // ---- access-protection settings ----
 
-    /// The configured login-page path when the gate is on, else `None`.
+    /// The configured login-page path when access protection is on, else `None`.
     pub fn protection_login_page(&self) -> Option<String> {
         self.protection.get().login_page.clone()
     }
 
-    /// Whether access protection is enabled (the gate is on).
+    /// Whether access protection is enabled.
     pub fn protection_enabled(&self) -> bool {
         self.protection.get().login_page.is_some()
     }
 
-    /// Sets the login page (`Some` ⇒ gate on, `None` ⇒ public). A single small
+    /// Sets the login page (`Some` ⇒ on, `None` ⇒ public). A single small
     /// cell write; certification is the caller's responsibility.
     pub fn set_protection_login_page(&mut self, login_page: Option<String>) {
         self.protection.set(ProtectionSettings { login_page });

@@ -136,7 +136,7 @@ fn effective_headers_with_etag(
 /// for non-identity encodings, the effective headers, and the canister-managed
 /// `etag` (see [`etag_value`]).
 ///
-/// `effective_headers` is [`crate::state::State::effective_headers`]: the asset's
+/// `effective_headers` is [`crate::cert::Certifier::effective_headers`]: the asset's
 /// own `_headers`, plus the canister-injected `ic_env` `set-cookie` on
 /// `text/html` responses. It is therefore **not** just the user's custom headers
 /// — the env cookie is a certified header like any other.

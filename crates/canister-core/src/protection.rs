@@ -1,9 +1,11 @@
-//! Types and pure helpers for access protection (the "private app" gate).
+//! Types and pure helpers for access protection — the `State`-free data layer
+//! of the "private app" feature.
 //!
-//! This module owns the protection domain: the public Candid API types
-//! ([`ProtectionStatus`], [`TokenInfo`], [`IssueTokenArgs`]) and the
-//! credential-channel plumbing that has no business touching `State` — parsing
-//! the `certified_assets_access` cookie out of a request, parsing the `token=…`
+//! This module owns the protection domain's data: the public Candid API types
+//! ([`ProtectionStatus`], [`TokenInfo`], [`IssueTokenArgs`]), the persisted
+//! shapes ([`ProtectionSettings`], [`TokenMeta`]), and the credential-channel
+//! plumbing that has no business touching `State` — parsing the
+//! `certified_assets_access` cookie out of a request, parsing the `token=…`
 //! field out of a login `POST` body, rendering the `Set-Cookie` value, and —
 //! crucially — the **certified unauthenticated / redeem responses**
 //! ([`ProtectionResponse`]). Keeping their byte shape here, behind constructors
@@ -12,7 +14,9 @@
 //! (the same discipline `asset.rs` follows for normal assets).
 //!
 //! Nothing here reads canister state or the system API, so it is all directly
-//! unit-testable. (`State` implements the behavior these types describe.)
+//! unit-testable. The access-protection behavior — which consumes these types
+//! and the cookie/form helpers — lives in the state machine's `protection`
+//! submodule (see [`crate::state`]).
 
 use crate::cert::{
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
@@ -30,11 +34,11 @@ use sha2::{Digest, Sha256};
 /// design, "missing login page fails closed").
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, serde::Deserialize)]
 pub enum ProtectionStatus {
-    /// Public app — the gate is off.
+    /// Public app — access protection is off.
     Disabled,
     /// Private app, healthy: the login-page asset is present.
     Enabled { login_page: String },
-    /// Private app, degraded: the gate is on but the named login-page asset
+    /// Private app, degraded: access protection is on but the named login-page asset
     /// hasn't been synced. The app stays protected (no content is served); a
     /// sync including the page heals it to `Enabled`.
     EnabledLoginPageMissing { login_page: String },
@@ -60,18 +64,18 @@ pub struct IssueTokenArgs {
     pub value: Option<String>,
 }
 
-/// Cookie name carrying the access token. The value *is* the token; the gate
-/// hashes it and looks it up. Named for its scope: this is an `HttpOnly`,
+/// Cookie name carrying the access token. The value *is* the token; access
+/// protection hashes it and looks it up. Named for its scope: this is an `HttpOnly`,
 /// server-only credential defined and consumed entirely within this repo —
 /// unlike the client-facing, cross-component `ic_env` cookie — so it doesn't
 /// borrow the `ic_` namespace, and the `certified_assets_` qualifier keeps it
 /// from ever colliding with a user-supplied `_headers` cookie.
-pub const ACCESS_COOKIE: &str = "certified_assets_access";
+const ACCESS_COOKIE: &str = "certified_assets_access";
 
-/// `SHA-256` of a presented token value — the key into the gate index
-/// (`State::token_index`). Lets the gate match a cookie without storing the
-/// plaintext value anywhere.
-pub fn token_id(value: &str) -> [u8; 32] {
+/// `SHA-256` of a presented token value — the key into the access-protection
+/// index (`State::token_index`). Lets access protection match a cookie without
+/// storing the plaintext value anywhere.
+pub(crate) fn token_id(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
 
@@ -85,7 +89,7 @@ pub fn token_id(value: &str) -> [u8; 32] {
 /// keeps the cookie from riding along to arbitrary *other* embedders. Must be
 /// byte-identical between the certify path (`issue_token`) and the serve path
 /// (redeem), since it is part of the certified response hash.
-pub fn access_cookie(value: &str) -> String {
+fn access_cookie(value: &str) -> String {
     format!("{ACCESS_COOKIE}={value}; HttpOnly; Secure; SameSite=None; Partitioned; Path=/")
 }
 
@@ -93,9 +97,9 @@ pub fn access_cookie(value: &str) -> String {
 /// browser sends *all* cookies for the origin concatenated (here at least this
 /// canister's own `ic_env`), so we scan `; `-separated pairs and pick out ours —
 /// plain string parsing, unaffected by whatever else rides along. Returns every
-/// match (a client could carry a stale and a fresh `certified_assets_access`); the gate accepts
-/// if *any* is valid.
-pub fn access_cookie_values(req: &HttpRequest) -> Vec<String> {
+/// match (a client could carry a stale and a fresh `certified_assets_access`); access
+/// protection accepts if *any* is valid.
+pub(crate) fn access_cookie_values(req: &HttpRequest) -> Vec<String> {
     let mut values = Vec::new();
     for (name, value) in &req.headers {
         if !name.eq_ignore_ascii_case("cookie") {
@@ -114,7 +118,7 @@ pub fn access_cookie_values(req: &HttpRequest) -> Vec<String> {
 /// The token value from an `application/x-www-form-urlencoded` login `POST` body
 /// (`token=<value>`), URL-decoded. `None` if absent. Decodes `+` as space and
 /// `%XX` escapes so a controller-chosen passphrase round-trips exactly.
-pub fn parse_form_token(body: &[u8]) -> Option<String> {
+pub(crate) fn parse_form_token(body: &[u8]) -> Option<String> {
     let body = std::str::from_utf8(body).ok()?;
     for field in body.split('&') {
         if let Some(raw) = field.strip_prefix("token=") {
@@ -223,20 +227,21 @@ impl ProtectionResponse {
     }
 }
 
-/// Access-protection configuration. When `login_page` is `Some`, the gate is
-/// **on**: unauthenticated requests get a certified redirect/401 instead of asset
-/// content, and the named asset is the gate-exempt login surface. `None` (the
-/// default) means a fully public app — the gate, the no-store override, and the
-/// unauthenticated certified siblings are all absent, so a public canister is
-/// bit-for-bit unchanged. Persisted in its own `StableCell` (see the `Storable`
-/// impl in [`crate::store`]) so toggling protection is a single small write.
+/// Access-protection configuration. When `login_page` is `Some`, access
+/// protection is **on**: unauthenticated requests get a certified redirect/401
+/// instead of asset content, and the named asset is the exempt login surface.
+/// `None` (the default) means a fully public app — access protection, the
+/// no-store override, and the unauthenticated certified siblings are all absent,
+/// so a public canister is bit-for-bit unchanged. Persisted in its own
+/// `StableCell` (see the `Storable` impl in [`crate::store`]) so toggling
+/// protection is a single small write.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProtectionSettings {
     pub login_page: Option<String>,
 }
 
 /// Per-token metadata, keyed by the token's **label** — the unique identifier a
-/// controller uses to issue/revoke/list. (The hot-path gate doesn't read this; it
+/// controller uses to issue/revoke/list. (The hot-path check doesn't read this; it
 /// uses the in-heap `token_index`, rebuilt from these records on upgrade.) Holds
 /// the value hash (so revoke/GC can drop the matching `token_index` entry, and the
 /// index can be rebuilt), the expiry, and the certified-tree path of this token's
@@ -250,7 +255,7 @@ pub struct TokenMeta {
     /// `SHA-256(value)` — links this token to its `token_index` entry and lets the
     /// index be reconstructed on upgrade.
     pub token_id: [u8; 32],
-    /// Absolute expiry in nanoseconds; the gate rejects once `now >= expires_at`.
+    /// Absolute expiry in nanoseconds; access protection rejects once `now >= expires_at`.
     pub expires_at: u64,
     /// Full `HashTreePath` (as a `Vec<NestedTreeKey>`) of the certified redeem
     /// response for this token, at the `login_page` subtree.

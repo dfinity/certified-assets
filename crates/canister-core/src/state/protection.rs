@@ -1,18 +1,22 @@
-//! Access protection ("private app" gate): the serve side and the
-//! controller-driven state management.
+//! Access protection ("private app"): the serve side and the controller-driven
+//! state management — the `State`-bound half of the access-protection domain.
 //!
-//! This is the `impl State` half for the gate. It builds the certified
-//! unauthenticated/redeem responses served ahead of resolution (the gate itself
-//! runs in [`State::http_request`], in [`crate::serving`]), and it owns the
+//! This is the `impl State` half. It builds the certified unauthenticated/redeem
+//! responses served ahead of resolution (access protection itself runs in
+//! [`State::http_request`], in [`super::serving`]), and it owns the
 //! enable/disable/issue/revoke lifecycle. Byte-level response *shapes* and the
-//! cookie/form parsing live in [`crate::protection`]; the *tree* mutations
-//! (certifying/removing those leaves) go through [`crate::cert::Certifier`].
-//! The hot-path gate index (`token_index`) lives on `State` and is read here.
+//! cookie/form parsing live in the data-layer [`crate::protection`]; the *tree*
+//! mutations (certifying/removing those leaves) go through
+//! [`crate::cert::Certifier`]. The hot-path access-protection index
+//! (`token_index`) lives on `State` and is read here.
 
+use super::State;
 use crate::cert::{build_ic_certificate_expression_header, AssetPath, HashTreePath};
+use crate::protection::{
+    access_cookie_values, parse_form_token, token_id, ProtectionResponse, ProtectionStatus,
+    TokenInfo, TokenMeta,
+};
 use crate::http::{HttpRequest, HttpResponse};
-use crate::protection::{ProtectionResponse, ProtectionStatus, TokenInfo, TokenMeta};
-use crate::state::State;
 use serde_bytes::ByteBuf;
 
 impl State {
@@ -49,13 +53,11 @@ impl State {
     /// presented value hashes to a stored, unexpired token. Plain string parsing
     /// of the `Cookie` header, so `ic_env` and any other cookie are irrelevant.
     pub(crate) fn cookie_token_valid(&self, req: &HttpRequest, now: u64) -> bool {
-        crate::protection::access_cookie_values(req)
-            .into_iter()
-            .any(|value| {
-                self.token_index
-                    .get(&crate::protection::token_id(&value))
-                    .is_some_and(|&expires_at| expires_at > now)
-            })
+        access_cookie_values(req).into_iter().any(|value| {
+            self.token_index
+                .get(&token_id(&value))
+                .is_some_and(|&expires_at| expires_at > now)
+        })
     }
 
     /// Serves the certified unauthenticated response for `path`, mirroring the
@@ -103,10 +105,10 @@ impl State {
         now: u64,
     ) -> HttpResponse {
         let location = AssetPath::from(login_page).asset_hash_path_root();
-        if let Some(value) = crate::protection::parse_form_token(req.body.as_ref()) {
+        if let Some(value) = parse_form_token(req.body.as_ref()) {
             if self
                 .token_index
-                .get(&crate::protection::token_id(&value))
+                .get(&token_id(&value))
                 .is_some_and(|&expires_at| expires_at > now)
             {
                 let resp = ProtectionResponse::redeem_success(&value);
@@ -125,13 +127,13 @@ impl State {
     fn clear_tokens_and_login_responses(&mut self, login_page: &str) {
         // The whole login subtree (redeem 302s, the 401, the 200 page) goes in one
         // shot, so per-token cert removal isn't needed — just empty the store and
-        // the (heap) gate index.
+        // the (heap) access-protection index.
         self.certifier.remove_responses_for_path(login_page);
         self.store.clear_tokens();
         self.token_index.clear();
     }
 
-    /// Turns the gate **on** with the given login page (controller-guarded at the
+    /// Turns access protection **on** with the given login page (controller-guarded at the
     /// endpoint). Enabling on a fresh canister before the first sync is the secure
     /// ordering — no window in which assets are world-readable. Idempotent if
     /// already enabled at the same page; re-pointing to a different page drops the
@@ -157,7 +159,7 @@ impl State {
         }
     }
 
-    /// Turns the gate **off** and drops all tokens, restoring a fully public app.
+    /// Turns access protection **off** and drops all tokens, restoring a fully public app.
     /// Caller publishes `certified_data` afterwards.
     pub fn disable_protection(&mut self) {
         let Some(login_page) = self.protection_login_page() else {
@@ -170,7 +172,7 @@ impl State {
     }
 
     /// Mints a token under `label`: stores the record (`token_id`, expiry,
-    /// redeem-cert path) and the gate-index entry (`token_id → expiry`), certifies
+    /// redeem-cert path) and the access-protection index entry (`token_id → expiry`), certifies
     /// this token's redeem response, and first sweeps expired tokens so the
     /// store/tree track only live tokens. The plaintext `value` is supplied by the
     /// caller (random or chosen) and is never stored. Errors if protection is off.
@@ -187,14 +189,14 @@ impl State {
         };
         self.sweep_expired_tokens(now);
         // Labels are the unique identifier: re-issuing under an existing label
-        // rotates it — drop the old token's gate-index entry and redeem cert first.
+        // rotates it — drop the old token's access-protection index entry and redeem cert first.
         self.remove_token(&label);
         let expires_at = now.saturating_add((ttl_secs as u64).saturating_mul(1_000_000_000));
         let location = AssetPath::from(login_page.as_str()).asset_hash_path_root();
         let redeem_tp = self
             .certifier
             .certify_protection_response(&location, &ProtectionResponse::redeem_success(&value));
-        let token_id = crate::protection::token_id(&value);
+        let token_id = token_id(&value);
         self.token_index.insert(token_id, expires_at);
         self.store.insert_token(
             label,
@@ -207,7 +209,7 @@ impl State {
         Ok(())
     }
 
-    /// Removes the token with `label` from the store and gate index and drops its
+    /// Removes the token with `label` from the store and access-protection index and drops its
     /// redeem cert. No-op if absent. The single place token removal happens —
     /// shared by `revoke_token`, the rotate path of `issue_token`, and the GC
     /// sweep. O(log n).
@@ -221,7 +223,7 @@ impl State {
 
     /// Drops every token at or past expiry. Run at the start of `issue_token` (the
     /// op that grows the store) to bound growth. The full scan here is over the
-    /// rare management map, not the hot gate path.
+    /// rare management map, not the hot access-protection path.
     fn sweep_expired_tokens(&mut self, now: u64) {
         let expired: Vec<String> = self
             .store
@@ -234,7 +236,7 @@ impl State {
     }
 
     /// Revokes the token with the given label (live — the next request bearing it
-    /// fails the gate). O(log n) by label. Caller publishes `certified_data`.
+    /// fails access protection). O(log n) by label. Caller publishes `certified_data`.
     pub fn revoke_token(&mut self, label: &str) {
         self.remove_token(label);
     }

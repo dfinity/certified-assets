@@ -93,7 +93,7 @@ impl Certifier {
     }
 
     /// The certified entry for the redirect rule at `idx`, if it has one. Backs
-    /// `State::matching_rule` (the shared serve/gate rule scan).
+    /// `State::matching_rule` (the shared serve/access-protection rule scan).
     pub fn rule_entry(&self, idx: usize) -> Option<&crate::redirect::CertifiedRuleEntry> {
         self.rule_certified_entries
             .get(idx)
@@ -181,7 +181,7 @@ impl Certifier {
             self.certify_asset_encodings(store, key, meta);
         }
 
-        // Access protection: this path may also carry the gate's certified
+        // Access protection: this path may also carry its certified
         // unauthenticated sibling — or, for the login page itself, its redeem
         // responses (which share this subtree and were wiped above).
         if let Some(login_page) = store.protection_login_page() {
@@ -400,8 +400,8 @@ impl Certifier {
         }
 
         // Under protection, every certified path needs an unauthenticated sibling
-        // (and a universal root `<*>` fallback) so the gate can serve a verifiable
-        // 307/401 there. Added after the rules + built-in 404 so it layers on top.
+        // (and a universal root `<*>` fallback) so access protection can serve a
+        // verifiable 307/401 there. Added after the rules + built-in 404 so it layers on top.
         if let Some(login_page) = store.protection_login_page() {
             self.certify_rule_unauth_siblings(&login_page);
         }
@@ -409,7 +409,7 @@ impl Certifier {
 
     /// Certifies the canister's built-in last-resort 404 ("not found") at the
     /// root `<*>` fallback path. Callers must ensure `<*>` is otherwise free;
-    /// `on_redirect_rules_change` is the only caller and gates on that.
+    /// `on_redirect_rules_change` is the only caller and guarantees that.
     fn certify_not_found_fallback(&mut self) {
         let response = HttpResponse::uncertified_404();
         let headers: Vec<_> = response

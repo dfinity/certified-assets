@@ -6,15 +6,15 @@
 //! ([`ComputationStatus`], [`ExecuteOperationsProgress`]) — one operation per
 //! step, so a many-operation commit can yield between operations.
 //!
-//! The State methods that drive a sync — `start_sync`, `upload_chunks`,
-//! `execute_operations` — live here too, alongside the small
-//! helpers they rely on. State methods unrelated to syncing stay in the
-//! state machine module.
+//! The `impl State` methods that drive a sync — `start_sync`, `upload_chunks`,
+//! `execute_operations` — live here too, alongside the small helpers they rely
+//! on. Other `State` behavior lives in the sibling submodules of
+//! [`crate::state`].
 
+use super::State;
 use crate::cert::AssetKey;
 use crate::redirect;
 use crate::runtime::SystemContext;
-use crate::state::State;
 use candid::Principal;
 use serde_bytes::ByteBuf;
 use wire_types::{

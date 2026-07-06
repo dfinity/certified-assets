@@ -24,8 +24,8 @@
 
 use crate::http::HttpRequest;
 use crate::runtime::SystemContext;
+use crate::state::sync::{ComputationStatus, ExecuteOperationsProgress};
 use crate::state::State;
-use crate::sync::{ComputationStatus, ExecuteOperationsProgress};
 use canbench_rs::{bench, bench_fn, BenchResult};
 use candid::Principal;
 use ic_stable_structures::DefaultMemoryImpl;

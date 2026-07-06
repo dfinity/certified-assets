@@ -3,14 +3,13 @@
 //! This is the `impl State` half that turns a request into a certified
 //! response. It reads content from [`crate::store::Store`] and witnesses from
 //! [`crate::cert::Certifier`] but never mutates either — serving is
-//! read-only over the state the sync/certify paths (in `state.rs`,
-//! `certifier.rs`) build up. The access-protection *gate* that runs ahead of
-//! resolution lives here in `http_request`; the responses it serves are built in
-//! [`crate::access`].
+//! read-only over the state the sync/certify paths build up. Access protection
+//! runs ahead of resolution here in `http_request`; the responses it serves are
+//! built in [`super::protection`].
 
+use super::State;
 use crate::asset::{headers_for, range_headers_for, AssetMeta, EncodingMeta};
 use crate::http::{HeaderField, HttpRequest, HttpResponse};
-use crate::state::State;
 use ic_certification::Hash;
 use percent_encoding::percent_decode_str;
 use serde_bytes::ByteBuf;
@@ -103,13 +102,13 @@ impl State {
 
         match url_decode(path) {
             Ok(path) => {
-                // ---- access-protection gate ----
+                // ---- access protection ----
                 // Runs before asset/redirect resolution so an unauthenticated
                 // request never reaches asset content (a public app skips this
                 // entirely — `protection_login_page()` is `None`).
                 if let Some(login_page) = self.protection_login_page() {
                     if path == login_page {
-                        // The login surface is gate-exempt. A POST is a login
+                        // The login surface is exempt. A POST is a login
                         // attempt (validate + Set-Cookie / 401); a GET serves the
                         // page itself, so it falls through to normal serving.
                         if req.method.eq_ignore_ascii_case("POST") {
@@ -139,8 +138,8 @@ impl State {
 
     /// The first redirect rule (declaration order) that matches `path` and has a
     /// certified entry, or `None`. This is the shared spine of both request
-    /// resolvers — the normal serve path ([`Self::build_http_response`]) and the
-    /// access-protection gate ([`Self::serve_unauthenticated`]) — which each do
+    /// resolvers — the normal serve path ([`Self::build_http_response`]) and
+    /// access protection ([`Self::serve_unauthenticated`]) — which each do
     /// their own thing with the match (serve it vs. serve a 307 at its location)
     /// but agree on *which* rule wins. A rule without a certified entry (shadowed
     /// by an asset, or an alias to a missing target) is skipped, exactly as
