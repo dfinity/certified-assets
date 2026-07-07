@@ -34,38 +34,60 @@ use serde_bytes::ByteBuf;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use chunks::{ChunkStore, ContentChunkKey};
 use crate::asset::AssetMeta;
 use crate::cert::AssetKey;
 use crate::protection::{ProtectionSettings, TokenMeta};
 use crate::redirect::RedirectRules;
+use chunks::{ChunkStore, ContentChunkKey};
 use wire_types::{RedirectRule, SessionId};
 
 type Mem = VirtualMemory<DefaultMemoryImpl>;
 
+// `MemoryId` layout. Ids need only be unique and in range 0..=254; gaps are
+// free — the manager reserves all 255 header slots up front and allocates
+// buckets lazily per id, so an unused id costs nothing. We number by tens so
+// related memories share a group and each group can grow without renumbering
+// the others.
+
+// 0–9 — access control.
+/// Principals authorized to sync (controllers are always allowed, unstored).
 const AUTHORIZED_MEMORY: MemoryId = MemoryId::new(0);
-const REDIRECT_RULES_MEMORY: MemoryId = MemoryId::new(1);
-const NEXT_SESSION_ID_MEMORY: MemoryId = MemoryId::new(2);
-const NEXT_CONTENT_ID_MEMORY: MemoryId = MemoryId::new(3);
-const METADATA_MEMORY: MemoryId = MemoryId::new(4);
-/// Content chunk index (`ContentChunkKey -> ChunkRef`); the bytes live in
-/// `CONTENT_DATA_MEMORY`. See [`chunks`].
-const CONTENT_INDEX_MEMORY: MemoryId = MemoryId::new(5);
-/// Raw contiguous chunk bytes managed by the [`ChunkStore`] allocator.
-const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(6);
-/// Per-chunk certification data (`ContentChunkKey -> ChunkCert`); read by the
-/// 206 certify/serve paths so neither has to re-hash or fully read content.
-const CHUNK_CERT_MEMORY: MemoryId = MemoryId::new(7);
-/// Cached canonical state hash (`StateHash`), recomputed at the end of every
-/// final sync. Its own cell so the frequent counter bumps don't touch it.
-const STATE_HASH_MEMORY: MemoryId = MemoryId::new(8);
 /// Access-protection settings (`ProtectionSettings`): one small cell that flips
 /// the canister between public and private. `None` login page ⇒ public.
-const PROTECTION_MEMORY: MemoryId = MemoryId::new(9);
+const PROTECTION_MEMORY: MemoryId = MemoryId::new(1);
 /// Live access tokens, keyed by their unique **label** (`label -> TokenMeta`).
 /// The management view: issue/revoke/list. Empty unless protection is on. The
 /// hot-path access-protection index is *derived* from this (in heap; see `State::token_index`).
-const TOKENS_MEMORY: MemoryId = MemoryId::new(10);
+const TOKENS_MEMORY: MemoryId = MemoryId::new(2);
+
+// 10–19 — asset content.
+/// Per-asset metadata (`AssetKey -> AssetMeta`), ordered by key so pagination
+/// can range-seek instead of sorting the keyspace per query.
+const METADATA_MEMORY: MemoryId = MemoryId::new(10);
+/// Content chunk index (`ContentChunkKey -> ChunkRef`); the bytes live in
+/// `CONTENT_DATA_MEMORY`. See [`chunks`].
+const CONTENT_INDEX_MEMORY: MemoryId = MemoryId::new(11);
+/// Raw contiguous chunk bytes managed by the [`ChunkStore`] allocator.
+const CONTENT_DATA_MEMORY: MemoryId = MemoryId::new(12);
+/// Per-chunk certification data (`ContentChunkKey -> ChunkCert`); read by the
+/// 206 certify/serve paths so neither has to re-hash or fully read content.
+const CHUNK_CERT_MEMORY: MemoryId = MemoryId::new(13);
+
+// 20–29 — routing.
+/// Ordered redirect-rule list (`RedirectRules`). Its own cell so a frequent
+/// counter bump doesn't reserialize it (it can be large).
+const REDIRECT_RULES_MEMORY: MemoryId = MemoryId::new(20);
+
+// 30–39 — id counters.
+/// Monotonic, never-reused sync session-id allocator.
+const NEXT_SESSION_ID_MEMORY: MemoryId = MemoryId::new(30);
+/// Monotonic, never-reused chunk-group (content) id allocator.
+const NEXT_CONTENT_ID_MEMORY: MemoryId = MemoryId::new(31);
+
+// 40–49 — derived cache.
+/// Cached canonical state hash (`StateHash`), recomputed at the end of every
+/// final sync. Its own cell so the frequent counter bumps don't touch it.
+const STATE_HASH_MEMORY: MemoryId = MemoryId::new(40);
 
 // Two newtypes with no domain module of their own: they exist only to give a
 // storage-internal value a `Storable` impl (the orphan rule forbids implementing
@@ -104,16 +126,21 @@ pub(crate) struct ChunkCert {
 /// deserialize out of stable memory; reads that return a borrow
 /// (`redirect_rules`) hand back the `StableCell`'s in-memory cached value for
 /// free.
+///
+/// Fields are grouped to mirror the `MemoryId` layout above (access control,
+/// asset content, routing, id counters, derived cache).
 pub struct Store {
+    // Access control.
     /// Principals authorized to sync (controllers are always allowed, unstored).
     authorized: StableCell<AuthorizedSet, Mem>,
-    /// Ordered redirect-rule list. Its own cell so a counter bump doesn't
-    /// reserialize it (it can be large; the counters are bumped frequently).
-    redirect_rules: StableCell<RedirectRules, Mem>,
-    /// Monotonic, never-reused sync session id allocator.
-    next_session_id: StableCell<u64, Mem>,
-    /// Monotonic, never-reused chunk-group id allocator.
-    next_content_id: StableCell<u64, Mem>,
+    /// Access-protection settings. `login_page == None` (the default) ⇒ a fully
+    /// public app.
+    protection: StableCell<ProtectionSettings, Mem>,
+    /// Live access tokens keyed by their unique **label** — the management view
+    /// (issue/revoke/list, all O(log n) by label). Empty when protection is off.
+    tokens: StableBTreeMap<String, TokenMeta, Mem>,
+
+    // Asset content.
     /// Per-asset metadata, ordered by key so pagination can range-seek with a
     /// key cursor instead of sorting the keyspace per query.
     metadata: StableBTreeMap<AssetKey, AssetMeta, Mem>,
@@ -126,16 +153,23 @@ pub struct Store {
     /// path stay content-free and the serve path avoid reading every chunk to
     /// locate a range. Freed alongside its content group.
     chunk_certs: StableBTreeMap<ContentChunkKey, ChunkCert, Mem>,
+
+    // Routing.
+    /// Ordered redirect-rule list. Its own cell so a counter bump doesn't
+    /// reserialize it (it can be large; the counters are bumped frequently).
+    redirect_rules: StableCell<RedirectRules, Mem>,
+
+    // Id counters.
+    /// Monotonic, never-reused sync session id allocator.
+    next_session_id: StableCell<u64, Mem>,
+    /// Monotonic, never-reused chunk-group id allocator.
+    next_content_id: StableCell<u64, Mem>,
+
+    // Derived cache.
     /// Cached canonical state hash, recomputed at the end of every final sync
     /// and returned verbatim by the public `state_hash` endpoint. `[0; 32]`
     /// until the first sync finalizes.
     state_hash: StableCell<StateHash, Mem>,
-    /// Access-protection settings. `login_page == None` (the default) ⇒ a fully
-    /// public app.
-    protection: StableCell<ProtectionSettings, Mem>,
-    /// Live access tokens keyed by their unique **label** — the management view
-    /// (issue/revoke/list, all O(log n) by label). Empty when protection is off.
-    tokens: StableBTreeMap<String, TokenMeta, Mem>,
 }
 
 impl Store {
@@ -151,19 +185,24 @@ impl Store {
     pub fn new(memory: DefaultMemoryImpl) -> Self {
         let mm = MemoryManager::init(memory);
         Self {
+            // Access control.
             authorized: StableCell::init(mm.get(AUTHORIZED_MEMORY), AuthorizedSet::default()),
+            protection: StableCell::init(mm.get(PROTECTION_MEMORY), ProtectionSettings::default()),
+            tokens: StableBTreeMap::init(mm.get(TOKENS_MEMORY)),
+            // Asset content.
+            metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
+            content: ChunkStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
+            chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
+            // Routing.
             redirect_rules: StableCell::init(
                 mm.get(REDIRECT_RULES_MEMORY),
                 RedirectRules::default(),
             ),
+            // Id counters.
             next_session_id: StableCell::init(mm.get(NEXT_SESSION_ID_MEMORY), 0),
             next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
-            metadata: StableBTreeMap::init(mm.get(METADATA_MEMORY)),
-            content: ChunkStore::init(mm.get(CONTENT_INDEX_MEMORY), mm.get(CONTENT_DATA_MEMORY)),
-            chunk_certs: StableBTreeMap::init(mm.get(CHUNK_CERT_MEMORY)),
+            // Derived cache.
             state_hash: StableCell::init(mm.get(STATE_HASH_MEMORY), StateHash::default()),
-            protection: StableCell::init(mm.get(PROTECTION_MEMORY), ProtectionSettings::default()),
-            tokens: StableBTreeMap::init(mm.get(TOKENS_MEMORY)),
         }
     }
 
