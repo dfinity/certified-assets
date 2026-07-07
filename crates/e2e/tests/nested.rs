@@ -1,6 +1,6 @@
 //! Deploying from a nested source directory.
 
-use e2e::{icp_cmd, list_assets, setup_project, LocalNetwork};
+use e2e::{LocalNetwork, icp_cmd, list_assets, setup_project};
 
 /// Deploy a fixture whose `dirs` entry is a *nested* path (`src/frontend/dist`).
 /// The host preopens it under a multi-segment WASI guest name; the plugin's scan

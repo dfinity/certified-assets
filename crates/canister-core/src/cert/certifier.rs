@@ -32,12 +32,12 @@ use ic_certification::{AsHashTree, Hash};
 use ic_representation_independent_hash::Value;
 
 use super::primitives::{
-    response_hash, AssetKey, AssetPath, CertificateExpression, CertifiedResponses, HashTreePath,
-    NestedTreeKey, RequestHash, ResponseHash,
+    AssetKey, AssetPath, CertificateExpression, CertifiedResponses, HashTreePath, NestedTreeKey,
+    RequestHash, ResponseHash, response_hash,
 };
 use crate::asset::{
-    certificate_expression_for, headers_for, range_certificate_expression_for, range_response_hash,
-    response_hashes_for, AssetMeta, EncodingMeta,
+    AssetMeta, EncodingMeta, certificate_expression_for, headers_for,
+    range_certificate_expression_for, range_response_hash, response_hashes_for,
 };
 use crate::http::{HeaderField, HttpResponse};
 use crate::protection::ProtectionResponse;
@@ -123,10 +123,10 @@ impl Certifier {
     /// (`protection == None`) are untouched.
     pub fn effective_headers(&self, store: &Store, meta: &AssetMeta) -> Vec<(String, String)> {
         let mut headers = meta.headers.clone();
-        if let Some(cookie) = &self.env_cookie {
-            if crate::asset::is_html_content_type(&meta.content_type) {
-                headers.push(("set-cookie".to_string(), cookie.clone()));
-            }
+        if let Some(cookie) = &self.env_cookie
+            && crate::asset::is_html_content_type(&meta.content_type)
+        {
+            headers.push(("set-cookie".to_string(), cookie.clone()));
         }
         if store.protection_enabled() {
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cache-control"));
@@ -430,11 +430,11 @@ impl Certifier {
         store: &Store,
         rule: &RedirectRule,
     ) -> Option<crate::redirect::CertifiedRuleEntry> {
-        if let RulePattern::Exact(src) = &rule.from {
-            if store.contains_asset(src) {
-                // Asset at the source path shadows the rule.
-                return None;
-            }
+        if let RulePattern::Exact(src) = &rule.from
+            && store.contains_asset(src)
+        {
+            // Asset at the source path shadows the rule.
+            return None;
         }
         match rule.status {
             // 200 rewrites and 4xx custom error pages both borrow body + headers

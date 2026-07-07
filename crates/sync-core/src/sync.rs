@@ -9,10 +9,10 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use crate::canister::{
-    authorize_via_proxy, can_sync, execute_operations, list_all_assets, list_all_redirect_rules,
-    start_sync, upload_chunks, version, CanisterCall,
+    CanisterCall, authorize_via_proxy, can_sync, execute_operations, list_all_assets,
+    list_all_redirect_rules, start_sync, upload_chunks, version,
 };
-use asset_prep::{prepare_project, PreparedAsset, PreparedChunk, PreparedProject, MAX_CHUNK_SIZE};
+use asset_prep::{MAX_CHUNK_SIZE, PreparedAsset, PreparedChunk, PreparedProject, prepare_project};
 use wire_types::{
     AssetDetails, CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments,
     Operation, RedirectRule, RulePattern, SetAssetContentArguments, SetAssetHeadersArguments,
@@ -186,7 +186,7 @@ pub fn sync<C: CanisterCall>(
             return Err(format!(
                 "assets sync plugin: expected exactly one input directory, got {}",
                 dirs.len()
-            ))
+            ));
         }
     };
 

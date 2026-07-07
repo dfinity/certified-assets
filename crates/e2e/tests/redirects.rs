@@ -4,7 +4,7 @@
 //! HTTP gateway. The gateway validates the response's `IC-Certificate` before
 //! handing it back, so a successful fetch is also proof of certification.
 
-use e2e::{http_fetch, http_fetch_subdomain, icp_cmd, setup_example, LocalNetwork};
+use e2e::{LocalNetwork, http_fetch, http_fetch_subdomain, icp_cmd, setup_example};
 use reqwest::StatusCode;
 
 /// Deploy the `redirects` example and exercise every response kind:

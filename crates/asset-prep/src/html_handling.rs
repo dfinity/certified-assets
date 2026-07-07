@@ -267,9 +267,11 @@ mod tests {
         let rules = synthesize(&keys);
         // 5 rules for /foo.html, none for the others.
         assert_eq!(rules.len(), 5);
-        assert!(rules
-            .iter()
-            .all(|r| matches!(&r.from, RulePattern::Exact(p) if p.starts_with("/foo"))));
+        assert!(
+            rules
+                .iter()
+                .all(|r| matches!(&r.from, RulePattern::Exact(p) if p.starts_with("/foo")))
+        );
     }
 
     #[test]

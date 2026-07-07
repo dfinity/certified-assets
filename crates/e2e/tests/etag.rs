@@ -5,7 +5,7 @@
 //! 304 — exactly the property that lets ETag work without any gateway-side
 //! support (BOUN-446 was closed "won't do" for this reason).
 
-use e2e::{http_fetch, http_fetch_with_headers, icp_cmd, setup_example, LocalNetwork};
+use e2e::{LocalNetwork, http_fetch, http_fetch_with_headers, icp_cmd, setup_example};
 use reqwest::StatusCode;
 
 fn etag_of(headers: &reqwest::header::HeaderMap) -> String {

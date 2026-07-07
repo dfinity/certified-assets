@@ -11,7 +11,7 @@ use crate::icp::sync_plugin::types as ty;
 
 use candid::{CandidType, Decode, Encode};
 use serde::de::DeserializeOwned;
-use sync_core::{sync, CallType, CanisterCall};
+use sync_core::{CallType, CanisterCall, sync};
 
 struct WasiCall;
 

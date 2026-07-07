@@ -1,10 +1,10 @@
+use crate::UploadChunksArguments;
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
-use crate::UploadChunksArguments;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use candid::Principal;
 use ic_certification_testing::CertificateBuilder;
 use ic_crypto_tree_hash::Digest;
@@ -403,8 +403,10 @@ mod sync {
         let session_id = create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY]),
+            ],
         );
 
         let response = certified_http_request(
@@ -639,7 +641,7 @@ mod hashing {
 
     #[test]
     fn state_hash_matches_manifest_digest_single_chunk() {
-        use state_hash::{digest, Manifest, ManifestAsset, ManifestEncoding};
+        use state_hash::{Manifest, ManifestAsset, ManifestEncoding, digest};
 
         let mut state = State::default();
         let ctx = mock_system_context();
@@ -648,9 +650,11 @@ mod hashing {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/index.html", "text/html")
-                .with_header("Cache-Control", "max-age=60")
-                .with_encoding("identity", vec![BODY])],
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_header("Cache-Control", "max-age=60")
+                    .with_encoding("identity", vec![BODY]),
+            ],
         );
 
         let cached = state.cached_state_hash();
@@ -681,7 +685,7 @@ mod hashing {
 
     #[test]
     fn state_hash_folds_per_chunk_hashes_for_multi_chunk() {
-        use state_hash::{digest, Manifest, ManifestAsset, ManifestChunk, ManifestEncoding};
+        use state_hash::{Manifest, ManifestAsset, ManifestChunk, ManifestEncoding, digest};
 
         let mut state = State::default();
         let ctx = mock_system_context();
@@ -691,8 +695,10 @@ mod hashing {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
 
         let cached = state.cached_state_hash();
@@ -737,8 +743,10 @@ mod hashing {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/a.txt", "text/plain")
-                .with_encoding("identity", vec![b"v2-different"])],
+            vec![
+                AssetBuilder::new("/a.txt", "text/plain")
+                    .with_encoding("identity", vec![b"v2-different"]),
+            ],
         );
         let after = state.cached_state_hash();
 
@@ -757,8 +765,10 @@ mod hashing {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![b"hi"])],
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"hi"]),
+            ],
         );
         let before = state.cached_state_hash();
         assert_ne!(before, [0u8; 32]);
@@ -961,8 +971,10 @@ mod serving {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![INDEX_BODY])],
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![INDEX_BODY]),
+            ],
         );
 
         let state = upgrade(state, memory.clone());
@@ -1098,8 +1110,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
 
         let resp = certified_http_request(
@@ -1127,8 +1141,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1, C2])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1, C2]),
+            ],
         );
         let total = C0.len() + C1.len() + C2.len();
 
@@ -1157,8 +1173,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
         let total = C0.len() + C1.len();
 
@@ -1188,8 +1206,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
         let total = C0.len() + C1.len();
 
@@ -1219,8 +1239,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
         let total = C0.len() + C1.len();
 
@@ -1249,8 +1271,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
 
         // First request: read the canister-managed etag off the 206.
@@ -1287,7 +1311,7 @@ mod range_serving {
             &mut state,
             &ctx,
             vec![
-                AssetBuilder::new("/small.txt", "text/plain").with_encoding("identity", vec![BODY])
+                AssetBuilder::new("/small.txt", "text/plain").with_encoding("identity", vec![BODY]),
             ],
         );
 
@@ -1316,7 +1340,7 @@ mod range_serving {
             &mut state,
             &ctx,
             vec![
-                AssetBuilder::new("/app.js", "text/javascript").with_encoding("gzip", vec![G0, G1])
+                AssetBuilder::new("/app.js", "text/javascript").with_encoding("gzip", vec![G0, G1]),
             ],
         );
         let total = G0.len() + G1.len();
@@ -1349,8 +1373,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
         let total = C0.len() + C1.len();
 
@@ -1383,8 +1409,10 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/big.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
         let total = C0.len() + C1.len();
         let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
@@ -1421,9 +1449,11 @@ mod range_serving {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/app.js", "text/javascript")
-                .with_encoding("identity", vec![I0, I1])
-                .with_encoding("gzip", vec![GZ])],
+            vec![
+                AssetBuilder::new("/app.js", "text/javascript")
+                    .with_encoding("identity", vec![I0, I1])
+                    .with_encoding("gzip", vec![GZ]),
+            ],
         );
 
         // gzip is single-chunk → Range ignored, full 200.
@@ -1500,24 +1530,28 @@ mod assets {
         );
 
         // A non-empty `headers` replaces the headers map.
-        assert!(state
-            .set_asset_headers(SetAssetHeadersArguments {
-                key: "/props.html".into(),
-                headers: vec![("new-header".into(), "value".into())],
-            })
-            .is_ok());
+        assert!(
+            state
+                .set_asset_headers(SetAssetHeadersArguments {
+                    key: "/props.html".into(),
+                    headers: vec![("new-header".into(), "value".into())],
+                })
+                .is_ok()
+        );
         assert_eq!(
             headers_of(&state, "/props.html"),
             vec![("new-header".to_string(), "value".to_string())],
         );
 
         // An empty `headers` clears the headers map.
-        assert!(state
-            .set_asset_headers(SetAssetHeadersArguments {
-                key: "/props.html".into(),
-                headers: vec![],
-            })
-            .is_ok());
+        assert!(
+            state
+                .set_asset_headers(SetAssetHeadersArguments {
+                    key: "/props.html".into(),
+                    headers: vec![],
+                })
+                .is_ok()
+        );
         assert!(headers_of(&state, "/props.html").is_empty());
     }
 
@@ -1530,8 +1564,10 @@ mod assets {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY])],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![FILE_BODY]),
+            ],
         );
 
         assert!(
@@ -1893,9 +1929,11 @@ mod certification {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY])
+                    .with_header("Access-Control-Allow-Origin", "*"),
+            ],
         );
 
         let response = certified_http_request(
@@ -1922,9 +1960,11 @@ mod certification {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![UPDATED_BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![UPDATED_BODY])
+                    .with_header("Access-Control-Allow-Origin", "*"),
+            ],
         );
 
         let response = certified_http_request(
@@ -1952,9 +1992,11 @@ mod certification {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("etag", "my-etag")],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY])
+                    .with_header("etag", "my-etag"),
+            ],
         );
 
         let response = certified_http_request(
@@ -1986,8 +2028,10 @@ mod certification {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY]),
+            ],
         );
 
         // Matching etag -> certified 304, empty body, no streaming.
@@ -2027,9 +2071,11 @@ mod certification {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY])
+                    .with_header("Access-Control-Allow-Origin", "*"),
+            ],
         );
 
         let response = certified_http_request(
@@ -2060,9 +2106,11 @@ mod certification {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("gzip", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("gzip", vec![BODY])
+                    .with_header("Access-Control-Allow-Origin", "*"),
+            ],
         );
 
         let response = certified_http_request(
@@ -2208,10 +2256,12 @@ mod redirect_rules {
             collected.extend(page);
         }
         assert_eq!(collected.len(), total);
-        assert!(collected
-            .iter()
-            .enumerate()
-            .all(|(i, r)| r.to == format!("/to-{i}")));
+        assert!(
+            collected
+                .iter()
+                .enumerate()
+                .all(|(i, r)| r.to == format!("/to-{i}"))
+        );
     }
 
     #[test]
@@ -2423,8 +2473,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &mock_system_context(),
-            vec![AssetBuilder::new("/foo.html", "text/html")
-                .with_encoding("identity", vec![BODY_V1])],
+            vec![
+                AssetBuilder::new("/foo.html", "text/html")
+                    .with_encoding("identity", vec![BODY_V1]),
+            ],
         );
         let v1 = certified_http_request(&state, RequestBuilder::get("/foo").build());
         assert_eq!(v1.status_code, 200);
@@ -2435,8 +2487,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &mock_system_context(),
-            vec![AssetBuilder::new("/foo.html", "text/html")
-                .with_encoding("identity", vec![BODY_V2])],
+            vec![
+                AssetBuilder::new("/foo.html", "text/html")
+                    .with_encoding("identity", vec![BODY_V2]),
+            ],
         );
         let v2 = certified_http_request(&state, RequestBuilder::get("/foo").build());
         assert_eq!(v2.body.as_ref(), BODY_V2);
@@ -2466,8 +2520,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/bar.html", "text/html")
-                .with_encoding("identity", vec![RULE_TARGET])],
+            vec![
+                AssetBuilder::new("/bar.html", "text/html")
+                    .with_encoding("identity", vec![RULE_TARGET]),
+            ],
         );
         commit(
             &mut state,
@@ -2490,8 +2546,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/foo", "text/html")
-                .with_encoding("identity", vec![SOURCE_ASSET])],
+            vec![
+                AssetBuilder::new("/foo", "text/html")
+                    .with_encoding("identity", vec![SOURCE_ASSET]),
+            ],
         );
         let via_asset = certified_http_request(&state, RequestBuilder::get("/foo").build());
         assert_eq!(via_asset.body.as_ref(), SOURCE_ASSET);
@@ -2511,8 +2569,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/404.html", "text/html")
-                .with_encoding("identity", vec![PAGE_BODY])],
+            vec![
+                AssetBuilder::new("/404.html", "text/html")
+                    .with_encoding("identity", vec![PAGE_BODY]),
+            ],
         );
         commit(
             &mut state,
@@ -2544,8 +2604,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/410.html", "text/html")
-                .with_encoding("identity", vec![PAGE_BODY])],
+            vec![
+                AssetBuilder::new("/410.html", "text/html")
+                    .with_encoding("identity", vec![PAGE_BODY]),
+            ],
         );
         commit(
             &mut state,
@@ -2598,7 +2660,7 @@ mod redirect_rules {
             &mut state,
             &system_context,
             vec![
-                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![BODY])
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![BODY]),
             ],
         );
 
@@ -2620,8 +2682,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![INDEX])],
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![INDEX]),
+            ],
         );
 
         // No rule → certified built-in 404 on a missing path.
@@ -2695,8 +2759,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/404.html", "text/html")
-                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+            vec![
+                AssetBuilder::new("/404.html", "text/html")
+                    .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"]),
+            ],
         );
         for status in [404u16, 410] {
             let err = commit(
@@ -2724,8 +2790,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/large.bin", "application/octet-stream")
-                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+            vec![
+                AssetBuilder::new("/large.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"]),
+            ],
         );
         commit(
             &mut state,
@@ -2753,8 +2821,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/large.bin", "application/octet-stream")
-                .with_encoding("identity", vec![C0, C1])],
+            vec![
+                AssetBuilder::new("/large.bin", "application/octet-stream")
+                    .with_encoding("identity", vec![C0, C1]),
+            ],
         );
         commit(
             &mut state,
@@ -2802,8 +2872,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &ctx,
-            vec![AssetBuilder::new("/404.html", "text/html")
-                .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"])],
+            vec![
+                AssetBuilder::new("/404.html", "text/html")
+                    .with_encoding("identity", vec![b"chunk-zero", b"chunk-one!"]),
+            ],
         );
         // Install the rule directly via state (bypassing the op guard) to model
         // the "target grew multi-chunk later" ordering.
@@ -2953,7 +3025,9 @@ mod redirect_rules {
 
         assert_eq!(identity_response.status_code, 200);
         assert_eq!(identity_response.body.as_ref(), INDEX_BODY);
-        assert!(certificate_header.contains("expr_path=:2dn3g2lodHRwX2V4cHJqaW5kZXguaHRtbGM8JD4=:"));
+        assert!(
+            certificate_header.contains("expr_path=:2dn3g2lodHRwX2V4cHJqaW5kZXguaHRtbGM8JD4=:")
+        );
 
         let fallback_response = certified_http_request(
             &state,
@@ -3156,8 +3230,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY])],
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![FILE_BODY]),
+            ],
         );
         set_exact_rewrite_rule(&mut state, "/contents", "/contents.html");
 
@@ -3167,8 +3243,10 @@ mod redirect_rules {
         create_assets(
             &mut state,
             &system_context,
-            vec![AssetBuilder::new("/contents", "text/html")
-                .with_encoding("identity", vec![FILE_BODY_2])],
+            vec![
+                AssetBuilder::new("/contents", "text/html")
+                    .with_encoding("identity", vec![FILE_BODY_2]),
+            ],
         );
 
         let asset_wins = certified_http_request(&state, RequestBuilder::get("/contents").build());
@@ -3469,8 +3547,10 @@ mod env_cookie {
         create_assets(
             &mut state,
             &ctx,
-            vec![html_asset("/page.html", b"<html></html>")
-                .with_header("Set-Cookie", "session=xyz; Path=/")],
+            vec![
+                html_asset("/page.html", b"<html></html>")
+                    .with_header("Set-Cookie", "session=xyz; Path=/"),
+            ],
         );
         state.refresh_env(&env_with(&[("PUBLIC_X", "1")]));
 
@@ -3525,10 +3605,12 @@ mod env_cookie {
         state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "one")]));
         let r1 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         let cookie1 = all_headers(&r1, "set-cookie")[0].to_string();
-        assert!(parse_like_client(&cookie1)
-            .1
-            .get("PUBLIC_X")
-            .is_some_and(|v| v == "one"));
+        assert!(
+            parse_like_client(&cookie1)
+                .1
+                .get("PUBLIC_X")
+                .is_some_and(|v| v == "one")
+        );
 
         // Capturing the *same* env again is a no-op: still certified, unchanged.
         state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "one")]));
@@ -3541,10 +3623,12 @@ mod env_cookie {
         let r3 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         let cookie3 = all_headers(&r3, "set-cookie")[0].to_string();
         assert_ne!(cookie1, cookie3);
-        assert!(parse_like_client(&cookie3)
-            .1
-            .get("PUBLIC_X")
-            .is_some_and(|v| v == "two"));
+        assert!(
+            parse_like_client(&cookie3)
+                .1
+                .get("PUBLIC_X")
+                .is_some_and(|v| v == "two")
+        );
 
         let mut stale = r3.clone();
         for (h, v) in stale.headers.iter_mut() {

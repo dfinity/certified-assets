@@ -61,13 +61,13 @@ fn parse_line(body: &str) -> Result<RedirectRule, String> {
         n if n < 3 => {
             return Err(format!(
                 "expected '<from> <to> <status>' (3 fields), got {n}"
-            ))
+            ));
         }
         n => {
             return Err(format!(
                 "expected '<from> <to> <status>' (3 fields), got {n}; \
                  extra fields are not supported (no headers, conditions, or query-string match)"
-            ))
+            ));
         }
     }
     let from_tok = tokens[0];

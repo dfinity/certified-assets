@@ -19,8 +19,8 @@
 //! submodule (see [`crate::state`]).
 
 use crate::cert::{
-    build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
-    response_hash, CertificateExpression, NestedTreeKey,
+    CertificateExpression, NestedTreeKey, build_ic_certificate_expression_from_headers,
+    build_ic_certificate_expression_header, response_hash,
 };
 use crate::http::HttpRequest;
 use candid::CandidType;

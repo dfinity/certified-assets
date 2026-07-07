@@ -8,7 +8,7 @@
 //! response reaches the test, so a successful fetch that also carries the
 //! cookie is proof the cookie is part of the certified response.
 
-use e2e::{http_fetch, icp_cmd, setup_example, LocalNetwork};
+use e2e::{LocalNetwork, http_fetch, icp_cmd, setup_example};
 use reqwest::StatusCode;
 
 fn set_cookies(headers: &reqwest::header::HeaderMap) -> Vec<String> {

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
 mod version;
-pub use version::{Version, VERSION};
+pub use version::{VERSION, Version};
 
 /// Identifies an in-progress sync. Sequential and monotonic across the
 /// canister's whole lifetime, so a session id is never reused — calls carrying

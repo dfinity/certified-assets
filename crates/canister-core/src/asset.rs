@@ -12,11 +12,11 @@
 //! [`crate::state::State`], which owns the chunk store.
 
 use crate::cert::{
-    build_ic_certificate_expression_from_headers_and_encoding,
-    build_ic_certificate_expression_header, response_hash, CertificateExpression, ResponseHash,
+    CertificateExpression, ResponseHash, build_ic_certificate_expression_from_headers_and_encoding,
+    build_ic_certificate_expression_header, response_hash,
 };
 use ic_representation_independent_hash::Value;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, HashMap};
@@ -205,9 +205,11 @@ pub fn response_hashes_for(
     response_hashes.insert(200, response_hash_200);
     response_hashes.insert(304, response_hash_304);
 
-    debug_assert!(STATUS_CODES_TO_CERTIFY
-        .iter()
-        .all(|code| response_hashes.contains_key(code)));
+    debug_assert!(
+        STATUS_CODES_TO_CERTIFY
+            .iter()
+            .all(|code| response_hashes.contains_key(code))
+    );
 
     response_hashes
 }

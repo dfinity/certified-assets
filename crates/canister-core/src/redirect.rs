@@ -1,8 +1,9 @@
 //! User-supplied redirect/rewrite/error rules expressed as `_redirects` entries.
 
 use crate::cert::{
+    AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
     build_ic_certificate_expression_from_headers, build_ic_certificate_expression_header,
-    response_hash, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey,
+    response_hash,
 };
 use http::{HeaderName, HeaderValue, StatusCode};
 use ic_representation_independent_hash::Value;

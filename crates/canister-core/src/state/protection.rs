@@ -11,11 +11,11 @@
 //! (`token_index`) lives on `State` and is read here.
 
 use super::State;
-use crate::cert::{build_ic_certificate_expression_header, AssetPath, HashTreePath};
+use crate::cert::{AssetPath, HashTreePath, build_ic_certificate_expression_header};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::{
-    access_cookie_values, parse_form_token, token_id, ProtectionResponse, ProtectionStatus,
-    TokenInfo, TokenMeta,
+    ProtectionResponse, ProtectionStatus, TokenInfo, TokenMeta, access_cookie_values,
+    parse_form_token, token_id,
 };
 use serde_bytes::ByteBuf;
 
@@ -105,15 +105,14 @@ impl State {
         now: u64,
     ) -> HttpResponse {
         let location = AssetPath::from(login_page).asset_hash_path_root();
-        if let Some(value) = parse_form_token(req.body.as_ref()) {
-            if self
+        if let Some(value) = parse_form_token(req.body.as_ref())
+            && self
                 .token_index
                 .get(&token_id(&value))
                 .is_some_and(|&expires_at| expires_at > now)
-            {
-                let resp = ProtectionResponse::redeem_success(&value);
-                return self.serve_protection_response(&resp, login_page, &location, certificate);
-            }
+        {
+            let resp = ProtectionResponse::redeem_success(&value);
+            return self.serve_protection_response(&resp, login_page, &location, certificate);
         }
         let resp = ProtectionResponse::redeem_failure();
         self.serve_protection_response(&resp, login_page, &location, certificate)

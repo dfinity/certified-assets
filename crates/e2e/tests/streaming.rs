@@ -1,4 +1,4 @@
-use e2e::{http_fetch_with_headers, icp_cmd, setup_example, LocalNetwork};
+use e2e::{LocalNetwork, http_fetch_with_headers, icp_cmd, setup_example};
 use reqwest::StatusCode;
 use std::fs;
 

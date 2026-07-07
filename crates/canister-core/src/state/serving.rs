@@ -8,7 +8,7 @@
 //! built in [`super::protection`].
 
 use super::State;
-use crate::asset::{headers_for, range_headers_for, AssetMeta, EncodingMeta};
+use crate::asset::{AssetMeta, EncodingMeta, headers_for, range_headers_for};
 use crate::http::{HeaderField, HttpRequest, HttpResponse};
 use ic_certification::Hash;
 use percent_encoding::percent_decode_str;
@@ -423,7 +423,7 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::{url_decode, UrlDecodeError};
+    use super::{UrlDecodeError, url_decode};
 
     #[test]
     fn check_url_decode() {

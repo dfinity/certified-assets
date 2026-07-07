@@ -10,7 +10,7 @@
 //! (`recipe_basic`), `build` (`recipe_build_step`), and `metadata`
 //! (`recipe_metadata`).
 
-use e2e::{icp_cmd, list_assets, setup_recipe_project, LocalNetwork};
+use e2e::{LocalNetwork, icp_cmd, list_assets, setup_recipe_project};
 
 /// `dir` only: deploy through the recipe and confirm the asset is served.
 #[test]

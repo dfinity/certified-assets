@@ -14,11 +14,11 @@
 //! `cert`.
 
 use super::nested_tree::NestedTree;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use candid::CandidType;
-use ic_certification::merge_hash_trees;
 pub use ic_certification::HashTree;
-use ic_representation_independent_hash::{representation_independent_hash, Value};
+use ic_certification::merge_hash_trees;
+use ic_representation_independent_hash::{Value, representation_independent_hash};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::borrow::Borrow;

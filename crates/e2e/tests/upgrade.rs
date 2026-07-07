@@ -6,7 +6,7 @@
 //! certified-response tree. This test proves an in-place upgrade preserves the
 //! assets and that they still serve with a valid certificate afterward.
 
-use e2e::{http_fetch, icp_cmd, list_assets, setup_example, AssetDetails, LocalNetwork};
+use e2e::{AssetDetails, LocalNetwork, http_fetch, icp_cmd, list_assets, setup_example};
 use reqwest::StatusCode;
 
 fn sorted_assets(project: &std::path::Path) -> Vec<AssetDetails> {

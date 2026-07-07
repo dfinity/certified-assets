@@ -26,7 +26,7 @@ use crate::http::HttpRequest;
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, ExecuteOperationsProgress};
-use canbench_rs::{bench, bench_fn, BenchResult};
+use canbench_rs::{BenchResult, bench, bench_fn};
 use candid::Principal;
 use ic_stable_structures::DefaultMemoryImpl;
 use serde_bytes::ByteBuf;

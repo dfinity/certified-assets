@@ -18,11 +18,11 @@ impl State {
         // If protection is on but the login page asset isn't present, the asset
         // loop above didn't re-assert its redeem responses — do it explicitly so
         // the redeem endpoint survives the upgrade even in the degraded state.
-        if let Some(login_page) = self.protection_login_page() {
-            if !self.store.contains_asset(&login_page) {
-                self.certifier
-                    .reassert_login_responses(&self.store, &login_page);
-            }
+        if let Some(login_page) = self.protection_login_page()
+            && !self.store.contains_asset(&login_page)
+        {
+            self.certifier
+                .reassert_login_responses(&self.store, &login_page);
         }
     }
 
