@@ -61,6 +61,36 @@ The user-facing side of all this — clean URLs, redirects, headers, compression
 ETag/304 — is documented under [`docs/`](docs/overview.md). The deeper "why" lives in
 [Under the hood](docs/how-it-works.md).
 
+## Inside `canister-core`
+
+The crate is organized into three layers, each with a deliberately narrow public
+surface so the ones above can't reach into the ones below:
+
+- [`store/`](crates/canister-core/src/store/) — the **durable** layer. `Store` is
+  the sole owner of everything persisted in stable memory via `ic-stable-structures`
+  (the authorized set, redirect rules, per-asset metadata, content chunks, tokens,
+  the cached state hash) and the only place that touches a `StableCell`/
+  `StableBTreeMap` or the `MemoryId` layout. Content bytes go through a private
+  `chunks` submodule.
+- [`cert/`](crates/canister-core/src/cert/) — the **certification** layer.
+  `Certifier` owns the derived certified-response tree, the per-rule certified
+  entries, and the env cookie, plus the policy that keeps each certified leaf
+  byte-identical to the served response. Its Merkle-tree primitives stay private;
+  only a small vocabulary of addressing/hashing helpers is re-exported.
+- [`state/`](crates/canister-core/src/state/) — the **orchestrator**. `State`
+  composes one `Store` and one `Certifier` (plus transient upload/session state and
+  the hot-path token index) and holds all the behavior, split across per-concern
+  submodules: `assets`, `rules`, `env`, `hashing`, `serving`, `sync`, `protection`,
+  and `upgrade`. Every `impl State` block lives here, so the composed pieces stay
+  private to this module tree.
+
+The crate's own [`lib.rs`](crates/canister-core/src/lib.rs) holds the one `State`
+instance and the entrypoints that forward to it; the thin
+[`canister`](crates/canister/) wasm wrapper just re-exposes those as ICP endpoints.
+There is no `pre_upgrade`/`post_upgrade` serialize step — durable state lives in
+`store/` and survives upgrades untouched, and `post_upgrade` only rebuilds the derived
+heap state (the certified tree) from it.
+
 ## Verifying contents
 
 Certification proves each response matches what the canister *committed to*; the
@@ -85,7 +115,11 @@ reported number. User-facing details: [Verifying contents](docs/verifying-conten
 
 - **Canister behavior** (serving, certification, permissions, stable state, the
   cached state hash) → [`crates/canister-core/src/`](crates/canister-core/src/),
-  tested in [`tests.rs`](crates/canister-core/src/tests.rs).
+  layered into [`store/`](crates/canister-core/src/store/) (durable stable-memory
+  state), [`cert/`](crates/canister-core/src/cert/) (the certified-response tree),
+  and [`state/`](crates/canister-core/src/state/) (the `State` orchestrator, split
+  into per-concern submodules) — see [Inside `canister-core`](#inside-canister-core).
+  Tested in [`state/tests.rs`](crates/canister-core/src/state/tests.rs).
 - **Local `dist/` preparation** (scanning, encoding, `_headers`/`_redirects`,
   html-handling/404, content hashing, the state-hash `Manifest`) →
   [`crates/asset-prep/src/`](crates/asset-prep/src/), with inline `#[cfg(test)]` tests

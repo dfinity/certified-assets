@@ -22,10 +22,10 @@ Tests are organized around these components. Each runs independently.
 
 ## Canister (`canister-core`)
 
-- **Location**: [`crates/canister-core/src/tests.rs`](../../crates/canister-core/src/tests.rs)
+- **Location**: [`crates/canister-core/src/state/tests.rs`](../../crates/canister-core/src/state/tests.rs) (grouped into submodules by concern)
 - **Run**: `cargo test -p canister-core`
 
-`canister-core` is the library crate behind `canister`. Its unit tests cover all canister behaviors using a mock system context — no live replica needed: asset CRUD, encoding selection, HTTP semantics, certification, permissions, stable state, and streaming.
+`canister-core` is the library crate behind `canister`, layered into `store/` (durable stable-memory state), `cert/` (the certified-response tree), and `state/` (the `State` orchestrator). Its unit tests drive `State` through a mock system context — no live replica needed — and cover all canister behaviors: asset CRUD, encoding selection, HTTP semantics, certification, permissions, stable state, and streaming.
 
 **Add tests here when** you change anything inside `canister-core`: new canister endpoints, modified serving logic, certification changes, permission rules, or upgrade/downgrade behavior.
 
