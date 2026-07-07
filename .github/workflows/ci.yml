@@ -41,6 +41,16 @@ jobs:
       # including the wasm32-unknown-unknown and wasm32-wasip2 targets needed by `icp deploy`.
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+      # nextest runs every test binary under one global scheduler instead of
+      # cargo's binary-by-binary serialization, so the slow e2e tests overlap
+      # the unit tests and keep all cores busy. Download the prebuilt binary
+      # (get.nexte.st serves a per-platform tarball) rather than `cargo install`,
+      # which would compile it from source on every run. Pinned to a version.
+      - name: Install cargo-nextest
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://get.nexte.st/0.9.140/${{ runner.os == 'macOS' && 'mac' || 'linux' }}" \
+            | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
       - name: Install icp CLI
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dfinity/icp-cli/releases/latest/download/icp-cli-installer.sh | sh
       # Required by the recipe e2e test that exercises the `metadata` config
@@ -68,8 +78,8 @@ jobs:
         env:
           ICP_CLI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Run tests
-        run: | # https://github.com/rust-lang/cargo/issues/6669 we have to run ALL tests with two commands
-          cargo test --all-targets --no-fail-fast
+        run: | # nextest doesn't run doctests, so those stay on `cargo test --doc`
+          cargo nextest run --all-targets --no-fail-fast
           cargo test --doc
 
   fmt:
