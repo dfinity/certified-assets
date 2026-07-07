@@ -64,7 +64,9 @@ const REBUILD_ASSET_BYTES: usize = 4 * 1024;
 const FIXED_TS_NS: u64 = 1_700_000_000_000_000_000;
 
 fn ctx() -> SystemContext {
-    SystemContext::new_with_options(FIXED_TS_NS)
+    SystemContext {
+        current_timestamp_ns: FIXED_TS_NS,
+    }
 }
 
 fn caller() -> Principal {
@@ -148,7 +150,7 @@ fn stage_assets(
         let chunk_sha256 = chunk_sha256_of(std::slice::from_ref(&chunk));
         // Chunk ids are the staging slot indices the canister assigns in upload
         // order; one chunk per asset means the next id is the current length.
-        let chunk_id = state.chunks.len() as u64;
+        let chunk_id = state.chunks().len() as u64;
         state
             .upload_chunks(
                 UploadChunksArguments {

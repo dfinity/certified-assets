@@ -24,13 +24,6 @@ impl SystemContext {
             current_timestamp_ns: time(),
         }
     }
-
-    #[cfg(any(test, feature = "canbench-rs"))]
-    pub fn new_with_options(current_timestamp_ns: u64) -> Self {
-        Self {
-            current_timestamp_ns,
-        }
-    }
 }
 
 impl Default for SystemContext {
@@ -89,5 +82,25 @@ impl CanisterEnv {
     /// [`crate::asset::render_env_cookie`].
     pub fn render_cookie(&self) -> String {
         crate::asset::render_env_cookie(&self.root_key, &self.public_vars)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CanisterEnv;
+
+    #[test]
+    fn from_raw_keeps_only_public_vars() {
+        // The `PUBLIC_` prefix is the frontend-safe boundary: only those vars
+        // survive `from_raw`; the root key is irrelevant to this filter.
+        let env = CanisterEnv::from_raw(
+            vec![],
+            [
+                ("PUBLIC_A".to_string(), "1".to_string()),
+                ("SECRET_KEY".to_string(), "leak".to_string()),
+                ("PATH".to_string(), "/bin".to_string()),
+            ],
+        );
+        assert_eq!(env.public_vars.keys().collect::<Vec<_>>(), vec!["PUBLIC_A"]);
     }
 }

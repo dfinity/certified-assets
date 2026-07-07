@@ -1,19 +1,13 @@
 //! This module declares canister methods expected by the assets canister client.
 mod asset;
-mod blob_store;
-mod certification;
+mod cert;
 mod http;
-mod nested_tree;
 mod protection;
 mod redirect;
 mod runtime;
-mod stable_store;
 mod state;
+mod store;
 mod sync;
-mod url;
-
-#[cfg(test)]
-mod tests;
 
 #[cfg(feature = "canbench-rs")]
 mod benches;
@@ -130,15 +124,15 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
         trap("Only support V2 certification");
     }
     let certificate = data_certificate().unwrap_or_else(|| trap("no data certificate available"));
-    // `time()` is readable in a (non-replicated) query; the access-protection
-    // gate uses it to reject expired tokens. Unlike `root_key`/`env_var_*` (which
+    // `time()` is readable in a (non-replicated) query; access protection
+    // uses it to reject expired tokens. Unlike `root_key`/`env_var_*` (which
     // trap in a query and are snapshotted on the update path), `time` is fine here.
     let now = time();
 
     STATE.with_borrow(|s| s.http_request(req, &certificate, now))
 }
 
-/// Turns access protection on with `login_page` as the gate-exempt login surface.
+/// Turns access protection on with `login_page` as the exempt login surface.
 /// Controller-guarded at the endpoint. Idempotent at the same page; see
 /// [`State::enable_protection`].
 pub fn enable_protection(login_page: String) {

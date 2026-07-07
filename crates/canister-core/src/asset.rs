@@ -1,22 +1,60 @@
-//! Pure helpers that derive an asset encoding's certified-response data.
+//! The asset domain: the persisted per-asset metadata types ([`AssetMeta`],
+//! [`EncodingMeta`]) plus the pure helpers that derive an asset encoding's
+//! certified-response data.
 //!
-//! Asset metadata and content now live in stable memory (see
-//! [`crate::stable_store`]); the certificate expression and response hashes are
-//! **not** stored — they are recomputed on demand from the persisted metadata.
-//! These functions take plain data (custom headers, content type, encoding
-//! name, sha256) so the same logic runs both when an encoding is written and
-//! when the certified-response tree is rebuilt after an upgrade. Response
-//! building itself lives on [`crate::state::State`], which owns the chunk store.
+//! Metadata and content live in stable memory; the certificate expression and
+//! response hashes are **not** stored — they are recomputed on demand from the
+//! metadata here. The derivation helpers take plain data (custom headers,
+//! content type, encoding name, sha256) so the same logic runs both when an
+//! encoding is written and when the certified-response tree is rebuilt after an
+//! upgrade. How these types are encoded into stable memory (their `Storable`
+//! impls) lives with the [`crate::store::Store`]; response building lives on
+//! [`crate::state::State`], which owns the chunk store.
 
-use crate::certification::{
+use crate::cert::{
     build_ic_certificate_expression_from_headers_and_encoding,
     build_ic_certificate_expression_header, response_hash, CertificateExpression, ResponseHash,
 };
-use crate::url::url_encode;
 use ic_representation_independent_hash::Value;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, HashMap};
 use wire_types::Encoding;
+
+/// Percent-encodes every non-alphanumeric byte (the `NON_ALPHANUMERIC` set),
+/// matching what `decodeURIComponent` reverses on the client. Used to render the
+/// `ic_env` cookie payload: it encodes the `&`/`=` separators so they survive
+/// transport inside a single cookie value and are restored client-side.
+fn url_encode(url: &str) -> String {
+    utf8_percent_encode(url, NON_ALPHANUMERIC).to_string()
+}
+
+/// Per-asset metadata. Content bytes live in the chunk store, grouped by each
+/// encoding's `content_id`. Persisted as CBOR (see the `Storable` impl in
+/// [`crate::store`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssetMeta {
+    pub content_type: String,
+    pub headers: Vec<(String, String)>,
+    pub encodings: BTreeMap<Encoding, EncodingMeta>,
+}
+
+/// Per-encoding metadata. The certificate expression and response hashes are
+/// **not** stored — they are recomputed on demand from these fields plus the
+/// asset's `headers`/`content_type`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EncodingMeta {
+    /// Groups this encoding's chunks in the content store.
+    pub content_id: u64,
+    /// Number of chunks, so streaming tokens can be built without a range scan.
+    pub num_chunks: u32,
+    pub sha256: [u8; 32],
+    /// Total encoded length, i.e. the sum of all chunk lengths. Used as the
+    /// `/total` in a 206 `Content-Range` and to reject out-of-range requests,
+    /// without re-reading the chunks.
+    pub content_len: u64,
+}
 
 /// Status codes we certify for every asset encoding.
 pub const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
@@ -98,7 +136,7 @@ fn effective_headers_with_etag(
 /// for non-identity encodings, the effective headers, and the canister-managed
 /// `etag` (see [`etag_value`]).
 ///
-/// `effective_headers` is [`crate::state::State::effective_headers`]: the asset's
+/// `effective_headers` is [`crate::cert::Certifier::effective_headers`]: the asset's
 /// own `_headers`, plus the canister-injected `ic_env` `set-cookie` on
 /// `text/html` responses. It is therefore **not** just the user's custom headers
 /// — the env cookie is a certified header like any other.
@@ -259,4 +297,50 @@ fn build_headers(
         headers.push((k, v));
     }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_env_cookie, url_encode};
+    use std::collections::BTreeMap;
+
+    /// Client-side `decodeURIComponent`, reproduced for assertions: percent-decodes
+    /// the visible cookie value exactly as the browser does before the lib parses it.
+    fn client_decode(value: &str) -> String {
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn url_encode_escapes_cookie_separators() {
+        assert_eq!(url_encode("a=b&c=d"), "a%3Db%26c%3Dd");
+    }
+
+    #[test]
+    fn render_env_cookie_orders_and_encodes() {
+        let vars = BTreeMap::from([
+            ("PUBLIC_B".to_string(), "2".to_string()),
+            // A value containing `=` must survive: only the structural `&`/`=`
+            // separators are escaped, and the client splits each entry on its
+            // first `=` so the rest of the value is preserved verbatim.
+            ("PUBLIC_A".to_string(), "v=with=eq".to_string()),
+        ]);
+        let rendered = render_env_cookie(&[0xab, 0xcd], &vars);
+
+        assert!(rendered.ends_with("; Secure; SameSite=None; Partitioned"));
+        let value = rendered
+            .strip_prefix("ic_env=")
+            .unwrap()
+            .strip_suffix("; Secure; SameSite=None; Partitioned")
+            .unwrap();
+        // Separators are percent-encoded, so the payload rides in one cookie value.
+        assert!(!value.contains('&') && !value.contains('='));
+        // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
+        assert_eq!(
+            client_decode(value),
+            "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2"
+        );
+    }
 }

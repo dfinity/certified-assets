@@ -1,4 +1,4 @@
-//! Content blob store: raw chunk bytes in a contiguous stable region, indexed by
+//! Content chunk store: raw chunk bytes in a contiguous stable region, indexed by
 //! `(content_id, chunk_index)`.
 //!
 //! ## Why not `StableBTreeMap<ContentChunkKey, Vec<u8>>`
@@ -18,7 +18,7 @@
 //!
 //! ## Design
 //!
-//! - **Index** — `StableBTreeMap<ContentChunkKey, BlobRef>`. Tiny fixed entries
+//! - **Index** — `StableBTreeMap<ContentChunkKey, ChunkRef>`. Tiny fixed entries
 //!   (12-byte key, 12-byte `(offset, len)` value), so the BTree itself is cheap to
 //!   traverse and wastes no pages.
 //! - **Data** — a dedicated raw stable [`Memory`] region holding chunk bytes
@@ -26,7 +26,7 @@
 //!   one contiguous `write` + one index insert.
 //! - **Allocator** — a derived-heap free list (address-ordered, coalescing). It is
 //!   *not* persisted: like the certification tree, it is rebuilt from the index on
-//!   construction ([`BlobStore::init`] calls [`BlobStore::rebuild`]), so there is no
+//!   construction ([`ChunkStore::init`] calls [`ChunkStore::rebuild`]), so there is no
 //!   new on-stable format to keep upgrade-safe.
 //!
 //! Chunks are immutable once written and freed as a group (per `content_id`) when
@@ -38,19 +38,43 @@ use std::borrow::Cow;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{Memory, StableBTreeMap, Storable};
 
-use crate::stable_store::ContentChunkKey;
-
 const WASM_PAGE_SIZE: u64 = 65536;
+
+/// Key into the content chunk store, encoded big-endian (`content_id` then
+/// `chunk_index`) as a fixed 12-byte key. `StableBTreeMap` orders keys by their
+/// serialized bytes, so big-endian makes byte order match numeric order: a
+/// range scan over one `content_id` returns its chunks in `chunk_index` order.
+/// (Its `Storable` byte encoding lives in [`crate::store`].)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ContentChunkKey {
+    pub(super) content_id: u64,
+    pub(super) chunk_index: u32,
+}
+
+impl ContentChunkKey {
+    pub(super) fn new(content_id: u64, chunk_index: u32) -> Self {
+        Self {
+            content_id,
+            chunk_index,
+        }
+    }
+
+    /// Inclusive bounds covering every chunk of `content_id`, for range scans
+    /// and range deletes: `range(ContentChunkKey::range(cid))`.
+    pub(super) fn range(content_id: u64) -> std::ops::RangeInclusive<Self> {
+        Self::new(content_id, 0)..=Self::new(content_id, u32::MAX)
+    }
+}
 
 /// A fixed 12-byte `(offset, len)` reference into the data region. `len` is a
 /// `u32` because a single chunk never exceeds `MAX_CHUNK_SIZE` (~1.9 MB).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BlobRef {
-    pub offset: u64,
-    pub len: u32,
+struct ChunkRef {
+    offset: u64,
+    len: u32,
 }
 
-impl Storable for BlobRef {
+impl Storable for ChunkRef {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         let mut buf = [0u8; 12];
         buf[..8].copy_from_slice(&self.offset.to_le_bytes());
@@ -63,9 +87,9 @@ impl Storable for BlobRef {
     }
 
     fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        BlobRef {
-            offset: u64::from_le_bytes(bytes[..8].try_into().expect("12-byte BlobRef")),
-            len: u32::from_le_bytes(bytes[8..12].try_into().expect("12-byte BlobRef")),
+        ChunkRef {
+            offset: u64::from_le_bytes(bytes[..8].try_into().expect("12-byte ChunkRef")),
+            len: u32::from_le_bytes(bytes[8..12].try_into().expect("12-byte ChunkRef")),
         }
     }
 
@@ -83,8 +107,8 @@ struct FreeSeg {
 }
 
 /// Raw chunk bytes in a stable region, keyed by `(content_id, chunk_index)`.
-pub struct BlobStore<M: Memory> {
-    index: StableBTreeMap<ContentChunkKey, BlobRef, M>,
+pub(super) struct ChunkStore<M: Memory> {
+    index: StableBTreeMap<ContentChunkKey, ChunkRef, M>,
     data: M,
     /// Address-ordered, coalesced free runs strictly below `bump`. Invariants:
     /// sorted by `offset`, no two segments adjacent or overlapping, every segment
@@ -94,11 +118,11 @@ pub struct BlobStore<M: Memory> {
     bump: u64,
 }
 
-impl<M: Memory> BlobStore<M> {
+impl<M: Memory> ChunkStore<M> {
     /// Builds the store over its index and data regions, rebuilding the allocator
     /// from whatever the index already holds. A fresh region yields an empty
     /// allocator; an upgraded one reconstructs the exact free layout.
-    pub fn init(index_mem: M, data_mem: M) -> Self {
+    pub(super) fn init(index_mem: M, data_mem: M) -> Self {
         let mut store = Self {
             index: StableBTreeMap::init(index_mem),
             data: data_mem,
@@ -109,9 +133,9 @@ impl<M: Memory> BlobStore<M> {
         store
     }
 
-    /// Reconstructs `free` + `bump` from the index: sort every live blob by
+    /// Reconstructs `free` + `bump` from the index: sort every live chunk by
     /// offset, treat the gaps between them as free, and set `bump` to the end of
-    /// the highest blob. O(n log n) in the chunk count; runs once per init.
+    /// the highest chunk. O(n log n) in the chunk count; runs once per init.
     fn rebuild(&mut self) {
         let mut used: Vec<(u64, u64)> = self
             .index
@@ -144,7 +168,7 @@ impl<M: Memory> BlobStore<M> {
     // floor). It is sound — see the SAFETY note — and mirrors ic-stable-structures'
     // own `read_to_vec`; `clippy::uninit_vec` flags the idiom generically.
     #[allow(clippy::uninit_vec)]
-    pub fn get(&self, content_id: u64, chunk_index: u32) -> Option<Vec<u8>> {
+    pub(super) fn get(&self, content_id: u64, chunk_index: u32) -> Option<Vec<u8>> {
         let r = self
             .index
             .get(&ContentChunkKey::new(content_id, chunk_index))?;
@@ -161,9 +185,9 @@ impl<M: Memory> BlobStore<M> {
     }
 
     /// Writes one chunk's bytes and records its index entry. If the key already
-    /// holds a blob it is freed first (defensive — the live path always allocates
+    /// holds a chunk it is freed first (defensive — the live path always allocates
     /// a fresh, never-reused `content_id`, so keys are not overwritten in place).
-    pub fn insert(&mut self, content_id: u64, chunk_index: u32, bytes: &[u8]) {
+    pub(super) fn insert(&mut self, content_id: u64, chunk_index: u32, bytes: &[u8]) {
         let key = ContentChunkKey::new(content_id, chunk_index);
         if let Some(old) = self.index.get(&key) {
             self.free_region(old.offset, old.len as u64);
@@ -174,7 +198,7 @@ impl<M: Memory> BlobStore<M> {
         }
         self.index.insert(
             key,
-            BlobRef {
+            ChunkRef {
                 offset,
                 len: bytes.len() as u32,
             },
@@ -183,8 +207,8 @@ impl<M: Memory> BlobStore<M> {
 
     /// Frees every chunk belonging to `content_id`, returning their bytes to the
     /// allocator. Mirrors the old range-delete over the content map.
-    pub fn delete_group(&mut self, content_id: u64) {
-        let to_free: Vec<(ContentChunkKey, BlobRef)> = self
+    pub(super) fn delete_group(&mut self, content_id: u64) {
+        let to_free: Vec<(ContentChunkKey, ChunkRef)> = self
             .index
             .range(ContentChunkKey::range(content_id))
             .map(|e| e.into_pair())
@@ -275,10 +299,10 @@ mod tests {
     use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
     use ic_stable_structures::DefaultMemoryImpl;
 
-    fn store() -> BlobStore<ic_stable_structures::memory_manager::VirtualMemory<DefaultMemoryImpl>>
+    fn store() -> ChunkStore<ic_stable_structures::memory_manager::VirtualMemory<DefaultMemoryImpl>>
     {
         let mm = MemoryManager::init(DefaultMemoryImpl::default());
-        BlobStore::init(mm.get(MemoryId::new(0)), mm.get(MemoryId::new(1)))
+        ChunkStore::init(mm.get(MemoryId::new(0)), mm.get(MemoryId::new(1)))
     }
 
     #[test]
@@ -352,7 +376,7 @@ mod tests {
         s.insert(4, 0, &vec![4u8; 1000]);
         assert!(s.free.is_empty());
         assert_eq!(s.bump, 3000);
-        // Verify the new blob landed in the reused hole and reads back.
+        // Verify the new chunk landed in the reused hole and reads back.
         assert_eq!(s.get(4, 0), Some(vec![4u8; 1000]));
         assert_eq!(s.get(1, 0), Some(vec![1u8; 1000]));
         assert_eq!(s.get(3, 0), Some(vec![3u8; 1000]));
@@ -433,7 +457,7 @@ mod tests {
 
         // Populate, then poke holes.
         {
-            let mut s = BlobStore::init(mm.get(idx), mm.get(dat));
+            let mut s = ChunkStore::init(mm.get(idx), mm.get(dat));
             for i in 0..5u64 {
                 s.insert(i, 0, &vec![i as u8; 1000]);
             }
@@ -457,7 +481,7 @@ mod tests {
 
         // Re-open over the same memory (simulates an upgrade): the allocator must
         // come back identical from the index alone.
-        let s2 = BlobStore::init(mm.get(idx), mm.get(dat));
+        let s2 = ChunkStore::init(mm.get(idx), mm.get(dat));
         assert_eq!(
             s2.free,
             vec![
@@ -478,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn overwriting_a_key_frees_the_old_blob() {
+    fn overwriting_a_key_frees_the_old_chunk() {
         let mut s = store();
         s.insert(1, 0, &vec![1u8; 1000]);
         s.insert(1, 0, &vec![2u8; 1000]); // same key, new bytes

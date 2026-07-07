@@ -3,7 +3,6 @@ use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
 use crate::state::State;
 use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
-use crate::url::{url_decode, UrlDecodeError};
 use crate::UploadChunksArguments;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use candid::Principal;
@@ -25,7 +24,7 @@ use wire_types::{
 const MAX_CERT_TIME_OFFSET_NS: u128 = 300_000_000_000;
 
 /// Fixed "now" (ns) used as the `http_request` time argument in tests. Matches
-/// [`mock_system_context`]; the access-protection gate compares token expiry
+/// [`mock_system_context`]; access protection compares token expiry
 /// against it.
 const TEST_NOW: u64 = 100_000_000_000;
 
@@ -47,7 +46,9 @@ fn upgrade(state: State, memory: DefaultMemoryImpl) -> State {
 }
 
 fn mock_system_context() -> SystemContext {
-    SystemContext::new_with_options(100_000_000_000)
+    SystemContext {
+        current_timestamp_ns: TEST_NOW,
+    }
 }
 
 /// Synchronous test driver for incremental computations.
@@ -131,7 +132,7 @@ fn certified_http_request(state: &State, request: HttpRequest) -> HttpResponse {
     certified_http_request_at(state, request, TEST_NOW)
 }
 
-/// Like [`certified_http_request`] but with an explicit gate "now" (ns), for
+/// Like [`certified_http_request`] but with an explicit access-protection "now" (ns), for
 /// exercising token expiry. The certificate itself is still minted at real
 /// wall-clock time inside [`verify_response`].
 fn certified_http_request_at(state: &State, request: HttpRequest, now: u64) -> HttpResponse {
@@ -313,7 +314,7 @@ fn assemble_create_assets_and_set_contents_operations(
             // Chunk ids are not returned; they're the slot indices the canister
             // assigns in upload order. Mirror that: ids run from the current
             // staging length for as many chunks as we upload.
-            let base = state.chunks.len() as u64;
+            let base = state.chunks().len() as u64;
             let chunk_ids: Vec<u64> = (base..base + chunks.len() as u64).collect();
             let mut hasher = sha2::Sha256::new();
             for chunk in &chunks {
@@ -349,450 +350,6 @@ fn lookup_header<'a>(response: &'a HttpResponse, header: &str) -> Option<&'a str
         .headers
         .iter()
         .find_map(|(h, v)| h.eq_ignore_ascii_case(header).then_some(v.as_str()))
-}
-
-#[test]
-fn can_create_assets_using_batch_api() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    let session_id = create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/contents.html", "text/html").with_encoding("identity", vec![BODY])],
-    );
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), BODY);
-
-    // The finalizing execute_operations ended the sync, so the session id is no
-    // longer valid for further chunk uploads.
-    let error_msg = state
-        .upload_chunks(
-            UploadChunksArguments {
-                session_id,
-                chunks: vec![ByteBuf::new()],
-            },
-            &system_context,
-        )
-        .unwrap_err();
-
-    let expected = "no active sync";
-    assert!(
-        error_msg.contains(expected),
-        "expected '{expected}' error, got: {error_msg}"
-    );
-}
-
-// ───────── state hash ─────────
-
-/// Whole-encoding SHA-256 over `chunks` concatenated, as the plugin computes it.
-fn whole_sha(chunks: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = sha2::Sha256::new();
-    for chunk in chunks {
-        hasher.update(chunk);
-    }
-    hasher.finalize().into()
-}
-
-fn chunk_sha(chunk: &[u8]) -> [u8; 32] {
-    sha2::Sha256::digest(chunk).into()
-}
-
-#[test]
-fn state_hash_is_zero_before_any_sync() {
-    let state = State::default();
-    assert_eq!(state.cached_state_hash(), [0u8; 32]);
-}
-
-#[test]
-fn state_hash_matches_manifest_digest_single_chunk() {
-    use state_hash::{digest, Manifest, ManifestAsset, ManifestEncoding};
-
-    let mut state = State::default();
-    let ctx = mock_system_context();
-
-    const BODY: &[u8] = b"hello world";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_header("Cache-Control", "max-age=60")
-            .with_encoding("identity", vec![BODY])],
-    );
-
-    let cached = state.cached_state_hash();
-    assert_ne!(cached, [0u8; 32], "the hash is cached after a final sync");
-
-    // Independently rebuild the manifest the offline verifier would and digest
-    // it with the `state-hash` crate. This is the cross-implementation contract:
-    // the canister's streamed hash over stored state must equal the one-shot
-    // digest over the same logical content.
-    let expected = digest(&Manifest {
-        assets: vec![ManifestAsset {
-            key: "/index.html".to_string(),
-            content_type: "text/html".to_string(),
-            headers: vec![("Cache-Control".to_string(), "max-age=60".to_string())],
-            encodings: vec![ManifestEncoding::single_chunk(
-                Encoding::Identity,
-                whole_sha(&[BODY]),
-                BODY.len() as u64,
-            )],
-        }],
-        redirect_rules: vec![],
-    });
-    assert_eq!(cached, expected);
-
-    // Staged finalization (HashingState) and the one-shot recompute agree.
-    assert_eq!(state.recompute_state_hash(), cached);
-}
-
-#[test]
-fn state_hash_folds_per_chunk_hashes_for_multi_chunk() {
-    use state_hash::{digest, Manifest, ManifestAsset, ManifestChunk, ManifestEncoding};
-
-    let mut state = State::default();
-    let ctx = mock_system_context();
-
-    const C0: &[u8] = b"first-chunk-bytes";
-    const C1: &[u8] = b"second-chunk";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-
-    let cached = state.cached_state_hash();
-    let expected = digest(&Manifest {
-        assets: vec![ManifestAsset {
-            key: "/big.bin".to_string(),
-            content_type: "application/octet-stream".to_string(),
-            headers: vec![],
-            encodings: vec![ManifestEncoding::multi_chunk(
-                Encoding::Identity,
-                whole_sha(&[C0, C1]),
-                vec![
-                    ManifestChunk {
-                        len: C0.len() as u32,
-                        sha256: chunk_sha(C0),
-                    },
-                    ManifestChunk {
-                        len: C1.len() as u32,
-                        sha256: chunk_sha(C1),
-                    },
-                ],
-            )],
-        }],
-        redirect_rules: vec![],
-    });
-    assert_eq!(cached, expected);
-}
-
-#[test]
-fn state_hash_changes_when_content_changes() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/a.txt", "text/plain").with_encoding("identity", vec![b"v1"])],
-    );
-    let before = state.cached_state_hash();
-
-    // Re-sync the same key with different bytes.
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/a.txt", "text/plain")
-            .with_encoding("identity", vec![b"v2-different"])],
-    );
-    let after = state.cached_state_hash();
-
-    assert_ne!(
-        before, after,
-        "different content yields a different state hash"
-    );
-}
-
-#[test]
-fn state_hash_survives_upgrade() {
-    let memory = DefaultMemoryImpl::default();
-    let mut state = State::new(memory.clone());
-    let ctx = mock_system_context();
-
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![b"hi"])],
-    );
-    let before = state.cached_state_hash();
-    assert_ne!(before, [0u8; 32]);
-
-    // The cached hash lives in stable memory, so it survives the upgrade without
-    // a recompute (no sync runs during post_upgrade_rebuild).
-    let restored = upgrade(state, memory);
-    assert_eq!(restored.cached_state_hash(), before);
-}
-
-/// Drives an `asset-prep` `PreparedProject` into `state` the way a real sync
-/// does: CreateAsset + per-encoding upload/SetAssetContent + SetRedirectRules,
-/// in one finalizing call. Mirrors the sync plugin's build_operations/pack so
-/// the resulting stored state is what a real deploy would leave.
-fn apply_prepared(state: &mut State, ctx: &SystemContext, prepared: &asset_prep::PreparedProject) {
-    let session_id = start_session(state, ctx);
-    let mut operations = vec![];
-    for pa in &prepared.assets {
-        operations.push(Operation::CreateAsset(CreateAssetArguments {
-            key: pa.key.clone(),
-            content_type: pa.content_type.clone(),
-            headers: pa.headers.clone(),
-        }));
-        for enc in &pa.encodings {
-            // Stage this encoding's chunks; ids are their staging slots.
-            let base = state.chunks.len() as u64;
-            let chunk_ids: Vec<u64> = (base..base + enc.chunks.len() as u64).collect();
-            let chunks: Vec<ByteBuf> = enc
-                .chunks
-                .iter()
-                .map(|c| ByteBuf::from(c.data.clone()))
-                .collect();
-            state
-                .upload_chunks(UploadChunksArguments { session_id, chunks }, ctx)
-                .unwrap();
-            operations.push(Operation::SetAssetContent(SetAssetContentArguments {
-                key: pa.key.clone(),
-                encoding: enc.encoding,
-                chunk_ids,
-                sha256: ByteBuf::from(enc.sha256.to_vec()),
-                chunk_sha256: enc
-                    .chunks
-                    .iter()
-                    .map(|c| ByteBuf::from(c.sha256.to_vec()))
-                    .collect(),
-            }));
-        }
-    }
-    operations.push(Operation::SetRedirectRules(
-        wire_types::SetRedirectRulesArguments {
-            rules: prepared.redirect_rules.clone(),
-        },
-    ));
-    execute_all(state, session_id, operations, ctx);
-}
-
-/// The decisive cross-implementation contract: a canister populated by a sync of
-/// `dist/` reports the **same** state hash the offline verifier computes from
-/// that same `dist/`. Covers real compressed encodings, a multi-file project,
-/// redirect rules, and the injected branded 404 — the cases the unit tests of
-/// each side don't exercise together.
-#[test]
-fn state_hash_matches_asset_prep_over_a_real_dist() {
-    use std::fs;
-
-    let dir = tempfile::tempdir().unwrap();
-    let write = |rel: &str, bytes: &[u8]| {
-        let path = dir.path().join(rel);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, bytes).unwrap();
-    };
-    // A compressible HTML page (gets gzip + brotli), a CSS file, an
-    // incompressible binary, plus `_headers` and `_redirects`.
-    write(
-        "index.html",
-        "<!DOCTYPE html><h1>hello</h1>\n".repeat(50).as_bytes(),
-    );
-    write("assets/app.css", "body{color:red}\n".repeat(80).as_bytes());
-    write(
-        "img/logo.png",
-        &(0u8..=255).cycle().take(4096).collect::<Vec<u8>>(),
-    );
-    write("_headers", b"/*\n  X-Frame-Options: DENY\n");
-    write("_redirects", b"/old /new 301\n");
-
-    let dir_str = dir.path().to_str().unwrap();
-    let prepared = asset_prep::prepare_project(dir_str).expect("prepare project");
-
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    apply_prepared(&mut state, &ctx, &prepared);
-
-    let canister_hash = state.cached_state_hash();
-    let verifier_hash = asset_prep::state_hash_for_dir(dir_str).expect("verifier hash");
-    assert_eq!(
-        hex::encode(canister_hash),
-        hex::encode(verifier_hash),
-        "canister state hash must equal the offline verifier's hash of the same dist/"
-    );
-    assert_ne!(canister_hash, [0u8; 32]);
-}
-
-#[test]
-fn serve_correct_encoding() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const IDENTITY_BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    const GZIP_BODY: &[u8] = b"this is 'gzipped' content";
-    const BROTLI_BODY: &[u8] = b"this is 'brotli' content";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![IDENTITY_BODY])
-                .with_encoding("gzip", vec![GZIP_BODY])
-                .with_encoding("br", vec![BROTLI_BODY]),
-            AssetBuilder::new("/no-encoding.html", "text/html"),
-        ],
-    );
-
-    // Identity is served verbatim and carries NO `content-encoding` header (the
-    // `identity` token is not a valid response value).
-    let identity_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "identity")
-            .with_certificate_version(2)
-            .build(),
-    );
-    assert_eq!(identity_response.status_code, 200);
-    assert_eq!(identity_response.body.as_ref(), IDENTITY_BODY);
-    assert_eq!(lookup_header(&identity_response, "content-encoding"), None);
-    assert!(lookup_header(&identity_response, "IC-Certificate").is_some());
-
-    let gzip_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "gzip")
-            .with_certificate_version(2)
-            .build(),
-    );
-    assert_eq!(gzip_response.status_code, 200);
-    assert_eq!(gzip_response.body.as_ref(), GZIP_BODY);
-    assert_eq!(
-        lookup_header(&gzip_response, "content-encoding"),
-        Some("gzip")
-    );
-    assert!(lookup_header(&gzip_response, "IC-Certificate").is_some());
-
-    // Brotli is selected and labelled `br`, including from a weighted, multi-coding
-    // Accept-Encoding header (the `;q=` parsing that previously matched nothing).
-    let brotli_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "br;q=1.0, gzip;q=0.8")
-            .with_certificate_version(2)
-            .build(),
-    );
-    assert_eq!(brotli_response.status_code, 200);
-    assert_eq!(brotli_response.body.as_ref(), BROTLI_BODY);
-    assert_eq!(
-        lookup_header(&brotli_response, "content-encoding"),
-        Some("br")
-    );
-    assert!(lookup_header(&brotli_response, "IC-Certificate").is_some());
-
-    // An asset with no encodings has nothing to serve → the built-in certified
-    // 404 (no rule occupies `<*>`, so the fallback is certified there).
-    let no_encoding_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/no-encoding.html")
-            .with_header("Accept-Encoding", "identity")
-            .with_certificate_version(2)
-            .build(),
-    );
-    assert_eq!(no_encoding_response.status_code, 404);
-    assert_eq!(no_encoding_response.body.as_ref(), "not found".as_bytes());
-    assert!(lookup_header(&no_encoding_response, "IC-Certificate").is_some());
-}
-
-#[test]
-fn serve_fallback_via_rule() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    const OTHER_BODY: &[u8] = b"<!DOCTYPE html><html>other content</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![INDEX_BODY]),
-            AssetBuilder::new("/deep/nested/folder/index.html", "text/html")
-                .with_encoding("identity", vec![OTHER_BODY]),
-            AssetBuilder::new("/deep/nested/folder/a_file.html", "text/html")
-                .with_encoding("identity", vec![OTHER_BODY]),
-            AssetBuilder::new("/deep/nested/sibling/another_file.html", "text/html")
-                .with_encoding("identity", vec![OTHER_BODY]),
-            AssetBuilder::new("/deep/nested/sibling/a_file.html", "text/html")
-                .with_encoding("identity", vec![OTHER_BODY]),
-        ],
-    );
-
-    // SPA-style catch-all: a single root subtree rule replaces what used to
-    // be the built-in `FALLBACK_FILE` mechanism.
-    set_root_spa_rule(&mut state, "/index.html");
-
-    let identity_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/index.html")
-            .with_header("Accept-Encoding", "identity")
-            .with_certificate_version(2)
-            .build(),
-    );
-    let certificate_header = lookup_header(&identity_response, "IC-Certificate").unwrap();
-
-    assert_eq!(identity_response.status_code, 200);
-    assert_eq!(identity_response.body.as_ref(), INDEX_BODY);
-    assert!(certificate_header.contains("expr_path=:2dn3g2lodHRwX2V4cHJqaW5kZXguaHRtbGM8JD4=:"));
-
-    let fallback_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/nonexistent")
-            .with_header("Accept-Encoding", "identity")
-            .with_certificate_version(2)
-            .build(),
-    );
-    let certificate_header = lookup_header(&fallback_response, "IC-Certificate").unwrap();
-    assert_eq!(fallback_response.status_code, 200);
-    assert_eq!(fallback_response.body.as_ref(), INDEX_BODY);
-    // The rule lives at the root `<*>`, matching the previous built-in
-    // fallback's expr_path.
-    assert!(certificate_header.contains("expr_path=:2dn3gmlodHRwX2V4cHJjPCo+:"));
-
-    let valid_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/deep/nested/folder/a_file.html")
-            .with_header("Accept-Encoding", "identity")
-            .with_certificate_version(2)
-            .build(),
-    );
-    assert_eq!(valid_response.status_code, 200);
-    assert_eq!(valid_response.body.as_ref(), OTHER_BODY);
-
-    let fallback_response = certified_http_request(
-        &state,
-        RequestBuilder::get("/deep/nested/folder/nonexistent")
-            .with_header("Accept-Encoding", "identity")
-            .with_certificate_version(2)
-            .build(),
-    );
-    assert_eq!(fallback_response.status_code, 200);
-    assert_eq!(fallback_response.body.as_ref(), INDEX_BODY);
 }
 
 fn set_root_spa_rule(state: &mut State, target: &str) {
@@ -833,1350 +390,1232 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
     execute_all(state, session_id, ops, &system_context);
 }
 
-#[test]
-fn second_sync_rejected_while_first_is_active() {
-    // A different principal cannot start a sync while another's is in progress
-    // and not yet stale.
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    let owner_a = some_principal();
-    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
-    assert_ne!(owner_a, owner_b);
-
-    let StartSyncResult::Started { .. } = state.start_sync(owner_a, &system_context) else {
-        panic!("first start_sync should succeed");
-    };
-
-    match state.start_sync(owner_b, &system_context) {
-        StartSyncResult::Busy { owner, .. } => assert_eq!(owner, owner_a),
-        other => panic!("expected Busy, got {other:?}"),
-    }
-}
-
-#[test]
-fn owner_can_reclaim_their_own_sync_immediately() {
-    // The same principal restarting (e.g. retrying a failed deploy) reclaims
-    // its own non-stale sync and gets a fresh, monotonically larger id.
-    let mut state = State::default();
-    let system_context = mock_system_context();
-    let owner = some_principal();
-
-    let id1 = start_session(&mut state, &system_context);
-    let id2 = match state.start_sync(owner, &system_context) {
-        StartSyncResult::Started { session_id } => session_id,
-        other => panic!("expected Started, got {other:?}"),
-    };
-    assert!(id2 > id1, "session ids must be monotonic: {id2} > {id1}");
-}
-
-#[test]
-fn stale_sync_can_be_reclaimed_by_another_principal() {
-    // After the idle timeout, a different principal may take over an abandoned
-    // sync. Reclaiming clears the previous session's staged chunks.
-    let mut state = State::default();
-    let mut system_context = mock_system_context();
-    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
-
-    let id1 = start_session(&mut state, &system_context);
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    state
-        .upload_chunks(
-            UploadChunksArguments {
-                session_id: id1,
-                chunks: vec![ByteBuf::from(BODY.to_vec())],
-            },
-            &system_context,
-        )
-        .unwrap();
-    assert!(!state.chunks.is_empty(), "chunk should be staged");
-
-    // Advance past the idle timeout, then a different principal reclaims it.
-    system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS + 1;
-    match state.start_sync(owner_b, &system_context) {
-        StartSyncResult::Started { session_id } => assert!(session_id > id1),
-        other => panic!("expected Started, got {other:?}"),
-    }
-    assert!(
-        state.chunks.is_empty(),
-        "reclaim must drop the previous session's chunks"
-    );
-
-    // The old session id is no longer valid.
-    let err = state
-        .upload_chunks(
-            UploadChunksArguments {
-                session_id: id1,
-                chunks: vec![ByteBuf::from(BODY.to_vec())],
-            },
-            &system_context,
-        )
-        .unwrap_err();
-    assert!(err.contains("no active sync"), "got: {err}");
-}
-
-#[test]
-fn active_sync_idle_clock_resets_on_each_call() {
-    // Staleness is measured from the last call, not from sync start: a deploy
-    // that keeps making calls must never become reclaimable, however long it
-    // runs in total. Without the touch_session reset a different principal
-    // could steal an actively-progressing sync mid-flight.
-    let mut state = State::default();
-    let mut system_context = mock_system_context();
-    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
-
-    let session_id = start_session(&mut state, &system_context);
-
-    // Advance to just under the timeout, then make a call that touches the
-    // session and resets its idle clock.
-    system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
-    state
-        .upload_chunks(
-            UploadChunksArguments {
-                session_id,
-                chunks: vec![ByteBuf::from(b"x".to_vec())],
-            },
-            &system_context,
-        )
-        .unwrap();
-
-    // Advance again by just under the timeout. Total elapsed since start now
-    // far exceeds the timeout, but only `TIMEOUT - 1` has passed since the
-    // last call, so the sync is still active and a different principal is
-    // refused rather than allowed to reclaim it.
-    system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
-    match state.start_sync(owner_b, &system_context) {
-        StartSyncResult::Busy { owner, .. } => assert_eq!(owner, some_principal()),
-        other => panic!("expected Busy while the sync is being actively touched, got {other:?}"),
-    }
-}
-
-#[test]
-fn reclaim_boundary_is_inclusive_at_the_idle_timeout() {
-    // The reclaim guard is `idle >= SYNC_IDLE_TIMEOUT_NANOS`: a different
-    // principal is refused one nanosecond before the timeout and reclaims at
-    // exactly the timeout.
-    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
-
-    // Just under the timeout: still Busy.
-    {
-        let mut state = State::default();
-        let mut system_context = mock_system_context();
-        start_session(&mut state, &system_context);
-        system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
-        match state.start_sync(owner_b, &system_context) {
-            StartSyncResult::Busy { .. } => {}
-            other => panic!("expected Busy one ns before the timeout, got {other:?}"),
-        }
-    }
-
-    // Exactly at the timeout: reclaimable.
-    {
-        let mut state = State::default();
-        let mut system_context = mock_system_context();
-        let id1 = start_session(&mut state, &system_context);
-        system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS;
-        match state.start_sync(owner_b, &system_context) {
-            StartSyncResult::Started { session_id } => assert!(session_id > id1),
-            other => panic!("expected Started at exactly the timeout, got {other:?}"),
-        }
-    }
-}
-
-#[test]
-fn busy_reports_holders_idle_seconds() {
-    // The Busy variant reports how long the holder has been idle, in whole
-    // seconds (sub-second nanos truncated toward zero).
-    let mut state = State::default();
-    let mut system_context = mock_system_context();
-    let owner_b = Principal::from_text("aaaaa-aa").unwrap();
-
-    start_session(&mut state, &system_context);
-
-    // 5.5s of idle time, still under the timeout; the reported value truncates
-    // to whole seconds.
-    system_context.current_timestamp_ns += 5_500_000_000;
-    match state.start_sync(owner_b, &system_context) {
-        StartSyncResult::Busy {
-            owner,
-            idle_for_secs,
-        } => {
-            assert_eq!(owner, some_principal());
-            assert_eq!(idle_for_secs, 5);
-        }
-        other => panic!("expected Busy, got {other:?}"),
-    }
-}
-
-#[test]
-fn returns_index_file_for_missing_assets_via_rule() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>Index</html>";
-    const OTHER_BODY: &[u8] = b"<!DOCTYPE html><html>Other</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![INDEX_BODY]),
-            AssetBuilder::new("/other.html", "text/html")
-                .with_encoding("identity", vec![OTHER_BODY]),
-        ],
-    );
-    // Without a rule the canister no longer auto-falls-back to /index.html.
-    set_root_spa_rule(&mut state, "/index.html");
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/missing.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), INDEX_BODY);
-}
-
-#[test]
-fn no_implicit_aliasing_without_rules() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/foo.html", "text/html").with_encoding("identity", vec![BODY]),
-            AssetBuilder::new("/blog/index.html", "text/html")
-                .with_encoding("identity", vec![BODY]),
-        ],
-    );
-
-    for missing in &["/foo", "/foo/", "/blog", "/blog/"] {
-        let response = state.http_request(RequestBuilder::get(*missing).build(), &[], TEST_NOW);
-        assert_eq!(
-            response.status_code, 404,
-            "expected 404 for {missing}, got {}",
-            response.status_code
-        );
-    }
-    let response = certified_http_request(&state, RequestBuilder::get("/foo.html").build());
-    assert_eq!(response.status_code, 200);
-}
-
-#[test]
-fn preserves_state_on_stable_roundtrip() {
-    let memory = DefaultMemoryImpl::default();
-    let mut state = State::new(memory.clone());
-    let system_context = mock_system_context();
-
-    const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>Index</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/index.html", "text/html")
-            .with_encoding("identity", vec![INDEX_BODY])],
-    );
-
-    let state = upgrade(state, memory.clone());
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/index.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), INDEX_BODY);
-}
-
-#[test]
-fn authorize_and_deauthorize_toggle_membership() {
-    let mut state = State::default();
-    let p = some_principal();
-
-    assert!(!state.is_authorized(&p));
-
-    state.authorize(p);
-    assert!(state.is_authorized(&p));
-    assert_eq!(state.list_authorized(), vec![p]);
-
-    // Re-authorizing is idempotent (set semantics).
-    state.authorize(p);
-    assert_eq!(state.list_authorized().len(), 1);
-
-    state.deauthorize(&p);
-    assert!(!state.is_authorized(&p));
-    assert!(state.list_authorized().is_empty());
-}
-
-#[test]
-fn authorized_set_survives_stable_roundtrip() {
-    let memory = DefaultMemoryImpl::default();
-    let mut state = State::new(memory.clone());
-    let p = some_principal();
-    state.authorize(p);
-
-    let restored = upgrade(state, memory.clone());
-
-    assert!(restored.is_authorized(&p));
-}
-
-// ───────── HTTP 206 range serving ─────────
-
-/// A plain GET (no Range) of a multi-chunk asset returns chunk 0 as a 206 — this
-/// is what drives the gateway's reassembly into a full 200.
-#[test]
-fn multichunk_plain_get_serves_206_first_chunk() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"first-chunk-bytes--";
-    const C1: &[u8] = b"second-chunk";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 206);
-    assert_eq!(resp.body.as_ref(), C0);
-    let total = C0.len() + C1.len();
-    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
-    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
-}
-
-/// A Range request whose start is a chunk boundary returns exactly that chunk.
-#[test]
-fn range_request_returns_containing_chunk() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"AAAAAAAAAA";
-    const C1: &[u8] = b"BBBBBBB";
-    const C2: &[u8] = b"CCC";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1, C2])],
-    );
-    let total = C0.len() + C1.len() + C2.len();
-
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("Range", format!("bytes={}-", C0.len()))
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 206);
-    assert_eq!(resp.body.as_ref(), C1);
-    let cr = format!("bytes {}-{}/{}", C0.len(), C0.len() + C1.len() - 1, total);
-    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
-}
-
-/// A Range start in the middle of a chunk snaps down to that chunk's boundary:
-/// the whole containing chunk is returned (sub-chunk slices can't be certified).
-#[test]
-fn range_request_mid_chunk_snaps_to_chunk_start() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"AAAAAAAAAA";
-    const C1: &[u8] = b"BBBBBBB";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-    let total = C0.len() + C1.len();
-
-    // Ask for a byte 2 into chunk 1; expect the whole of chunk 1 back.
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("Range", format!("bytes={}-", C0.len() + 2))
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 206);
-    assert_eq!(resp.body.as_ref(), C1);
-    let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
-    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
-}
-
-/// A range that spans multiple chunks returns only the chunk containing its
-/// start; the client (or gateway) fetches the rest with follow-up requests.
-#[test]
-fn range_spanning_chunks_returns_single_chunk() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"AAAAAAAAAA";
-    const C1: &[u8] = b"BBBBBBB";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-    let total = C0.len() + C1.len();
-
-    // Closed range covering the whole asset → still just chunk 0.
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("Range", format!("bytes=0-{}", total - 1))
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 206);
-    assert_eq!(resp.body.as_ref(), C0);
-    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
-    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
-}
-
-/// An unsatisfiable range (start past the end) ignores the Range and serves the
-/// asset as a 206 chunk 0 — never a truncated 200.
-#[test]
-fn out_of_range_serves_full_asset_via_206() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"AAAAAAAAAA";
-    const C1: &[u8] = b"BBBBBBB";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-    let total = C0.len() + C1.len();
-
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("Range", format!("bytes={}-", total + 100))
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 206);
-    assert_eq!(resp.body.as_ref(), C0);
-    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
-    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
-}
-
-/// A conditional request takes precedence over Range: a matching `If-None-Match`
-/// yields a 304 even when a `Range` header is present.
-#[test]
-fn conditional_request_with_range_returns_304() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"AAAAAAAAAA";
-    const C1: &[u8] = b"BBBBBBB";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-
-    // First request: read the canister-managed etag off the 206.
-    let first = certified_http_request(
-        &state,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .build(),
-    );
-    let etag = lookup_header(&first, "etag")
-        .expect("206 carries an etag")
-        .to_string();
-
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("If-None-Match", &etag)
-            .with_header("Range", "bytes=10-")
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 304);
-    assert!(resp.body.as_ref().is_empty());
-}
-
-/// A single-chunk asset ignores Range and serves the full body as a 200.
-#[test]
-fn single_chunk_asset_ignores_range() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const BODY: &[u8] = b"a small body that fits in one chunk";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/small.txt", "text/plain").with_encoding("identity", vec![BODY])],
-    );
-
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/small.txt")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("Range", "bytes=5-")
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 200);
-    assert_eq!(resp.body.as_ref(), BODY);
-    assert_eq!(lookup_header(&resp, "content-range"), None);
-}
-
-/// Range serving works for a non-identity encoding: the 206 carries
-/// `content-encoding` and ranges over the *encoded* bytes.
-#[test]
-fn range_request_non_identity_encoding() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const G0: &[u8] = b"\x1f\x8b\x08\x00gzip-chunk-0";
-    const G1: &[u8] = b"gzip-chunk-1";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/app.js", "text/javascript").with_encoding("gzip", vec![G0, G1])],
-    );
-    let total = G0.len() + G1.len();
-
-    let resp = certified_http_request(
-        &state,
-        RequestBuilder::get("/app.js")
-            .with_header("Accept-Encoding", "gzip")
-            .with_header("Range", format!("bytes={}-", G0.len()))
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 206);
-    assert_eq!(resp.body.as_ref(), G1);
-    assert_eq!(lookup_header(&resp, "content-encoding"), Some("gzip"));
-    let cr = format!("bytes {}-{}/{}", G0.len(), total - 1, total);
-    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
-}
-
-/// After an upgrade, multi-chunk assets still serve 206s with correct
-/// `Content-Range` — proof the per-chunk cert data (`chunk_certs` + `content_len`)
-/// is persisted and `post_upgrade_rebuild` re-certifies the 206s content-free.
-#[test]
-fn range_serving_survives_upgrade() {
-    let memory = DefaultMemoryImpl::default();
-    let mut state = State::new(memory.clone());
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"AAAAAAAAAA";
-    const C1: &[u8] = b"BBBBBBB";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-    let total = C0.len() + C1.len();
-
-    let restored = upgrade(state, memory.clone());
-
-    let resp = certified_http_request(
-        &restored,
-        RequestBuilder::get("/big.bin")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("Range", format!("bytes={}-", C0.len()))
-            .build(),
-    );
-
-    assert_eq!(resp.status_code, 206);
-    assert_eq!(resp.body.as_ref(), C1);
-    let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
-    assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
-}
-
-/// Range forms the canister doesn't honour — a suffix range (`bytes=-N`), a
-/// multi-range list, and a syntactically broken spec — all parse to "no range"
-/// and serve the asset as a certified 206 chunk 0 (never a truncated 200), which
-/// the gateway reassembles into the full 200.
-#[test]
-fn unhonoured_range_forms_serve_certified_206_chunk_0() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const C0: &[u8] = b"AAAAAAAAAA";
-    const C1: &[u8] = b"BBBBBBB";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/big.bin", "application/octet-stream")
-            .with_encoding("identity", vec![C0, C1])],
-    );
-    let total = C0.len() + C1.len();
-    let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
-
-    for range in ["bytes=-500", "bytes=0-1,5-6", "bytes=abc-", "kingdoms=0-"] {
-        let resp = certified_http_request(
-            &state,
-            RequestBuilder::get("/big.bin")
-                .with_header("Accept-Encoding", "identity")
-                .with_header("Range", range)
-                .build(),
-        );
-        assert_eq!(resp.status_code, 206, "range {range:?}");
-        assert_eq!(resp.body.as_ref(), C0, "range {range:?}");
-        assert_eq!(
-            lookup_header(&resp, "content-range"),
-            Some(cr.as_str()),
-            "range {range:?}"
-        );
-    }
-}
-
-/// Range/chunk behaviour follows the *selected* encoding, not the asset. A file
-/// stored as a 2-chunk identity plus a 1-chunk (compressed-below-threshold) gzip
-/// serves a 206 when identity is chosen but a plain 200 when gzip is chosen —
-/// both certified.
-#[test]
-fn range_follows_selected_encoding_chunk_count() {
-    let mut state = State::default();
-    let ctx = mock_system_context();
-    const I0: &[u8] = b"identity-chunk-0--";
-    const I1: &[u8] = b"identity-chunk-1";
-    const GZ: &[u8] = b"\x1f\x8b\x08\x00small-gzip";
-    create_assets(
-        &mut state,
-        &ctx,
-        vec![AssetBuilder::new("/app.js", "text/javascript")
-            .with_encoding("identity", vec![I0, I1])
-            .with_encoding("gzip", vec![GZ])],
-    );
-
-    // gzip is single-chunk → Range ignored, full 200.
-    let gz = certified_http_request(
-        &state,
-        RequestBuilder::get("/app.js")
-            .with_header("Accept-Encoding", "gzip")
-            .with_header("Range", "bytes=4-")
-            .build(),
-    );
-    assert_eq!(gz.status_code, 200);
-    assert_eq!(gz.body.as_ref(), GZ);
-    assert_eq!(lookup_header(&gz, "content-encoding"), Some("gzip"));
-    assert_eq!(lookup_header(&gz, "content-range"), None);
-
-    // identity is two chunks → Range honoured, certified 206.
-    let id = certified_http_request(
-        &state,
-        RequestBuilder::get("/app.js")
-            .with_header("Accept-Encoding", "identity")
-            .with_header("Range", format!("bytes={}-", I0.len()))
-            .build(),
-    );
-    assert_eq!(id.status_code, 206);
-    assert_eq!(id.body.as_ref(), I1);
-    assert_eq!(lookup_header(&id, "content-encoding"), None);
-    let total = I0.len() + I1.len();
-    let cr = format!("bytes {}-{}/{}", I0.len(), total - 1, total);
-    assert_eq!(lookup_header(&id, "content-range"), Some(cr.as_str()));
-}
-
-#[test]
-fn supports_cache_control_via_headers() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html").with_encoding("identity", vec![BODY]),
-            AssetBuilder::new("/cached.html", "text/html")
-                .with_header("Cache-Control", "max-age=604800")
-                .with_encoding("identity", vec![BODY]),
-        ],
-    );
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), BODY);
-    assert!(
-        lookup_header(&response, "Cache-Control").is_none(),
-        "Unexpected Cache-Control header in response: {response:#?}",
-    );
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/cached.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), BODY);
-    assert_eq!(
-        lookup_header(&response, "Cache-Control"),
-        Some("max-age=604800"),
-        "No matching Cache-Control header in response: {response:#?}",
-    );
-}
-
-#[test]
-fn check_url_decode() {
-    assert_eq!(url_decode("/%"), Ok("/%".to_string()));
-    assert_eq!(url_decode("/%%"), Ok("/%%".to_string()));
-    assert_eq!(url_decode("/%e%"), Ok("/%e%".to_string()));
-
-    assert_eq!(url_decode("/%20%a"), Ok("/ %a".to_string()));
-    assert_eq!(url_decode("/%%+a%20+%@"), Ok("/%%+a +%@".to_string()));
-    assert_eq!(
-        url_decode("/has%percent.txt"),
-        Ok("/has%percent.txt".to_string())
-    );
-
-    assert_eq!(url_decode("/%%2"), Ok("/%%2".to_string()));
-    assert_eq!(url_decode("/%C3%A6"), Ok("/æ".to_string()));
-    assert_eq!(url_decode("/%c3%a6"), Ok("/æ".to_string()));
-
-    assert_eq!(url_decode("/a+b+c%20d"), Ok("/a+b+c d".to_string()));
-
-    assert_eq!(
-        url_decode("/capture-d%E2%80%99e%CC%81cran-2023-10-26-a%CC%80.txt"),
-        Ok("/capture-d’écran-2023-10-26-à.txt".to_string())
-    );
-
-    assert_eq!(
-        url_decode("/%FF%FF"),
-        Err(UrlDecodeError::InvalidPercentEncoding)
-    );
-}
-
-#[test]
-fn supports_custom_http_headers() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*"),
-            AssetBuilder::new("/other.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("X-Content-Type-Options", "nosniff"),
-        ],
-    );
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/contents.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), BODY);
-    assert!(
-        lookup_header(&response, "Access-Control-Allow-Origin").is_some(),
-        "Missing Access-Control-Allow-Origin header in response: {response:#?}",
-    );
-    assert!(
-        lookup_header(&response, "Access-Control-Allow-Origin") == Some("*"),
-        "Incorrect value for Access-Control-Allow-Origin header in response: {response:#?}",
-    );
-
-    let response = certified_http_request(
-        &state,
-        RequestBuilder::get("/other.html")
-            .with_header("Accept-Encoding", "gzip,identity")
-            .build(),
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body.as_ref(), BODY);
-    assert!(
-        lookup_header(&response, "X-Content-Type-Options").is_some(),
-        "Missing X-Content-Type-Options header in response: {response:#?}",
-    );
-    assert!(
-        lookup_header(&response, "X-Content-Type-Options") == Some("nosniff"),
-        "Incorrect value for X-Content-Type-Options header in response: {response:#?}",
-    );
-}
-
-#[test]
-fn supports_getting_and_setting_asset_headers() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-
-    const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*"),
-            AssetBuilder::new("/props.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("X-Content-Type-Options", "nosniff"),
-        ],
-    );
-
-    // Headers are reported by `list`, so read them back from there rather than
-    // through a dedicated per-asset query.
-    let headers_of = |state: &State, key: &str| {
-        state
-            .get_asset_details(None)
-            .into_iter()
-            .find(|d| d.key == key)
-            .expect("asset should exist")
-            .headers
-    };
-
-    assert_eq!(
-        headers_of(&state, "/contents.html"),
-        vec![("Access-Control-Allow-Origin".to_string(), "*".to_string())],
-    );
-    assert_eq!(
-        headers_of(&state, "/props.html"),
-        vec![("X-Content-Type-Options".to_string(), "nosniff".to_string())],
-    );
-
-    // A non-empty `headers` replaces the headers map.
-    assert!(state
-        .set_asset_headers(SetAssetHeadersArguments {
-            key: "/props.html".into(),
-            headers: vec![("new-header".into(), "value".into())],
-        })
-        .is_ok());
-    assert_eq!(
-        headers_of(&state, "/props.html"),
-        vec![("new-header".to_string(), "value".to_string())],
-    );
-
-    // An empty `headers` clears the headers map.
-    assert!(state
-        .set_asset_headers(SetAssetHeadersArguments {
-            key: "/props.html".into(),
-            headers: vec![],
-        })
-        .is_ok());
-    assert!(headers_of(&state, "/props.html").is_empty());
-}
-
-#[test]
-fn create_asset_fails_if_asset_exists() {
-    let mut state = State::default();
-    let system_context = mock_system_context();
-    const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/contents.html", "text/html")
-            .with_encoding("identity", vec![FILE_BODY])],
-    );
-
-    assert!(
-        state
-            .create_asset(CreateAssetArguments {
-                key: "/contents.html".to_string(),
-                content_type: "text/html".to_string(),
-                headers: vec![],
-            })
-            .unwrap_err()
-            == "asset already exists"
-    );
-}
-
-#[test]
-fn aliases_via_explicit_rules() {
-    // Migrated from `support_aliases`: what used to be built-in `.html` /
-    // `index.html` aliasing is now expressed as user-supplied 200 rules.
-    let mut state = State::default();
-    let system_context = mock_system_context();
-    const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>index</html>";
-    const SUBDIR_INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>subdir index</html>";
-    const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY]),
-            AssetBuilder::new("/index.html", "text/html")
-                .with_encoding("identity", vec![INDEX_BODY]),
-            AssetBuilder::new("/subdirectory/index.html", "text/html")
-                .with_encoding("identity", vec![SUBDIR_INDEX_BODY]),
-        ],
-    );
-    set_exact_rewrite_rules(
-        &mut state,
-        &[
-            ("/contents", "/contents.html"),
-            ("/", "/index.html"),
-            ("/subdirectory/index", "/subdirectory/index.html"),
-            ("/subdirectory/", "/subdirectory/index.html"),
-            ("/subdirectory", "/subdirectory/index.html"),
-        ],
-    );
-
-    let normal_request =
-        certified_http_request(&state, RequestBuilder::get("/contents.html").build());
-    assert_eq!(normal_request.body.as_ref(), FILE_BODY);
-
-    let alias_add_html = certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(alias_add_html.body.as_ref(), FILE_BODY);
-
-    let root_alias = certified_http_request(&state, RequestBuilder::get("/").build());
-    assert_eq!(root_alias.body.as_ref(), INDEX_BODY);
-
-    let subdirectory_index_alias =
-        certified_http_request(&state, RequestBuilder::get("/subdirectory/index").build());
-    assert_eq!(subdirectory_index_alias.body.as_ref(), SUBDIR_INDEX_BODY);
-
-    let subdirectory_index_alias_2 =
-        certified_http_request(&state, RequestBuilder::get("/subdirectory/").build());
-    assert_eq!(subdirectory_index_alias_2.body.as_ref(), SUBDIR_INDEX_BODY);
-
-    let subdirectory_index_alias_3 =
-        certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
-    assert_eq!(subdirectory_index_alias_3.body.as_ref(), SUBDIR_INDEX_BODY);
-}
-
-#[test]
-fn rule_aliasing_persists_through_upgrade() {
-    // Migrated from `alias_behavior_persists_through_upgrade`: rules survive
-    // the upgrade and serve correctly afterward.
-    let memory = DefaultMemoryImpl::default();
-    let mut state = State::new(memory.clone());
-    let system_context = mock_system_context();
-    const SUBDIR_INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>subdir index</html>";
-    const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![
-            AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![FILE_BODY]),
-            AssetBuilder::new("/subdirectory/index.html", "text/html")
-                .with_encoding("identity", vec![SUBDIR_INDEX_BODY]),
-        ],
-    );
-    // No rule for /contents → no alias to /contents.html (used to be the
-    // "aliasing disabled" path); still install one for the subdirectory.
-    set_exact_rewrite_rule(&mut state, "/subdirectory", "/subdirectory/index.html");
-
-    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[], TEST_NOW);
-    assert_eq!(no_alias.status_code, 404);
-
-    let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
-    assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
-
-    let state = upgrade(state, memory.clone());
-
-    let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[], TEST_NOW);
-    assert_eq!(no_alias.status_code, 404);
-    let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
-    assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
-}
-
-#[test]
-fn rule_aliasing_name_clash() {
-    // Migrated from `aliasing_name_clash`: an asset at the rule's source
-    // shadows the rule.
-    let mut state = State::default();
-    let system_context = mock_system_context();
-    const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
-    const FILE_BODY_2: &[u8] = b"<!DOCTYPE html><html>second body</html>";
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/contents.html", "text/html")
-            .with_encoding("identity", vec![FILE_BODY])],
-    );
-    set_exact_rewrite_rule(&mut state, "/contents", "/contents.html");
-
-    let via_rule = certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(via_rule.body.as_ref(), FILE_BODY);
-
-    create_assets(
-        &mut state,
-        &system_context,
-        vec![AssetBuilder::new("/contents", "text/html")
-            .with_encoding("identity", vec![FILE_BODY_2])],
-    );
-
-    let asset_wins = certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(asset_wins.body.as_ref(), FILE_BODY_2);
-
-    state.delete_asset(DeleteAssetArguments {
-        key: "/contents".to_string(),
-    });
-    state.on_redirect_rules_change();
-
-    let rule_visible_again =
-        certified_http_request(&state, RequestBuilder::get("/contents").build());
-    assert_eq!(rule_visible_again.body.as_ref(), FILE_BODY);
-}
-
-#[test]
-fn headers_cbor_deserialize_from_hashmap_to_btreemap() {
-    // We want to make sure that deserializing from a HashMap to a BTreeMap works
-    // so that frontend canister upgrades don't break
-    for i in 0..100 {
-        let old_headers: HashMap<String, String> = HashMap::from([
-            // Order is not alphabetical on purpose here
-            // to check that the BTreeMap orders them correctly
-            ("c-name".into(), "c-value".into()),
-            ("index".into(), i.to_string()),
-            ("d-name".into(), "d-value".into()),
-            ("b-name".into(), "b-value".into()),
-            ("a-name".into(), "a-value".into()),
-        ]);
-        let mut serialized = Vec::new();
-        ciborium::into_writer(&old_headers, &mut serialized).unwrap();
-        let new_headers: BTreeMap<String, String> = ciborium::from_reader(&serialized[..]).unwrap();
-        // Compare the order to check that the BTreeMap is deterministic
-        assert_eq!(
-            new_headers.into_iter().collect::<Vec<(String, String)>>(),
-            vec![
-                ("a-name".into(), "a-value".into()),
-                ("b-name".into(), "b-value".into()),
-                ("c-name".into(), "c-value".into()),
-                ("d-name".into(), "d-value".into()),
-                ("index".into(), i.to_string()),
-            ]
-        );
-    }
-}
-
-#[test]
-fn headers_candid_hashmap_btreemap_roundtrip() {
-    for i in 0..100 {
-        let old_headers: HashMap<String, String> = HashMap::from([
-            ("a-name".into(), "a-value".into()),
-            ("b-name".into(), "b-value".into()),
-            ("c-name".into(), "c-value".into()),
-            ("d-name".into(), "d-value".into()),
-            ("index".into(), i.to_string()),
-        ]);
-
-        // Deserialize to BTreeMap
-        let old_serialized = candid::encode_one(&old_headers).unwrap();
-        let new_headers: BTreeMap<String, String> = candid::decode_one(&old_serialized).unwrap();
-        assert_eq!(
-            new_headers
-                .clone()
-                .into_iter()
-                .collect::<Vec<(String, String)>>(),
-            vec![
-                ("a-name".into(), "a-value".into()),
-                ("b-name".into(), "b-value".into()),
-                ("c-name".into(), "c-value".into()),
-                ("d-name".into(), "d-value".into()),
-                ("index".into(), i.to_string()),
-            ]
-        );
-
-        // Go back to HashMap
-        let new_serialized = candid::encode_one(new_headers).unwrap();
-        let old_deserialized: HashMap<String, String> =
-            candid::decode_one(&new_serialized).unwrap();
-        assert_eq!(
-            old_deserialized, old_headers,
-            "Old headers don't match, iteration: {i}",
-        );
-    }
-}
-
-#[cfg(test)]
-mod certificate_expression {
-    use super::*;
-    use crate::certification::build_ic_certificate_expression_from_headers_and_encoding;
-    use ic_representation_independent_hash::Value;
-
-    #[test]
-    fn ic_certificate_expression_value_from_headers() {
-        let h = [
-            ("a".into(), Value::String("".into())),
-            ("b".into(), Value::String("".into())),
-            ("c".into(), Value::String("".into())),
-        ]
-        .to_vec();
-        // `Some(value)` certifies a `content-encoding` header (a real encoding,
-        // e.g. `Encoding::Gzip.header_name()` == `Some("gzip")`).
-        let c = build_ic_certificate_expression_from_headers_and_encoding(&h, Some("gzip"));
-        assert_eq!(
-            c.expression,
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "a", "b", "c"]}}}})"#
-        );
-        // `None` — which identity maps to via `Encoding::header_name` —
-        // omits the `content-encoding` header.
-        let c2 = build_ic_certificate_expression_from_headers_and_encoding(&h, None);
-        assert_eq!(
-            c2.expression,
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "a", "b", "c"]}}}})"#
-        );
-    }
-
-    #[test]
-    fn ic_certificate_expression_present_for_new_assets() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-        create_assets(
-            &mut state,
-            &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
-        );
-
-        let response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .build(),
-        );
-
-        assert!(
-            lookup_header(&response, "ic-certificateexpression").is_some(),
-            "Missing ic-certifiedexpression header in response: {response:#?}",
-        );
-        assert_eq!(
-            lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "Access-Control-Allow-Origin", "etag"]}}}})"#,
-            "Missing ic-certifiedexpression header in response: {response:#?}",
-        );
-    }
-
-    #[test]
-    fn ic_certificate_expression_gets_updated_on_asset_headers_update() {
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-
-        create_assets(
-            &mut state,
-            &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("gzip", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
-        );
-
-        let response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .with_certificate_version(2)
-                .build(),
-        );
-
-        assert!(
-            lookup_header(&response, "ic-certificateexpression").is_some(),
-            "Missing ic-certificateexpression header in response: {response:#?}",
-        );
-        assert_eq!(
-            lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "Access-Control-Allow-Origin", "etag"]}}}})"#,
-            "Missing ic-certificateexpression header in response: {response:#?}",
-        );
-
-        state
-            .set_asset_headers(SetAssetHeadersArguments {
-                key: "/contents.html".into(),
-                headers: vec![("custom-header".into(), "value".into())],
-            })
-            .unwrap();
-        let response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .with_certificate_version(2)
-                .build(),
-        );
-        assert!(
-            lookup_header(&response, "ic-certificateexpression").is_some(),
-            "Missing ic-certificateexpression header in response: {response:#?}",
-        );
-        assert_eq!(
-            lookup_header(&response, "ic-certificateexpression").unwrap(),
-            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "custom-header", "etag"]}}}})"#,
-            "Missing ic-certifiedexpression header in response: {response:#?}",
-        );
-    }
-}
-
-#[cfg(test)]
-mod certification {
+mod sync {
     use super::*;
 
     #[test]
-    fn proper_header_structure() {
+    fn can_create_assets_using_batch_api() {
         let mut state = State::default();
         let system_context = mock_system_context();
 
         const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-        const UPDATED_BODY: &[u8] = b"<!DOCTYPE html><html>lots of content!</html>";
 
-        create_assets(
-            &mut state,
-            &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
-        );
-
-        let response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .with_certificate_version(2)
-                .build(),
-        );
-
-        let cert_header =
-            lookup_header(&response, "ic-certificate").expect("ic-certificate header missing");
-
-        assert!(
-            cert_header.contains("version=2"),
-            "cert is missing version indicator or has wrong version",
-        );
-        assert!(cert_header.contains("certificate=:"), "cert is missing",);
-        assert!(cert_header.contains("tree=:"), "tree is missing",);
-        assert!(!cert_header.contains("tree=::"), "tree is empty",);
-        assert!(cert_header.contains("expr_path=:"), "expr_path is missing",);
-        assert!(!cert_header.contains("expr_path=::"), "expr_path is empty",);
-
-        create_assets(
-            &mut state,
-            &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![UPDATED_BODY])
-                .with_header("Access-Control-Allow-Origin", "*")],
-        );
-
-        let response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .with_certificate_version(2)
-                .build(),
-        );
-
-        assert!(lookup_header(&response, "ic-certificate").is_some());
-    }
-
-    #[test]
-    fn etag() {
-        // The canister owns the `ETag`: it emits a certified `"<hex sha256>"`,
-        // and a custom `etag` smuggled into the asset headers is stripped (it
-        // does not appear on the wire) rather than served.
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-        let expected_etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
-
-        create_assets(
-            &mut state,
-            &system_context,
-            vec![AssetBuilder::new("/contents.html", "text/html")
-                .with_encoding("identity", vec![BODY])
-                .with_header("etag", "my-etag")],
-        );
-
-        let response = certified_http_request(
-            &state,
-            RequestBuilder::get("/contents.html")
-                .with_header("Accept-Encoding", "gzip,identity")
-                .build(),
-        );
-        assert_eq!(response.status_code, 200);
-        assert_eq!(
-            lookup_header(&response, "etag").expect("etag header missing"),
-            expected_etag,
-            "canister must serve its content-hash etag, not the custom one"
-        );
-    }
-
-    #[test]
-    fn conditional_request_serves_certified_304() {
-        // A request whose `If-None-Match` carries the asset's current etag gets a
-        // certified 304 with an empty body; `certified_http_request` verifies the
-        // certificate, so this also proves the 304 is cryptographically valid (as
-        // a real HTTP gateway would require).
-        let mut state = State::default();
-        let system_context = mock_system_context();
-
-        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
-        let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
-
-        create_assets(
+        let session_id = create_assets(
             &mut state,
             &system_context,
             vec![AssetBuilder::new("/contents.html", "text/html")
                 .with_encoding("identity", vec![BODY])],
         );
 
-        // Matching etag -> certified 304, empty body, no streaming.
-        let not_modified = certified_http_request(
+        let response = certified_http_request(
             &state,
             RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), BODY);
+
+        // The finalizing execute_operations ended the sync, so the session id is no
+        // longer valid for further chunk uploads.
+        let error_msg = state
+            .upload_chunks(
+                UploadChunksArguments {
+                    session_id,
+                    chunks: vec![ByteBuf::new()],
+                },
+                &system_context,
+            )
+            .unwrap_err();
+
+        let expected = "no active sync";
+        assert!(
+            error_msg.contains(expected),
+            "expected '{expected}' error, got: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn second_sync_rejected_while_first_is_active() {
+        // A different principal cannot start a sync while another's is in progress
+        // and not yet stale.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        let owner_a = some_principal();
+        let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+        assert_ne!(owner_a, owner_b);
+
+        let StartSyncResult::Started { .. } = state.start_sync(owner_a, &system_context) else {
+            panic!("first start_sync should succeed");
+        };
+
+        match state.start_sync(owner_b, &system_context) {
+            StartSyncResult::Busy { owner, .. } => assert_eq!(owner, owner_a),
+            other => panic!("expected Busy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn owner_can_reclaim_their_own_sync_immediately() {
+        // The same principal restarting (e.g. retrying a failed deploy) reclaims
+        // its own non-stale sync and gets a fresh, monotonically larger id.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        let owner = some_principal();
+
+        let id1 = start_session(&mut state, &system_context);
+        let id2 = match state.start_sync(owner, &system_context) {
+            StartSyncResult::Started { session_id } => session_id,
+            other => panic!("expected Started, got {other:?}"),
+        };
+        assert!(id2 > id1, "session ids must be monotonic: {id2} > {id1}");
+    }
+
+    #[test]
+    fn stale_sync_can_be_reclaimed_by_another_principal() {
+        // After the idle timeout, a different principal may take over an abandoned
+        // sync. Reclaiming clears the previous session's staged chunks.
+        let mut state = State::default();
+        let mut system_context = mock_system_context();
+        let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+
+        let id1 = start_session(&mut state, &system_context);
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        state
+            .upload_chunks(
+                UploadChunksArguments {
+                    session_id: id1,
+                    chunks: vec![ByteBuf::from(BODY.to_vec())],
+                },
+                &system_context,
+            )
+            .unwrap();
+        assert!(!state.chunks().is_empty(), "chunk should be staged");
+
+        // Advance past the idle timeout, then a different principal reclaims it.
+        system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS + 1;
+        match state.start_sync(owner_b, &system_context) {
+            StartSyncResult::Started { session_id } => assert!(session_id > id1),
+            other => panic!("expected Started, got {other:?}"),
+        }
+        assert!(
+            state.chunks().is_empty(),
+            "reclaim must drop the previous session's chunks"
+        );
+
+        // The old session id is no longer valid.
+        let err = state
+            .upload_chunks(
+                UploadChunksArguments {
+                    session_id: id1,
+                    chunks: vec![ByteBuf::from(BODY.to_vec())],
+                },
+                &system_context,
+            )
+            .unwrap_err();
+        assert!(err.contains("no active sync"), "got: {err}");
+    }
+
+    #[test]
+    fn active_sync_idle_clock_resets_on_each_call() {
+        // Staleness is measured from the last call, not from sync start: a deploy
+        // that keeps making calls must never become reclaimable, however long it
+        // runs in total. Without the touch_session reset a different principal
+        // could steal an actively-progressing sync mid-flight.
+        let mut state = State::default();
+        let mut system_context = mock_system_context();
+        let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+
+        let session_id = start_session(&mut state, &system_context);
+
+        // Advance to just under the timeout, then make a call that touches the
+        // session and resets its idle clock.
+        system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
+        state
+            .upload_chunks(
+                UploadChunksArguments {
+                    session_id,
+                    chunks: vec![ByteBuf::from(b"x".to_vec())],
+                },
+                &system_context,
+            )
+            .unwrap();
+
+        // Advance again by just under the timeout. Total elapsed since start now
+        // far exceeds the timeout, but only `TIMEOUT - 1` has passed since the
+        // last call, so the sync is still active and a different principal is
+        // refused rather than allowed to reclaim it.
+        system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
+        match state.start_sync(owner_b, &system_context) {
+            StartSyncResult::Busy { owner, .. } => assert_eq!(owner, some_principal()),
+            other => {
+                panic!("expected Busy while the sync is being actively touched, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn reclaim_boundary_is_inclusive_at_the_idle_timeout() {
+        // The reclaim guard is `idle >= SYNC_IDLE_TIMEOUT_NANOS`: a different
+        // principal is refused one nanosecond before the timeout and reclaims at
+        // exactly the timeout.
+        let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+
+        // Just under the timeout: still Busy.
+        {
+            let mut state = State::default();
+            let mut system_context = mock_system_context();
+            start_session(&mut state, &system_context);
+            system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS - 1;
+            match state.start_sync(owner_b, &system_context) {
+                StartSyncResult::Busy { .. } => {}
+                other => panic!("expected Busy one ns before the timeout, got {other:?}"),
+            }
+        }
+
+        // Exactly at the timeout: reclaimable.
+        {
+            let mut state = State::default();
+            let mut system_context = mock_system_context();
+            let id1 = start_session(&mut state, &system_context);
+            system_context.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS;
+            match state.start_sync(owner_b, &system_context) {
+                StartSyncResult::Started { session_id } => assert!(session_id > id1),
+                other => panic!("expected Started at exactly the timeout, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn busy_reports_holders_idle_seconds() {
+        // The Busy variant reports how long the holder has been idle, in whole
+        // seconds (sub-second nanos truncated toward zero).
+        let mut state = State::default();
+        let mut system_context = mock_system_context();
+        let owner_b = Principal::from_text("aaaaa-aa").unwrap();
+
+        start_session(&mut state, &system_context);
+
+        // 5.5s of idle time, still under the timeout; the reported value truncates
+        // to whole seconds.
+        system_context.current_timestamp_ns += 5_500_000_000;
+        match state.start_sync(owner_b, &system_context) {
+            StartSyncResult::Busy {
+                owner,
+                idle_for_secs,
+            } => {
+                assert_eq!(owner, some_principal());
+                assert_eq!(idle_for_secs, 5);
+            }
+            other => panic!("expected Busy, got {other:?}"),
+        }
+    }
+}
+
+mod hashing {
+    use super::*;
+
+    /// Whole-encoding SHA-256 over `chunks` concatenated, as the plugin computes it.
+    fn whole_sha(chunks: &[&[u8]]) -> [u8; 32] {
+        let mut hasher = sha2::Sha256::new();
+        for chunk in chunks {
+            hasher.update(chunk);
+        }
+        hasher.finalize().into()
+    }
+
+    fn chunk_sha(chunk: &[u8]) -> [u8; 32] {
+        sha2::Sha256::digest(chunk).into()
+    }
+
+    #[test]
+    fn state_hash_is_zero_before_any_sync() {
+        let state = State::default();
+        assert_eq!(state.cached_state_hash(), [0u8; 32]);
+    }
+
+    #[test]
+    fn state_hash_matches_manifest_digest_single_chunk() {
+        use state_hash::{digest, Manifest, ManifestAsset, ManifestEncoding};
+
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        const BODY: &[u8] = b"hello world";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/index.html", "text/html")
+                .with_header("Cache-Control", "max-age=60")
+                .with_encoding("identity", vec![BODY])],
+        );
+
+        let cached = state.cached_state_hash();
+        assert_ne!(cached, [0u8; 32], "the hash is cached after a final sync");
+
+        // Independently rebuild the manifest the offline verifier would and digest
+        // it with the `state-hash` crate. This is the cross-implementation contract:
+        // the canister's streamed hash over stored state must equal the one-shot
+        // digest over the same logical content.
+        let expected = digest(&Manifest {
+            assets: vec![ManifestAsset {
+                key: "/index.html".to_string(),
+                content_type: "text/html".to_string(),
+                headers: vec![("Cache-Control".to_string(), "max-age=60".to_string())],
+                encodings: vec![ManifestEncoding::single_chunk(
+                    Encoding::Identity,
+                    whole_sha(&[BODY]),
+                    BODY.len() as u64,
+                )],
+            }],
+            redirect_rules: vec![],
+        });
+        assert_eq!(cached, expected);
+
+        // Staged finalization (HashingState) and the one-shot recompute agree.
+        assert_eq!(state.recompute_state_hash(), cached);
+    }
+
+    #[test]
+    fn state_hash_folds_per_chunk_hashes_for_multi_chunk() {
+        use state_hash::{digest, Manifest, ManifestAsset, ManifestChunk, ManifestEncoding};
+
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        const C0: &[u8] = b"first-chunk-bytes";
+        const C1: &[u8] = b"second-chunk";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+
+        let cached = state.cached_state_hash();
+        let expected = digest(&Manifest {
+            assets: vec![ManifestAsset {
+                key: "/big.bin".to_string(),
+                content_type: "application/octet-stream".to_string(),
+                headers: vec![],
+                encodings: vec![ManifestEncoding::multi_chunk(
+                    Encoding::Identity,
+                    whole_sha(&[C0, C1]),
+                    vec![
+                        ManifestChunk {
+                            len: C0.len() as u32,
+                            sha256: chunk_sha(C0),
+                        },
+                        ManifestChunk {
+                            len: C1.len() as u32,
+                            sha256: chunk_sha(C1),
+                        },
+                    ],
+                )],
+            }],
+            redirect_rules: vec![],
+        });
+        assert_eq!(cached, expected);
+    }
+
+    #[test]
+    fn state_hash_changes_when_content_changes() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/a.txt", "text/plain").with_encoding("identity", vec![b"v1"])],
+        );
+        let before = state.cached_state_hash();
+
+        // Re-sync the same key with different bytes.
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/a.txt", "text/plain")
+                .with_encoding("identity", vec![b"v2-different"])],
+        );
+        let after = state.cached_state_hash();
+
+        assert_ne!(
+            before, after,
+            "different content yields a different state hash"
+        );
+    }
+
+    #[test]
+    fn state_hash_survives_upgrade() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/index.html", "text/html")
+                .with_encoding("identity", vec![b"hi"])],
+        );
+        let before = state.cached_state_hash();
+        assert_ne!(before, [0u8; 32]);
+
+        // The cached hash lives in stable memory, so it survives the upgrade without
+        // a recompute (no sync runs during post_upgrade_rebuild).
+        let restored = upgrade(state, memory);
+        assert_eq!(restored.cached_state_hash(), before);
+    }
+
+    /// Drives an `asset-prep` `PreparedProject` into `state` the way a real sync
+    /// does: CreateAsset + per-encoding upload/SetAssetContent + SetRedirectRules,
+    /// in one finalizing call. Mirrors the sync plugin's build_operations/pack so
+    /// the resulting stored state is what a real deploy would leave.
+    fn apply_prepared(
+        state: &mut State,
+        ctx: &SystemContext,
+        prepared: &asset_prep::PreparedProject,
+    ) {
+        let session_id = start_session(state, ctx);
+        let mut operations = vec![];
+        for pa in &prepared.assets {
+            operations.push(Operation::CreateAsset(CreateAssetArguments {
+                key: pa.key.clone(),
+                content_type: pa.content_type.clone(),
+                headers: pa.headers.clone(),
+            }));
+            for enc in &pa.encodings {
+                // Stage this encoding's chunks; ids are their staging slots.
+                let base = state.chunks().len() as u64;
+                let chunk_ids: Vec<u64> = (base..base + enc.chunks.len() as u64).collect();
+                let chunks: Vec<ByteBuf> = enc
+                    .chunks
+                    .iter()
+                    .map(|c| ByteBuf::from(c.data.clone()))
+                    .collect();
+                state
+                    .upload_chunks(UploadChunksArguments { session_id, chunks }, ctx)
+                    .unwrap();
+                operations.push(Operation::SetAssetContent(SetAssetContentArguments {
+                    key: pa.key.clone(),
+                    encoding: enc.encoding,
+                    chunk_ids,
+                    sha256: ByteBuf::from(enc.sha256.to_vec()),
+                    chunk_sha256: enc
+                        .chunks
+                        .iter()
+                        .map(|c| ByteBuf::from(c.sha256.to_vec()))
+                        .collect(),
+                }));
+            }
+        }
+        operations.push(Operation::SetRedirectRules(
+            wire_types::SetRedirectRulesArguments {
+                rules: prepared.redirect_rules.clone(),
+            },
+        ));
+        execute_all(state, session_id, operations, ctx);
+    }
+
+    /// The decisive cross-implementation contract: a canister populated by a sync of
+    /// `dist/` reports the **same** state hash the offline verifier computes from
+    /// that same `dist/`. Covers real compressed encodings, a multi-file project,
+    /// redirect rules, and the injected branded 404 — the cases the unit tests of
+    /// each side don't exercise together.
+    #[test]
+    fn state_hash_matches_asset_prep_over_a_real_dist() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let write = |rel: &str, bytes: &[u8]| {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        };
+        // A compressible HTML page (gets gzip + brotli), a CSS file, an
+        // incompressible binary, plus `_headers` and `_redirects`.
+        write(
+            "index.html",
+            "<!DOCTYPE html><h1>hello</h1>\n".repeat(50).as_bytes(),
+        );
+        write("assets/app.css", "body{color:red}\n".repeat(80).as_bytes());
+        write(
+            "img/logo.png",
+            &(0u8..=255).cycle().take(4096).collect::<Vec<u8>>(),
+        );
+        write("_headers", b"/*\n  X-Frame-Options: DENY\n");
+        write("_redirects", b"/old /new 301\n");
+
+        let dir_str = dir.path().to_str().unwrap();
+        let prepared = asset_prep::prepare_project(dir_str).expect("prepare project");
+
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        apply_prepared(&mut state, &ctx, &prepared);
+
+        let canister_hash = state.cached_state_hash();
+        let verifier_hash = asset_prep::state_hash_for_dir(dir_str).expect("verifier hash");
+        assert_eq!(
+            hex::encode(canister_hash),
+            hex::encode(verifier_hash),
+            "canister state hash must equal the offline verifier's hash of the same dist/"
+        );
+        assert_ne!(canister_hash, [0u8; 32]);
+    }
+}
+
+mod serving {
+    use super::*;
+
+    #[test]
+    fn serve_correct_encoding() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const IDENTITY_BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        const GZIP_BODY: &[u8] = b"this is 'gzipped' content";
+        const BROTLI_BODY: &[u8] = b"this is 'brotli' content";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![IDENTITY_BODY])
+                    .with_encoding("gzip", vec![GZIP_BODY])
+                    .with_encoding("br", vec![BROTLI_BODY]),
+                AssetBuilder::new("/no-encoding.html", "text/html"),
+            ],
+        );
+
+        // Identity is served verbatim and carries NO `content-encoding` header (the
+        // `identity` token is not a valid response value).
+        let identity_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        assert_eq!(identity_response.status_code, 200);
+        assert_eq!(identity_response.body.as_ref(), IDENTITY_BODY);
+        assert_eq!(lookup_header(&identity_response, "content-encoding"), None);
+        assert!(lookup_header(&identity_response, "IC-Certificate").is_some());
+
+        let gzip_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip")
+                .with_certificate_version(2)
+                .build(),
+        );
+        assert_eq!(gzip_response.status_code, 200);
+        assert_eq!(gzip_response.body.as_ref(), GZIP_BODY);
+        assert_eq!(
+            lookup_header(&gzip_response, "content-encoding"),
+            Some("gzip")
+        );
+        assert!(lookup_header(&gzip_response, "IC-Certificate").is_some());
+
+        // Brotli is selected and labelled `br`, including from a weighted, multi-coding
+        // Accept-Encoding header (the `;q=` parsing that previously matched nothing).
+        let brotli_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "br;q=1.0, gzip;q=0.8")
+                .with_certificate_version(2)
+                .build(),
+        );
+        assert_eq!(brotli_response.status_code, 200);
+        assert_eq!(brotli_response.body.as_ref(), BROTLI_BODY);
+        assert_eq!(
+            lookup_header(&brotli_response, "content-encoding"),
+            Some("br")
+        );
+        assert!(lookup_header(&brotli_response, "IC-Certificate").is_some());
+
+        // An asset with no encodings has nothing to serve → the built-in certified
+        // 404 (no rule occupies `<*>`, so the fallback is certified there).
+        let no_encoding_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/no-encoding.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        assert_eq!(no_encoding_response.status_code, 404);
+        assert_eq!(no_encoding_response.body.as_ref(), "not found".as_bytes());
+        assert!(lookup_header(&no_encoding_response, "IC-Certificate").is_some());
+    }
+
+    #[test]
+    fn preserves_state_on_stable_roundtrip() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let system_context = mock_system_context();
+
+        const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>Index</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/index.html", "text/html")
+                .with_encoding("identity", vec![INDEX_BODY])],
+        );
+
+        let state = upgrade(state, memory.clone());
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), INDEX_BODY);
+    }
+
+    #[test]
+    fn supports_cache_control_via_headers() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY]),
+                AssetBuilder::new("/cached.html", "text/html")
+                    .with_header("Cache-Control", "max-age=604800")
+                    .with_encoding("identity", vec![BODY]),
+            ],
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), BODY);
+        assert!(
+            lookup_header(&response, "Cache-Control").is_none(),
+            "Unexpected Cache-Control header in response: {response:#?}",
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/cached.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), BODY);
+        assert_eq!(
+            lookup_header(&response, "Cache-Control"),
+            Some("max-age=604800"),
+            "No matching Cache-Control header in response: {response:#?}",
+        );
+    }
+
+    #[test]
+    fn supports_custom_http_headers() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY])
+                    .with_header("Access-Control-Allow-Origin", "*"),
+                AssetBuilder::new("/other.html", "text/html")
+                    .with_encoding("identity", vec![BODY])
+                    .with_header("X-Content-Type-Options", "nosniff"),
+            ],
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), BODY);
+        assert!(
+            lookup_header(&response, "Access-Control-Allow-Origin").is_some(),
+            "Missing Access-Control-Allow-Origin header in response: {response:#?}",
+        );
+        assert!(
+            lookup_header(&response, "Access-Control-Allow-Origin") == Some("*"),
+            "Incorrect value for Access-Control-Allow-Origin header in response: {response:#?}",
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/other.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), BODY);
+        assert!(
+            lookup_header(&response, "X-Content-Type-Options").is_some(),
+            "Missing X-Content-Type-Options header in response: {response:#?}",
+        );
+        assert!(
+            lookup_header(&response, "X-Content-Type-Options") == Some("nosniff"),
+            "Incorrect value for X-Content-Type-Options header in response: {response:#?}",
+        );
+    }
+}
+
+mod range_serving {
+    use super::*;
+
+    /// A plain GET (no Range) of a multi-chunk asset returns chunk 0 as a 206 — this
+    /// is what drives the gateway's reassembly into a full 200.
+    #[test]
+    fn multichunk_plain_get_serves_206_first_chunk() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"first-chunk-bytes--";
+        const C1: &[u8] = b"second-chunk";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .build(),
+        );
+
+        assert_eq!(resp.status_code, 206);
+        assert_eq!(resp.body.as_ref(), C0);
+        let total = C0.len() + C1.len();
+        let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+        assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+    }
+
+    /// A Range request whose start is a chunk boundary returns exactly that chunk.
+    #[test]
+    fn range_request_returns_containing_chunk() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        const C2: &[u8] = b"CCC";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1, C2])],
+        );
+        let total = C0.len() + C1.len() + C2.len();
+
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", format!("bytes={}-", C0.len()))
+                .build(),
+        );
+
+        assert_eq!(resp.status_code, 206);
+        assert_eq!(resp.body.as_ref(), C1);
+        let cr = format!("bytes {}-{}/{}", C0.len(), C0.len() + C1.len() - 1, total);
+        assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+    }
+
+    /// A Range start in the middle of a chunk snaps down to that chunk's boundary:
+    /// the whole containing chunk is returned (sub-chunk slices can't be certified).
+    #[test]
+    fn range_request_mid_chunk_snaps_to_chunk_start() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+        let total = C0.len() + C1.len();
+
+        // Ask for a byte 2 into chunk 1; expect the whole of chunk 1 back.
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", format!("bytes={}-", C0.len() + 2))
+                .build(),
+        );
+
+        assert_eq!(resp.status_code, 206);
+        assert_eq!(resp.body.as_ref(), C1);
+        let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
+        assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+    }
+
+    /// A range that spans multiple chunks returns only the chunk containing its
+    /// start; the client (or gateway) fetches the rest with follow-up requests.
+    #[test]
+    fn range_spanning_chunks_returns_single_chunk() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+        let total = C0.len() + C1.len();
+
+        // Closed range covering the whole asset → still just chunk 0.
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", format!("bytes=0-{}", total - 1))
+                .build(),
+        );
+
+        assert_eq!(resp.status_code, 206);
+        assert_eq!(resp.body.as_ref(), C0);
+        let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+        assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+    }
+
+    /// An unsatisfiable range (start past the end) ignores the Range and serves the
+    /// asset as a 206 chunk 0 — never a truncated 200.
+    #[test]
+    fn out_of_range_serves_full_asset_via_206() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+        let total = C0.len() + C1.len();
+
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", format!("bytes={}-", total + 100))
+                .build(),
+        );
+
+        assert_eq!(resp.status_code, 206);
+        assert_eq!(resp.body.as_ref(), C0);
+        let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+        assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+    }
+
+    /// A conditional request takes precedence over Range: a matching `If-None-Match`
+    /// yields a 304 even when a `Range` header is present.
+    #[test]
+    fn conditional_request_with_range_returns_304() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+
+        // First request: read the canister-managed etag off the 206.
+        let first = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .build(),
+        );
+        let etag = lookup_header(&first, "etag")
+            .expect("206 carries an etag")
+            .to_string();
+
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/big.bin")
                 .with_header("Accept-Encoding", "identity")
                 .with_header("If-None-Match", &etag)
+                .with_header("Range", "bytes=10-")
                 .build(),
         );
-        assert_eq!(not_modified.status_code, 304);
-        assert!(not_modified.body.is_empty());
-        assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
 
-        // A stale etag still serves the full, certified 200.
-        let modified = certified_http_request(
+        assert_eq!(resp.status_code, 304);
+        assert!(resp.body.as_ref().is_empty());
+    }
+
+    /// A single-chunk asset ignores Range and serves the full body as a 200.
+    #[test]
+    fn single_chunk_asset_ignores_range() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const BODY: &[u8] = b"a small body that fits in one chunk";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/small.txt", "text/plain").with_encoding("identity", vec![BODY])
+            ],
+        );
+
+        let resp = certified_http_request(
             &state,
-            RequestBuilder::get("/contents.html")
+            RequestBuilder::get("/small.txt")
                 .with_header("Accept-Encoding", "identity")
-                .with_header(
-                    "If-None-Match",
-                    "\"0000000000000000000000000000000000000000000000000000000000000000\"",
-                )
+                .with_header("Range", "bytes=5-")
                 .build(),
         );
-        assert_eq!(modified.status_code, 200);
-        assert_eq!(modified.body.as_ref(), BODY);
+
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body.as_ref(), BODY);
+        assert_eq!(lookup_header(&resp, "content-range"), None);
+    }
+
+    /// Range serving works for a non-identity encoding: the 206 carries
+    /// `content-encoding` and ranges over the *encoded* bytes.
+    #[test]
+    fn range_request_non_identity_encoding() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const G0: &[u8] = b"\x1f\x8b\x08\x00gzip-chunk-0";
+        const G1: &[u8] = b"gzip-chunk-1";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/app.js", "text/javascript").with_encoding("gzip", vec![G0, G1])
+            ],
+        );
+        let total = G0.len() + G1.len();
+
+        let resp = certified_http_request(
+            &state,
+            RequestBuilder::get("/app.js")
+                .with_header("Accept-Encoding", "gzip")
+                .with_header("Range", format!("bytes={}-", G0.len()))
+                .build(),
+        );
+
+        assert_eq!(resp.status_code, 206);
+        assert_eq!(resp.body.as_ref(), G1);
+        assert_eq!(lookup_header(&resp, "content-encoding"), Some("gzip"));
+        let cr = format!("bytes {}-{}/{}", G0.len(), total - 1, total);
+        assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+    }
+
+    /// After an upgrade, multi-chunk assets still serve 206s with correct
+    /// `Content-Range` — proof the per-chunk cert data (`chunk_certs` + `content_len`)
+    /// is persisted and `post_upgrade_rebuild` re-certifies the 206s content-free.
+    #[test]
+    fn range_serving_survives_upgrade() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+        let total = C0.len() + C1.len();
+
+        let restored = upgrade(state, memory.clone());
+
+        let resp = certified_http_request(
+            &restored,
+            RequestBuilder::get("/big.bin")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", format!("bytes={}-", C0.len()))
+                .build(),
+        );
+
+        assert_eq!(resp.status_code, 206);
+        assert_eq!(resp.body.as_ref(), C1);
+        let cr = format!("bytes {}-{}/{}", C0.len(), total - 1, total);
+        assert_eq!(lookup_header(&resp, "content-range"), Some(cr.as_str()));
+    }
+
+    /// Range forms the canister doesn't honour — a suffix range (`bytes=-N`), a
+    /// multi-range list, and a syntactically broken spec — all parse to "no range"
+    /// and serve the asset as a certified 206 chunk 0 (never a truncated 200), which
+    /// the gateway reassembles into the full 200.
+    #[test]
+    fn unhonoured_range_forms_serve_certified_206_chunk_0() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const C0: &[u8] = b"AAAAAAAAAA";
+        const C1: &[u8] = b"BBBBBBB";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/big.bin", "application/octet-stream")
+                .with_encoding("identity", vec![C0, C1])],
+        );
+        let total = C0.len() + C1.len();
+        let cr = format!("bytes 0-{}/{}", C0.len() - 1, total);
+
+        for range in ["bytes=-500", "bytes=0-1,5-6", "bytes=abc-", "kingdoms=0-"] {
+            let resp = certified_http_request(
+                &state,
+                RequestBuilder::get("/big.bin")
+                    .with_header("Accept-Encoding", "identity")
+                    .with_header("Range", range)
+                    .build(),
+            );
+            assert_eq!(resp.status_code, 206, "range {range:?}");
+            assert_eq!(resp.body.as_ref(), C0, "range {range:?}");
+            assert_eq!(
+                lookup_header(&resp, "content-range"),
+                Some(cr.as_str()),
+                "range {range:?}"
+            );
+        }
+    }
+
+    /// Range/chunk behaviour follows the *selected* encoding, not the asset. A file
+    /// stored as a 2-chunk identity plus a 1-chunk (compressed-below-threshold) gzip
+    /// serves a 206 when identity is chosen but a plain 200 when gzip is chosen —
+    /// both certified.
+    #[test]
+    fn range_follows_selected_encoding_chunk_count() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        const I0: &[u8] = b"identity-chunk-0--";
+        const I1: &[u8] = b"identity-chunk-1";
+        const GZ: &[u8] = b"\x1f\x8b\x08\x00small-gzip";
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/app.js", "text/javascript")
+                .with_encoding("identity", vec![I0, I1])
+                .with_encoding("gzip", vec![GZ])],
+        );
+
+        // gzip is single-chunk → Range ignored, full 200.
+        let gz = certified_http_request(
+            &state,
+            RequestBuilder::get("/app.js")
+                .with_header("Accept-Encoding", "gzip")
+                .with_header("Range", "bytes=4-")
+                .build(),
+        );
+        assert_eq!(gz.status_code, 200);
+        assert_eq!(gz.body.as_ref(), GZ);
+        assert_eq!(lookup_header(&gz, "content-encoding"), Some("gzip"));
+        assert_eq!(lookup_header(&gz, "content-range"), None);
+
+        // identity is two chunks → Range honoured, certified 206.
+        let id = certified_http_request(
+            &state,
+            RequestBuilder::get("/app.js")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("Range", format!("bytes={}-", I0.len()))
+                .build(),
+        );
+        assert_eq!(id.status_code, 206);
+        assert_eq!(id.body.as_ref(), I1);
+        assert_eq!(lookup_header(&id, "content-encoding"), None);
+        let total = I0.len() + I1.len();
+        let cr = format!("bytes {}-{}/{}", I0.len(), total - 1, total);
+        assert_eq!(lookup_header(&id, "content-range"), Some(cr.as_str()));
+    }
+}
+
+mod assets {
+    use super::*;
+
+    #[test]
+    fn supports_getting_and_setting_asset_headers() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![BODY])
+                    .with_header("Access-Control-Allow-Origin", "*"),
+                AssetBuilder::new("/props.html", "text/html")
+                    .with_encoding("identity", vec![BODY])
+                    .with_header("X-Content-Type-Options", "nosniff"),
+            ],
+        );
+
+        // Headers are reported by `list`, so read them back from there rather than
+        // through a dedicated per-asset query.
+        let headers_of = |state: &State, key: &str| {
+            state
+                .get_asset_details(None)
+                .into_iter()
+                .find(|d| d.key == key)
+                .expect("asset should exist")
+                .headers
+        };
+
+        assert_eq!(
+            headers_of(&state, "/contents.html"),
+            vec![("Access-Control-Allow-Origin".to_string(), "*".to_string())],
+        );
+        assert_eq!(
+            headers_of(&state, "/props.html"),
+            vec![("X-Content-Type-Options".to_string(), "nosniff".to_string())],
+        );
+
+        // A non-empty `headers` replaces the headers map.
+        assert!(state
+            .set_asset_headers(SetAssetHeadersArguments {
+                key: "/props.html".into(),
+                headers: vec![("new-header".into(), "value".into())],
+            })
+            .is_ok());
+        assert_eq!(
+            headers_of(&state, "/props.html"),
+            vec![("new-header".to_string(), "value".to_string())],
+        );
+
+        // An empty `headers` clears the headers map.
+        assert!(state
+            .set_asset_headers(SetAssetHeadersArguments {
+                key: "/props.html".into(),
+                headers: vec![],
+            })
+            .is_ok());
+        assert!(headers_of(&state, "/props.html").is_empty());
+    }
+
+    #[test]
+    fn create_asset_fails_if_asset_exists() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![FILE_BODY])],
+        );
+
+        assert!(
+            state
+                .create_asset(CreateAssetArguments {
+                    key: "/contents.html".to_string(),
+                    content_type: "text/html".to_string(),
+                    headers: vec![],
+                })
+                .unwrap_err()
+                == "asset already exists"
+        );
+    }
+
+    #[test]
+    fn headers_cbor_deserialize_from_hashmap_to_btreemap() {
+        // We want to make sure that deserializing from a HashMap to a BTreeMap works
+        // so that frontend canister upgrades don't break
+        for i in 0..100 {
+            let old_headers: HashMap<String, String> = HashMap::from([
+                // Order is not alphabetical on purpose here
+                // to check that the BTreeMap orders them correctly
+                ("c-name".into(), "c-value".into()),
+                ("index".into(), i.to_string()),
+                ("d-name".into(), "d-value".into()),
+                ("b-name".into(), "b-value".into()),
+                ("a-name".into(), "a-value".into()),
+            ]);
+            let mut serialized = Vec::new();
+            ciborium::into_writer(&old_headers, &mut serialized).unwrap();
+            let new_headers: BTreeMap<String, String> =
+                ciborium::from_reader(&serialized[..]).unwrap();
+            // Compare the order to check that the BTreeMap is deterministic
+            assert_eq!(
+                new_headers.into_iter().collect::<Vec<(String, String)>>(),
+                vec![
+                    ("a-name".into(), "a-value".into()),
+                    ("b-name".into(), "b-value".into()),
+                    ("c-name".into(), "c-value".into()),
+                    ("d-name".into(), "d-value".into()),
+                    ("index".into(), i.to_string()),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn headers_candid_hashmap_btreemap_roundtrip() {
+        for i in 0..100 {
+            let old_headers: HashMap<String, String> = HashMap::from([
+                ("a-name".into(), "a-value".into()),
+                ("b-name".into(), "b-value".into()),
+                ("c-name".into(), "c-value".into()),
+                ("d-name".into(), "d-value".into()),
+                ("index".into(), i.to_string()),
+            ]);
+
+            // Deserialize to BTreeMap
+            let old_serialized = candid::encode_one(&old_headers).unwrap();
+            let new_headers: BTreeMap<String, String> =
+                candid::decode_one(&old_serialized).unwrap();
+            assert_eq!(
+                new_headers
+                    .clone()
+                    .into_iter()
+                    .collect::<Vec<(String, String)>>(),
+                vec![
+                    ("a-name".into(), "a-value".into()),
+                    ("b-name".into(), "b-value".into()),
+                    ("c-name".into(), "c-value".into()),
+                    ("d-name".into(), "d-value".into()),
+                    ("index".into(), i.to_string()),
+                ]
+            );
+
+            // Go back to HashMap
+            let new_serialized = candid::encode_one(new_headers).unwrap();
+            let old_deserialized: HashMap<String, String> =
+                candid::decode_one(&new_serialized).unwrap();
+            assert_eq!(
+                old_deserialized, old_headers,
+                "Old headers don't match, iteration: {i}",
+            );
+        }
     }
 }
 
@@ -2435,6 +1874,236 @@ mod set_asset_content_sha256_trust {
         assert_eq!(
             result.unwrap_err(),
             "chunk_sha256 length must match chunk_ids"
+        );
+    }
+}
+
+#[cfg(test)]
+mod certification {
+    use super::*;
+
+    #[test]
+    fn proper_header_structure() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        const UPDATED_BODY: &[u8] = b"<!DOCTYPE html><html>lots of content!</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![BODY])
+                .with_header("Access-Control-Allow-Origin", "*")],
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+
+        let cert_header =
+            lookup_header(&response, "ic-certificate").expect("ic-certificate header missing");
+
+        assert!(
+            cert_header.contains("version=2"),
+            "cert is missing version indicator or has wrong version",
+        );
+        assert!(cert_header.contains("certificate=:"), "cert is missing",);
+        assert!(cert_header.contains("tree=:"), "tree is missing",);
+        assert!(!cert_header.contains("tree=::"), "tree is empty",);
+        assert!(cert_header.contains("expr_path=:"), "expr_path is missing",);
+        assert!(!cert_header.contains("expr_path=::"), "expr_path is empty",);
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![UPDATED_BODY])
+                .with_header("Access-Control-Allow-Origin", "*")],
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+
+        assert!(lookup_header(&response, "ic-certificate").is_some());
+    }
+
+    #[test]
+    fn etag() {
+        // The canister owns the `ETag`: it emits a certified `"<hex sha256>"`,
+        // and a custom `etag` smuggled into the asset headers is stripped (it
+        // does not appear on the wire) rather than served.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        let expected_etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![BODY])
+                .with_header("etag", "my-etag")],
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+        assert_eq!(response.status_code, 200);
+        assert_eq!(
+            lookup_header(&response, "etag").expect("etag header missing"),
+            expected_etag,
+            "canister must serve its content-hash etag, not the custom one"
+        );
+    }
+
+    #[test]
+    fn conditional_request_serves_certified_304() {
+        // A request whose `If-None-Match` carries the asset's current etag gets a
+        // certified 304 with an empty body; `certified_http_request` verifies the
+        // certificate, so this also proves the 304 is cryptographically valid (as
+        // a real HTTP gateway would require).
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![BODY])],
+        );
+
+        // Matching etag -> certified 304, empty body, no streaming.
+        let not_modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("If-None-Match", &etag)
+                .build(),
+        );
+        assert_eq!(not_modified.status_code, 304);
+        assert!(not_modified.body.is_empty());
+        assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
+
+        // A stale etag still serves the full, certified 200.
+        let modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_header(
+                    "If-None-Match",
+                    "\"0000000000000000000000000000000000000000000000000000000000000000\"",
+                )
+                .build(),
+        );
+        assert_eq!(modified.status_code, 200);
+        assert_eq!(modified.body.as_ref(), BODY);
+    }
+
+    #[test]
+    fn ic_certificate_expression_present_for_new_assets() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![BODY])
+                .with_header("Access-Control-Allow-Origin", "*")],
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+
+        assert!(
+            lookup_header(&response, "ic-certificateexpression").is_some(),
+            "Missing ic-certifiedexpression header in response: {response:#?}",
+        );
+        assert_eq!(
+            lookup_header(&response, "ic-certificateexpression").unwrap(),
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "Access-Control-Allow-Origin", "etag"]}}}})"#,
+            "Missing ic-certifiedexpression header in response: {response:#?}",
+        );
+    }
+
+    #[test]
+    fn ic_certificate_expression_gets_updated_on_asset_headers_update() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("gzip", vec![BODY])
+                .with_header("Access-Control-Allow-Origin", "*")],
+        );
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+
+        assert!(
+            lookup_header(&response, "ic-certificateexpression").is_some(),
+            "Missing ic-certificateexpression header in response: {response:#?}",
+        );
+        assert_eq!(
+            lookup_header(&response, "ic-certificateexpression").unwrap(),
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "Access-Control-Allow-Origin", "etag"]}}}})"#,
+            "Missing ic-certificateexpression header in response: {response:#?}",
+        );
+
+        state
+            .set_asset_headers(SetAssetHeadersArguments {
+                key: "/contents.html".into(),
+                headers: vec![("custom-header".into(), "value".into())],
+            })
+            .unwrap();
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/contents.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        assert!(
+            lookup_header(&response, "ic-certificateexpression").is_some(),
+            "Missing ic-certificateexpression header in response: {response:#?}",
+        );
+        assert_eq!(
+            lookup_header(&response, "ic-certificateexpression").unwrap(),
+            r#"default_certification(ValidationArgs{certification: Certification{no_request_certification: Empty{}, response_certification: ResponseCertification{certified_response_headers: ResponseHeaderList{headers: ["content-type", "content-encoding", "custom-header", "etag"]}}}})"#,
+            "Missing ic-certifiedexpression header in response: {response:#?}",
         );
     }
 }
@@ -3243,6 +2912,277 @@ mod redirect_rules {
         let fallback = certified_http_request(&state, RequestBuilder::get("/anything").build());
         assert_eq!(fallback.body.as_ref(), INDEX_BODY);
     }
+
+    #[test]
+    fn serve_fallback_via_rule() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        const OTHER_BODY: &[u8] = b"<!DOCTYPE html><html>other content</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![INDEX_BODY]),
+                AssetBuilder::new("/deep/nested/folder/index.html", "text/html")
+                    .with_encoding("identity", vec![OTHER_BODY]),
+                AssetBuilder::new("/deep/nested/folder/a_file.html", "text/html")
+                    .with_encoding("identity", vec![OTHER_BODY]),
+                AssetBuilder::new("/deep/nested/sibling/another_file.html", "text/html")
+                    .with_encoding("identity", vec![OTHER_BODY]),
+                AssetBuilder::new("/deep/nested/sibling/a_file.html", "text/html")
+                    .with_encoding("identity", vec![OTHER_BODY]),
+            ],
+        );
+
+        // SPA-style catch-all: a single root subtree rule replaces what used to
+        // be the built-in `FALLBACK_FILE` mechanism.
+        set_root_spa_rule(&mut state, "/index.html");
+
+        let identity_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/index.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        let certificate_header = lookup_header(&identity_response, "IC-Certificate").unwrap();
+
+        assert_eq!(identity_response.status_code, 200);
+        assert_eq!(identity_response.body.as_ref(), INDEX_BODY);
+        assert!(certificate_header.contains("expr_path=:2dn3g2lodHRwX2V4cHJqaW5kZXguaHRtbGM8JD4=:"));
+
+        let fallback_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/nonexistent")
+                .with_header("Accept-Encoding", "identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        let certificate_header = lookup_header(&fallback_response, "IC-Certificate").unwrap();
+        assert_eq!(fallback_response.status_code, 200);
+        assert_eq!(fallback_response.body.as_ref(), INDEX_BODY);
+        // The rule lives at the root `<*>`, matching the previous built-in
+        // fallback's expr_path.
+        assert!(certificate_header.contains("expr_path=:2dn3gmlodHRwX2V4cHJjPCo+:"));
+
+        let valid_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/deep/nested/folder/a_file.html")
+                .with_header("Accept-Encoding", "identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        assert_eq!(valid_response.status_code, 200);
+        assert_eq!(valid_response.body.as_ref(), OTHER_BODY);
+
+        let fallback_response = certified_http_request(
+            &state,
+            RequestBuilder::get("/deep/nested/folder/nonexistent")
+                .with_header("Accept-Encoding", "identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        assert_eq!(fallback_response.status_code, 200);
+        assert_eq!(fallback_response.body.as_ref(), INDEX_BODY);
+    }
+
+    #[test]
+    fn returns_index_file_for_missing_assets_via_rule() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>Index</html>";
+        const OTHER_BODY: &[u8] = b"<!DOCTYPE html><html>Other</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![INDEX_BODY]),
+                AssetBuilder::new("/other.html", "text/html")
+                    .with_encoding("identity", vec![OTHER_BODY]),
+            ],
+        );
+        // Without a rule the canister no longer auto-falls-back to /index.html.
+        set_root_spa_rule(&mut state, "/index.html");
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/missing.html")
+                .with_header("Accept-Encoding", "gzip,identity")
+                .build(),
+        );
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), INDEX_BODY);
+    }
+
+    #[test]
+    fn no_implicit_aliasing_without_rules() {
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/foo.html", "text/html").with_encoding("identity", vec![BODY]),
+                AssetBuilder::new("/blog/index.html", "text/html")
+                    .with_encoding("identity", vec![BODY]),
+            ],
+        );
+
+        for missing in &["/foo", "/foo/", "/blog", "/blog/"] {
+            let response = state.http_request(RequestBuilder::get(*missing).build(), &[], TEST_NOW);
+            assert_eq!(
+                response.status_code, 404,
+                "expected 404 for {missing}, got {}",
+                response.status_code
+            );
+        }
+        let response = certified_http_request(&state, RequestBuilder::get("/foo.html").build());
+        assert_eq!(response.status_code, 200);
+    }
+
+    #[test]
+    fn aliases_via_explicit_rules() {
+        // Migrated from `support_aliases`: what used to be built-in `.html` /
+        // `index.html` aliasing is now expressed as user-supplied 200 rules.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>index</html>";
+        const SUBDIR_INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>subdir index</html>";
+        const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![FILE_BODY]),
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![INDEX_BODY]),
+                AssetBuilder::new("/subdirectory/index.html", "text/html")
+                    .with_encoding("identity", vec![SUBDIR_INDEX_BODY]),
+            ],
+        );
+        set_exact_rewrite_rules(
+            &mut state,
+            &[
+                ("/contents", "/contents.html"),
+                ("/", "/index.html"),
+                ("/subdirectory/index", "/subdirectory/index.html"),
+                ("/subdirectory/", "/subdirectory/index.html"),
+                ("/subdirectory", "/subdirectory/index.html"),
+            ],
+        );
+
+        let normal_request =
+            certified_http_request(&state, RequestBuilder::get("/contents.html").build());
+        assert_eq!(normal_request.body.as_ref(), FILE_BODY);
+
+        let alias_add_html =
+            certified_http_request(&state, RequestBuilder::get("/contents").build());
+        assert_eq!(alias_add_html.body.as_ref(), FILE_BODY);
+
+        let root_alias = certified_http_request(&state, RequestBuilder::get("/").build());
+        assert_eq!(root_alias.body.as_ref(), INDEX_BODY);
+
+        let subdirectory_index_alias =
+            certified_http_request(&state, RequestBuilder::get("/subdirectory/index").build());
+        assert_eq!(subdirectory_index_alias.body.as_ref(), SUBDIR_INDEX_BODY);
+
+        let subdirectory_index_alias_2 =
+            certified_http_request(&state, RequestBuilder::get("/subdirectory/").build());
+        assert_eq!(subdirectory_index_alias_2.body.as_ref(), SUBDIR_INDEX_BODY);
+
+        let subdirectory_index_alias_3 =
+            certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
+        assert_eq!(subdirectory_index_alias_3.body.as_ref(), SUBDIR_INDEX_BODY);
+    }
+
+    #[test]
+    fn rule_aliasing_persists_through_upgrade() {
+        // Migrated from `alias_behavior_persists_through_upgrade`: rules survive
+        // the upgrade and serve correctly afterward.
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let system_context = mock_system_context();
+        const SUBDIR_INDEX_BODY: &[u8] = b"<!DOCTYPE html><html>subdir index</html>";
+        const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/contents.html", "text/html")
+                    .with_encoding("identity", vec![FILE_BODY]),
+                AssetBuilder::new("/subdirectory/index.html", "text/html")
+                    .with_encoding("identity", vec![SUBDIR_INDEX_BODY]),
+            ],
+        );
+        // No rule for /contents → no alias to /contents.html (used to be the
+        // "aliasing disabled" path); still install one for the subdirectory.
+        set_exact_rewrite_rule(&mut state, "/subdirectory", "/subdirectory/index.html");
+
+        let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[], TEST_NOW);
+        assert_eq!(no_alias.status_code, 404);
+
+        let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
+        assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
+
+        let state = upgrade(state, memory.clone());
+
+        let no_alias = state.http_request(RequestBuilder::get("/contents").build(), &[], TEST_NOW);
+        assert_eq!(no_alias.status_code, 404);
+        let other = certified_http_request(&state, RequestBuilder::get("/subdirectory").build());
+        assert_eq!(other.body.as_ref(), SUBDIR_INDEX_BODY);
+    }
+
+    #[test]
+    fn rule_aliasing_name_clash() {
+        // Migrated from `aliasing_name_clash`: an asset at the rule's source
+        // shadows the rule.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+        const FILE_BODY: &[u8] = b"<!DOCTYPE html><html>file body</html>";
+        const FILE_BODY_2: &[u8] = b"<!DOCTYPE html><html>second body</html>";
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents.html", "text/html")
+                .with_encoding("identity", vec![FILE_BODY])],
+        );
+        set_exact_rewrite_rule(&mut state, "/contents", "/contents.html");
+
+        let via_rule = certified_http_request(&state, RequestBuilder::get("/contents").build());
+        assert_eq!(via_rule.body.as_ref(), FILE_BODY);
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![AssetBuilder::new("/contents", "text/html")
+                .with_encoding("identity", vec![FILE_BODY_2])],
+        );
+
+        let asset_wins = certified_http_request(&state, RequestBuilder::get("/contents").build());
+        assert_eq!(asset_wins.body.as_ref(), FILE_BODY_2);
+
+        state.delete_asset(DeleteAssetArguments {
+            key: "/contents".to_string(),
+        });
+        state.on_redirect_rules_change();
+
+        let rule_visible_again =
+            certified_http_request(&state, RequestBuilder::get("/contents").build());
+        assert_eq!(rule_visible_again.body.as_ref(), FILE_BODY);
+    }
 }
 
 /// The certified, canister-injected `ic_env` cookie (the IC root key + `PUBLIC_*`
@@ -3278,6 +3218,15 @@ mod env_cookie {
             .collect()
     }
 
+    /// Client-side `decodeURIComponent`, reproduced for assertions: percent-decodes
+    /// the visible cookie value exactly as the browser does before the lib parses it.
+    fn client_decode(value: &str) -> String {
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8()
+            .unwrap()
+            .to_string()
+    }
+
     /// Reproduces the `@icp-sdk/core/agent/canister-env` parse exactly: the
     /// browser exposes only the part of `Set-Cookie` before the first `;` via
     /// `document.cookie`; the lib then strips `ic_env=`, `decodeURIComponent`s,
@@ -3285,7 +3234,7 @@ mod env_cookie {
     fn parse_like_client(set_cookie: &str) -> (Vec<u8>, BTreeMap<String, String>) {
         let visible = set_cookie.split(';').next().unwrap().trim();
         let encoded = visible.strip_prefix("ic_env=").expect("ic_env= prefix");
-        let decoded = url_decode(encoded).unwrap();
+        let decoded = client_decode(encoded);
         let mut root_key = None;
         let mut vars = BTreeMap::new();
         for entry in decoded.split('&') {
@@ -3312,52 +3261,6 @@ mod env_cookie {
 
     fn html_asset(key: &str, body: &'static [u8]) -> AssetBuilder {
         AssetBuilder::new(key, "text/html").with_encoding("identity", vec![body])
-    }
-
-    #[test]
-    fn render_env_cookie_orders_and_encodes() {
-        use crate::asset::render_env_cookie;
-        let vars = BTreeMap::from([
-            ("PUBLIC_B".to_string(), "2".to_string()),
-            // A value containing `=` must survive: only the structural `&`/`=`
-            // separators are escaped, and the client splits each entry on its
-            // first `=` so the rest of the value is preserved verbatim.
-            ("PUBLIC_A".to_string(), "v=with=eq".to_string()),
-        ]);
-        let rendered = render_env_cookie(&[0xab, 0xcd], &vars);
-
-        assert!(rendered.ends_with("; Secure; SameSite=None; Partitioned"));
-        let value = rendered
-            .strip_prefix("ic_env=")
-            .unwrap()
-            .strip_suffix("; Secure; SameSite=None; Partitioned")
-            .unwrap();
-        // Separators are percent-encoded, so the payload rides in one cookie value.
-        assert!(!value.contains('&') && !value.contains('='));
-        // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
-        assert_eq!(
-            url_decode(value).unwrap(),
-            "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2"
-        );
-    }
-
-    #[test]
-    fn url_encode_escapes_cookie_separators() {
-        use crate::url::url_encode;
-        assert_eq!(url_encode("a=b&c=d"), "a%3Db%26c%3Dd");
-    }
-
-    #[test]
-    fn from_raw_keeps_only_public_vars() {
-        let env = CanisterEnv::from_raw(
-            mock_root_key(),
-            [
-                ("PUBLIC_A".to_string(), "1".to_string()),
-                ("SECRET_KEY".to_string(), "leak".to_string()),
-                ("PATH".to_string(), "/bin".to_string()),
-            ],
-        );
-        assert_eq!(env.public_vars.keys().collect::<Vec<_>>(), vec!["PUBLIC_A"]);
     }
 
     #[test]
@@ -3498,7 +3401,7 @@ mod env_cookie {
 
         // Entries are emitted in sorted order: root key first, then sorted vars.
         let visible = cookie.split(';').next().unwrap().trim();
-        let decoded = url_decode(visible.strip_prefix("ic_env=").unwrap()).unwrap();
+        let decoded = client_decode(visible.strip_prefix("ic_env=").unwrap());
         let keys: Vec<&str> = decoded
             .split('&')
             .map(|e| &e[..e.find('=').unwrap()])
@@ -3708,7 +3611,7 @@ mod access_protection {
         create_assets(&mut state, &ctx, vec![html_asset("/index.html", HTML)]);
         let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
         assert_eq!(r.status_code, 200);
-        // No gate, no forced no-store.
+        // No access protection, no forced no-store.
         assert!(lookup_header(&r, "cache-control").is_none());
         assert_eq!(state.check_protection_status(), ProtectionStatus::Disabled);
     }
@@ -3746,7 +3649,7 @@ mod access_protection {
 
     #[test]
     fn valid_cookie_among_other_cookies_serves_asset() {
-        // The browser concatenates ic_env + analytics + certified_assets_access; the gate picks
+        // The browser concatenates ic_env + analytics + certified_assets_access; access protection picks
         // ours out by plain string parsing.
         let state = protected_state();
         let r = certified_http_request(
@@ -3775,7 +3678,7 @@ mod access_protection {
     }
 
     #[test]
-    fn login_page_is_gate_exempt() {
+    fn login_page_is_exempt() {
         let state = protected_state();
         // GET the login page with no cookie still serves the page.
         let r = certified_http_request(&state, RequestBuilder::get(LOGIN_PAGE).build());
@@ -4080,7 +3983,7 @@ mod access_protection {
     #[test]
     fn reissuing_a_label_rotates_the_token() {
         // The label is the unique identifier: re-issuing "owner" with a new value
-        // replaces the old one — old value stops working (gate + redeem), new works,
+        // replaces the old one — old value stops working (access protection + redeem), new works,
         // and there's still exactly one token under that label.
         let mut state = protected_state(); // token "secret" labelled "owner"
         state
@@ -4144,5 +4047,41 @@ mod access_protection {
             .issue_token("v".into(), "l".into(), 60, TEST_NOW)
             .unwrap_err();
         assert!(err.contains("not enabled"), "got: {err}");
+    }
+}
+
+mod authorization {
+    use super::*;
+
+    #[test]
+    fn authorize_and_deauthorize_toggle_membership() {
+        let mut state = State::default();
+        let p = some_principal();
+
+        assert!(!state.is_authorized(&p));
+
+        state.authorize(p);
+        assert!(state.is_authorized(&p));
+        assert_eq!(state.list_authorized(), vec![p]);
+
+        // Re-authorizing is idempotent (set semantics).
+        state.authorize(p);
+        assert_eq!(state.list_authorized().len(), 1);
+
+        state.deauthorize(&p);
+        assert!(!state.is_authorized(&p));
+        assert!(state.list_authorized().is_empty());
+    }
+
+    #[test]
+    fn authorized_set_survives_stable_roundtrip() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let p = some_principal();
+        state.authorize(p);
+
+        let restored = upgrade(state, memory.clone());
+
+        assert!(restored.is_authorized(&p));
     }
 }
