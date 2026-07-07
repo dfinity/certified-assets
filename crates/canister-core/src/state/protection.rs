@@ -105,15 +105,14 @@ impl State {
         now: u64,
     ) -> HttpResponse {
         let location = AssetPath::from(login_page).asset_hash_path_root();
-        if let Some(value) = parse_form_token(req.body.as_ref()) {
-            if self
+        if let Some(value) = parse_form_token(req.body.as_ref())
+            && self
                 .token_index
                 .get(&token_id(&value))
                 .is_some_and(|&expires_at| expires_at > now)
-            {
-                let resp = ProtectionResponse::redeem_success(&value);
-                return self.serve_protection_response(&resp, login_page, &location, certificate);
-            }
+        {
+            let resp = ProtectionResponse::redeem_success(&value);
+            return self.serve_protection_response(&resp, login_page, &location, certificate);
         }
         let resp = ProtectionResponse::redeem_failure();
         self.serve_protection_response(&resp, login_page, &location, certificate)

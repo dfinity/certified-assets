@@ -82,10 +82,10 @@ fn is_compressible(media_type: &Mime) -> bool {
     if ty == mime::FONT {
         return !matches!(subtype.as_str(), "woff" | "woff2");
     }
-    if let Some(suffix) = media_type.suffix() {
-        if suffix == mime::JSON || suffix == mime::XML {
-            return true;
-        }
+    if let Some(suffix) = media_type.suffix()
+        && (suffix == mime::JSON || suffix == mime::XML)
+    {
+        return true;
     }
     subtype == mime::JAVASCRIPT
         || subtype == mime::JSON

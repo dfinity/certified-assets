@@ -276,11 +276,11 @@ impl<M: Memory> ChunkStore<M> {
     /// region, keeping the free list short and `bump` tight. Stable memory can't
     /// shrink, so the physical pages stay; they're reused by the next `alloc`.
     fn trim_bump(&mut self) {
-        if let Some(last) = self.free.last() {
-            if last.offset + last.len == self.bump {
-                self.bump = last.offset;
-                self.free.pop();
-            }
+        if let Some(last) = self.free.last()
+            && last.offset + last.len == self.bump
+        {
+            self.bump = last.offset;
+            self.free.pop();
         }
     }
 

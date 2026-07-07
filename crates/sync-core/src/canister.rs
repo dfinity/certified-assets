@@ -66,10 +66,10 @@ pub fn list_all_assets(c: &impl CanisterCall) -> Result<HashMap<String, AssetDet
         for d in entries {
             all.insert(d.key.clone(), d);
         }
-        if let Some(prev) = prev_page_size {
-            if n < prev {
-                break;
-            }
+        if let Some(prev) = prev_page_size
+            && n < prev
+        {
+            break;
         }
         prev_page_size = Some(n);
     }
@@ -140,10 +140,10 @@ pub fn list_all_redirect_rules(c: &impl CanisterCall) -> Result<Vec<RedirectRule
         }
         start_index += n as u64;
         all.extend(page);
-        if let Some(prev) = prev_page_size {
-            if n < prev {
-                break;
-            }
+        if let Some(prev) = prev_page_size
+            && n < prev
+        {
+            break;
         }
         prev_page_size = Some(n);
     }

@@ -40,10 +40,10 @@ impl State {
         self.store_env(env);
         let keys = self.store.asset_keys();
         for key in keys {
-            if let Some(meta) = self.store.get_asset(&key) {
-                if crate::asset::is_html_content_type(&meta.content_type) {
-                    self.certifier.recertify_asset(&self.store, &key, &meta);
-                }
+            if let Some(meta) = self.store.get_asset(&key)
+                && crate::asset::is_html_content_type(&meta.content_type)
+            {
+                self.certifier.recertify_asset(&self.store, &key, &meta);
             }
         }
         // Rebuild rule entries: a 200-rewrite (e.g. the `/` SPA alias) to an HTML
