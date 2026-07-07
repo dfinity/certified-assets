@@ -11,7 +11,7 @@ use super::State;
 use crate::redirect;
 use crate::runtime::SystemContext;
 use crate::sync::{
-    ComputationStatus, ExecuteOperationsProgress, SyncSession, SYNC_IDLE_TIMEOUT_NANOS,
+    ComputationStatus, ExecuteOperationsProgress, SYNC_IDLE_TIMEOUT_NANOS, SyncSession,
 };
 use candid::Principal;
 use wire_types::{

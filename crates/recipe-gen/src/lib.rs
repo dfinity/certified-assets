@@ -267,7 +267,9 @@ mod tests {
         let r = parse(&out);
         assert_eq!(
             r.build.steps[0].get("url").and_then(Value::as_str),
-            Some("https://github.com/dfinity/certified-assets/releases/download/v1.2.3/canister-release.wasm.gz")
+            Some(
+                "https://github.com/dfinity/certified-assets/releases/download/v1.2.3/canister-release.wasm.gz"
+            )
         );
         assert_eq!(
             r.build.steps[0].get("sha256").and_then(Value::as_str),
@@ -276,7 +278,9 @@ mod tests {
         let sync = r.sync.unwrap();
         assert_eq!(
             sync.steps[0].get("url").and_then(Value::as_str),
-            Some("https://github.com/dfinity/certified-assets/releases/download/v1.2.3/plugin-release.wasm")
+            Some(
+                "https://github.com/dfinity/certified-assets/releases/download/v1.2.3/plugin-release.wasm"
+            )
         );
         assert_eq!(
             sync.steps[0].get("sha256").and_then(Value::as_str),

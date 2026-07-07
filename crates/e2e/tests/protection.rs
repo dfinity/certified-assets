@@ -13,8 +13,8 @@
 //! disturbed.
 
 use e2e::{
-    frontend_canister_id, http_fetch, http_fetch_with_headers, http_post_form, icp_cmd,
-    setup_example, LocalNetwork,
+    LocalNetwork, frontend_canister_id, http_fetch, http_fetch_with_headers, http_post_form,
+    icp_cmd, setup_example,
 };
 use reqwest::StatusCode;
 

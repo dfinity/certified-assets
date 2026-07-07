@@ -296,8 +296,8 @@ impl<M: Memory> ChunkStore<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
     use ic_stable_structures::DefaultMemoryImpl;
+    use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
 
     fn store() -> ChunkStore<ic_stable_structures::memory_manager::VirtualMemory<DefaultMemoryImpl>>
     {

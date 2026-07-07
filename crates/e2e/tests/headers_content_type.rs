@@ -7,7 +7,7 @@
 //! content-type the plugin sent to the canister is the one that ended up
 //! in the certified response.
 
-use e2e::{http_fetch, icp_cmd, setup_project, LocalNetwork};
+use e2e::{LocalNetwork, http_fetch, icp_cmd, setup_project};
 use reqwest::StatusCode;
 use std::fs;
 

@@ -1,6 +1,6 @@
 //! Rejecting a manifest that syncs more than one source directory.
 
-use e2e::{icp_cmd, setup_project, LocalNetwork};
+use e2e::{LocalNetwork, icp_cmd, setup_project};
 
 /// The assets sync plugin owns the URL space of its canister and only
 /// supports a single source directory. A manifest that lists multiple

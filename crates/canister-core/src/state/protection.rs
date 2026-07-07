@@ -11,11 +11,11 @@
 //! (`token_index`) lives on `State` and is read here.
 
 use super::State;
-use crate::cert::{build_ic_certificate_expression_header, AssetPath, HashTreePath};
+use crate::cert::{AssetPath, HashTreePath, build_ic_certificate_expression_header};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::{
-    access_cookie_values, parse_form_token, token_id, ProtectionResponse, ProtectionStatus,
-    TokenInfo, TokenMeta,
+    ProtectionResponse, ProtectionStatus, TokenInfo, TokenMeta, access_cookie_values,
+    parse_form_token, token_id,
 };
 use serde_bytes::ByteBuf;
 

@@ -333,9 +333,11 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(result.len(), 200);
-        assert!(result
-            .iter()
-            .enumerate()
-            .all(|(i, r)| r.to == format!("/to-{i}")));
+        assert!(
+            result
+                .iter()
+                .enumerate()
+                .all(|(i, r)| r.to == format!("/to-{i}"))
+        );
     }
 }

@@ -5,7 +5,7 @@
 //!
 //! [`Certifier`]: crate::cert::Certifier
 
-use super::{State, PAGE_SIZE};
+use super::{PAGE_SIZE, State};
 use wire_types::RedirectRule;
 
 impl State {

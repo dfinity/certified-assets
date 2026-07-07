@@ -6,7 +6,7 @@
 //! [`Store`]: crate::store::Store
 //! [`Certifier`]: crate::cert::Certifier
 
-use super::{State, PAGE_SIZE};
+use super::{PAGE_SIZE, State};
 use crate::asset::{AssetMeta, EncodingMeta};
 use crate::cert::AssetKey;
 use serde_bytes::ByteBuf;

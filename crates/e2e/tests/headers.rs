@@ -5,7 +5,7 @@
 //! handing it back, so a successful fetch is also proof of certification —
 //! and proof that the headers we set are the same ones the canister certified.
 
-use e2e::{http_fetch, icp_cmd, list_assets, setup_example, LocalNetwork};
+use e2e::{LocalNetwork, http_fetch, icp_cmd, list_assets, setup_example};
 use reqwest::StatusCode;
 use std::fs;
 
@@ -65,9 +65,11 @@ fn header_edit_propagates_via_set_asset_headers() {
         !headers_before.is_empty(),
         "/index.html should carry headers"
     );
-    assert!(headers_before
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("x-frame-options") && v == "DENY"));
+    assert!(
+        headers_before
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-frame-options") && v == "DENY")
+    );
 
     // Bump the global X-Robots-Tag without touching any asset bytes.
     fs::write(

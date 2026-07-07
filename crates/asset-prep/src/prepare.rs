@@ -13,8 +13,8 @@ use std::path::Path;
 
 use wire_types::{Encoding, RedirectRule, RulePattern};
 
-use crate::content::{encoders_for, Content};
-use crate::headers::{self, HeaderRule, HEADERS_FILENAME};
+use crate::content::{Content, encoders_for};
+use crate::headers::{self, HEADERS_FILENAME, HeaderRule};
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::{self, AssetSource};
 use crate::{html_handling, not_found};
@@ -351,10 +351,12 @@ mod tests {
         // plus the `/* -> /404.html 404` catch-all (see `not_found`).
         assert_eq!(prepared.assets.len(), 1);
         assert_eq!(prepared.assets[0].key, not_found::ROOT_404_KEY);
-        assert!(prepared
-            .redirect_rules
-            .iter()
-            .any(|r| r.status == 404 && r.to == not_found::ROOT_404_KEY));
+        assert!(
+            prepared
+                .redirect_rules
+                .iter()
+                .any(|r| r.status == 404 && r.to == not_found::ROOT_404_KEY)
+        );
     }
 
     #[test]
@@ -369,10 +371,12 @@ mod tests {
             .filter(|a| a.key == not_found::ROOT_404_KEY)
             .count();
         assert_eq!(count_404, 1);
-        assert!(prepared.assets[0]
-            .encodings
-            .iter()
-            .any(|e| e.encoding == Encoding::Identity));
+        assert!(
+            prepared.assets[0]
+                .encodings
+                .iter()
+                .any(|e| e.encoding == Encoding::Identity)
+        );
     }
 
     #[test]
@@ -387,10 +391,12 @@ mod tests {
             .find(|a| a.key == "/index.html")
             .expect("index.html prepared");
         assert_eq!(index.content_type, "text/html");
-        assert!(index
-            .encodings
-            .iter()
-            .any(|e| e.encoding == Encoding::Identity));
+        assert!(
+            index
+                .encodings
+                .iter()
+                .any(|e| e.encoding == Encoding::Identity)
+        );
         // Each kept encoding is at least one chunk.
         for enc in &index.encodings {
             assert!(!enc.chunks.is_empty());

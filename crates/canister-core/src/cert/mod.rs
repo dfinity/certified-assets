@@ -29,8 +29,8 @@ mod primitives;
 
 pub(crate) use certifier::Certifier;
 pub(crate) use primitives::{
+    AssetKey, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey, ResponseHash,
     build_ic_certificate_expression_from_headers,
     build_ic_certificate_expression_from_headers_and_encoding,
-    build_ic_certificate_expression_header, response_hash, AssetKey, AssetPath,
-    CertificateExpression, HashTreePath, NestedTreeKey, ResponseHash,
+    build_ic_certificate_expression_header, response_hash,
 };

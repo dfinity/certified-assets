@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::exit;
 
-use recipe_gen::{read_sha256_file, render_recipe, WasmSource};
+use recipe_gen::{WasmSource, read_sha256_file, render_recipe};
 
 const USAGE: &str = "\
 usage:

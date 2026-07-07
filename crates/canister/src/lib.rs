@@ -1,8 +1,8 @@
 use candid::Principal;
 use canister_core::{
-    guard_can_sync, guard_is_controller, AssetDetails, ByteBuf, ExecuteOperationsArguments,
-    HttpRequest, HttpResponse, IssueTokenArgs, ProtectionStatus, RedirectRule, StartSyncResult,
-    TokenInfo, UploadChunksArguments, Version,
+    AssetDetails, ByteBuf, ExecuteOperationsArguments, HttpRequest, HttpResponse, IssueTokenArgs,
+    ProtectionStatus, RedirectRule, StartSyncResult, TokenInfo, UploadChunksArguments, Version,
+    guard_can_sync, guard_is_controller,
 };
 use ic_cdk::{post_upgrade, query, update};
 
@@ -138,7 +138,7 @@ ic_cdk::export_candid!();
 
 #[test]
 fn candid_interface_compatibility() {
-    use candid_parser::utils::{service_equal, CandidSource};
+    use candid_parser::utils::{CandidSource, service_equal};
     use std::path::PathBuf;
 
     let new_interface = __export_service();
