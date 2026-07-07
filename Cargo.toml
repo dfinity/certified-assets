@@ -6,9 +6,9 @@ resolver = "2"
 # Single semver for every crate in the workspace; also the release identity the
 # canister and sync plugin share (see crates/wire-types/src/version.rs). Bump it
 # per the breaking/non-breaking rule documented there, then `make tag`.
-version = "0.1.0"
+version = "0.2.0"
 authors = ["DFINITY Stiftung <sdk@dfinity.org>"]
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/dfinity/certified-assets"
 license = "Apache-2.0"
 publish = false
@@ -21,13 +21,13 @@ ic-response-verification = "3.0.3"
 ic-representation-independent-hash = "3.0.3"
 
 # Others
-anyhow = "1.0.56"
+anyhow = "1.0.103"
 assert_cmd = "2"
 base64 = "0.22.1"
 brotli = "8.0.2"
 canbench-rs = "0.6.0"
 candid = "0.10.18"
-candid_parser = "0.3.0"
+candid_parser = "0.4.0"
 ciborium = "0.2.2"
 flate2 = "1.0"
 # Pinned to the versions icp-cli uses so recipe-gen's tests render recipes the
@@ -38,7 +38,7 @@ http = "1.4.2"
 ic-cdk = "0.20.1"
 ic-cdk-management-canister = "0.1.1"
 ic-stable-structures = "0.7.2"
-itertools = "0.14.0"
+itertools = "0.15.0"
 mime = "0.3"
 mime_guess = "2.0"
 num-traits = "0.2.14"
