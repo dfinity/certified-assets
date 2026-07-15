@@ -25,8 +25,8 @@ pub use http::{HttpRequest, HttpResponse};
 pub use protection::{IssueTokenArgs, ProtectionStatus, TokenInfo};
 pub use serde_bytes::ByteBuf;
 pub use wire_types::{
-    AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
-    Version,
+    AssetDetails, ChunkId, ExecuteOperationsArguments, RedirectRule, StartSyncResult,
+    UploadChunksArguments, Version,
 };
 
 thread_local! {
@@ -74,13 +74,12 @@ pub fn start_sync() -> StartSyncResult {
     })
 }
 
-pub fn upload_chunks(arg: UploadChunksArguments) {
+pub fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
     let system_context = SystemContext::new();
 
-    STATE.with_borrow_mut(|s| {
-        if let Err(msg) = s.upload_chunks(arg, &system_context) {
-            trap(&msg);
-        }
+    STATE.with_borrow_mut(|s| match s.upload_chunks(arg, &system_context) {
+        Ok(ids) => ids,
+        Err(msg) => trap(&msg),
     })
 }
 

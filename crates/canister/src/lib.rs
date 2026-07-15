@@ -1,8 +1,8 @@
 use candid::Principal;
 use canister_core::{
-    AssetDetails, ByteBuf, ExecuteOperationsArguments, HttpRequest, HttpResponse, IssueTokenArgs,
-    ProtectionStatus, RedirectRule, StartSyncResult, TokenInfo, UploadChunksArguments, Version,
-    guard_can_sync, guard_is_controller,
+    AssetDetails, ByteBuf, ChunkId, ExecuteOperationsArguments, HttpRequest, HttpResponse,
+    IssueTokenArgs, ProtectionStatus, RedirectRule, StartSyncResult, TokenInfo,
+    UploadChunksArguments, Version, guard_can_sync, guard_is_controller,
 };
 use ic_cdk::{post_upgrade, query, update};
 
@@ -90,7 +90,7 @@ fn start_sync() -> StartSyncResult {
 }
 
 #[update(guard = "guard_can_sync")]
-fn upload_chunks(arg: UploadChunksArguments) {
+fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
     canister_core::upload_chunks(arg)
 }
 

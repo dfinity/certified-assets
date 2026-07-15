@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "asset-prep"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "brotli",
  "flate2",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "canister"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candid",
  "candid_parser",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "canister-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "asset-prep",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "e2e"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "assert_cmd",
  "candid",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "recipe-gen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "handlebars",
  "serde",
@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "state-hash"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "sha2 0.11.0",
  "wire-types",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "state-hash-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asset-prep",
  "hex",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "sync-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asset-prep",
  "candid",
@@ -3169,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "sync-plugin"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candid",
  "serde",
@@ -3880,7 +3880,7 @@ dependencies = [
 
 [[package]]
 name = "wire-types"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candid",
  "serde",

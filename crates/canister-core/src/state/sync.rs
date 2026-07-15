@@ -15,7 +15,8 @@ use crate::sync::{
 };
 use candid::Principal;
 use wire_types::{
-    ExecuteOperationsArguments, Operation, SessionId, StartSyncResult, UploadChunksArguments,
+    ChunkId, ExecuteOperationsArguments, Operation, SessionId, StartSyncResult,
+    UploadChunksArguments,
 };
 
 impl State {
@@ -75,23 +76,26 @@ impl State {
         }
     }
 
-    /// Stages chunks for the active sync. Chunks are appended in arrival order;
-    /// each chunk's id is its index in `self.chunks`. The numbering restarts at
-    /// 0 every sync (the staging area is cleared on sync start), so the plugin
-    /// — which uploads sequentially — reproduces the same ids without the
-    /// canister echoing them back. Returns nothing for that reason.
+    /// Stages chunks for the active sync and returns the id assigned to each, in
+    /// the same order as `chunks`. Chunks are appended in arrival order; each
+    /// chunk's id is its index in `self.chunks` (the numbering restarts at 0
+    /// every sync, since the staging area is cleared on sync start). Echoing the
+    /// ids back lets the caller map them positionally per call, so uploads may
+    /// run concurrently without relying on a shared arrival order.
     pub fn upload_chunks(
         &mut self,
         UploadChunksArguments { session_id, chunks }: UploadChunksArguments,
         system_context: &SystemContext,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<ChunkId>, String> {
         self.touch_session(session_id, system_context.current_timestamp_ns)?;
 
+        let mut ids = Vec::with_capacity(chunks.len());
         for chunk in chunks {
+            ids.push(self.chunks.len() as ChunkId);
             self.chunks.push(Some(chunk));
         }
 
-        Ok(())
+        Ok(ids)
     }
 
     pub fn execute_operations(
