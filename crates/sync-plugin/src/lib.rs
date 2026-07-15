@@ -9,38 +9,31 @@ wit_bindgen::generate!({
 });
 use crate::icp::sync_plugin::types as ty;
 
-use candid::{CandidType, Decode, Encode};
-use serde::de::DeserializeOwned;
-use sync_core::{CallType, CanisterCall, sync};
+use sync_core::{Call, CallType, CanisterCall, sync};
 
 struct WasiCall;
 
 impl CanisterCall for WasiCall {
-    fn call<A, R>(
-        &self,
-        method: &str,
-        arg: A,
-        call_type: CallType,
-        direct: bool,
-    ) -> Result<R, String>
-    where
-        A: CandidType,
-        R: CandidType + DeserializeOwned,
-    {
-        let arg_bytes = Encode!(&arg).map_err(|e| format!("encode arg for {method}: {e}"))?;
+    fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+        // Encode/Decode now live in the trait's default `call`; this transport
+        // only moves the already-encoded bytes across the host boundary.
         let req = CanisterCallRequest {
-            method: method.to_string(),
-            arg: arg_bytes,
-            call_type: match call_type {
+            method: call.method.clone(),
+            arg: call.arg,
+            call_type: match call.call_type {
                 CallType::Update => ty::CallType::Update,
                 CallType::Query => ty::CallType::Query,
             },
-            direct,
+            direct: call.direct,
             cycles: 0,
         };
-        let bytes = canister_call(&req).map_err(|e| format!("{method}: {e}"))?;
-        Decode!(&bytes, R).map_err(|e| format!("decode reply from {method}: {e}"))
+        canister_call(&req).map_err(|e| format!("{}: {e}", call.method))
     }
+
+    // `dispatch_batch` inherits the sequential default on purpose: keeping the
+    // plugin sequential is zero runtime work today. When the icp-cli runtime
+    // gains a `canister-call-batch` host import, override `dispatch_batch` here
+    // to fan the calls out concurrently — and touch nothing else in this repo.
 }
 
 struct Plugin;

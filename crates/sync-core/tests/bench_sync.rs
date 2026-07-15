@@ -13,11 +13,11 @@
 //!
 //! Tests are `#[ignore]`'d so they don't slow down the regular suite.
 
-use candid::{CandidType, Decode, Encode, Principal};
+use candid::{CandidType, Encode, Principal};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
-use sync_core::{CallType, CanisterCall, sync};
+use sync_core::{Call, CanisterCall, sync};
 use wire_types::{AssetDetails, RedirectRule};
 
 // Wire-compatible mirrors of the response types defined privately in
@@ -67,20 +67,15 @@ impl BenchMock {
 }
 
 impl CanisterCall for BenchMock {
-    fn call<A, R>(&self, method: &str, arg: A, _: CallType, _: bool) -> Result<R, String>
-    where
-        A: CandidType,
-        R: CandidType + serde::de::DeserializeOwned,
-    {
-        let arg_bytes = Encode!(&arg).map_err(|e| e.to_string())?;
+    fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
         {
             let mut stats = self.stats.borrow_mut();
-            let entry = stats.entry(method.to_string()).or_insert((0, 0));
+            let entry = stats.entry(call.method.clone()).or_insert((0, 0));
             entry.0 += 1;
-            entry.1 += arg_bytes.len() as u64;
+            entry.1 += call.arg.len() as u64;
         }
 
-        let resp = match method {
+        match call.method.as_str() {
             "version" => Encode!(&wire_types::VERSION),
             "get_asset_details" => Encode!(&Vec::<AssetDetails>::new()),
             "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
@@ -92,9 +87,7 @@ impl CanisterCall for BenchMock {
             "can_sync" => Encode!(&true),
             other => panic!("BenchMock: unexpected method '{other}'"),
         }
-        .map_err(|e| e.to_string())?;
-
-        Decode!(&resp, R).map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())
     }
 }
 

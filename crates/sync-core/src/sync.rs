@@ -688,10 +688,9 @@ fn update_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CallType, CanisterCall};
+    use crate::{Call, CanisterCall};
     use asset_prep::not_found;
-    use candid::{CandidType, Principal};
-    use serde::de::DeserializeOwned;
+    use candid::{CandidType, Decode, Principal};
     use sha2::{Digest, Sha256};
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
@@ -771,17 +770,12 @@ mod tests {
     }
 
     impl CanisterCall for ChunkBatchRecorder {
-        fn call<A, R>(&self, method: &str, arg: A, _: CallType, _: bool) -> Result<R, String>
-        where
-            A: CandidType,
-            R: CandidType + DeserializeOwned,
-        {
-            assert_eq!(method, "upload_chunks");
-            let bytes = candid::encode_one(&arg).map_err(|e| e.to_string())?;
-            let req: ChunksReqMirror = candid::decode_one(&bytes).map_err(|e| e.to_string())?;
+        fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+            assert_eq!(call.method, "upload_chunks");
+            let req: ChunksReqMirror =
+                Decode!(&call.arg, ChunksReqMirror).map_err(|e| e.to_string())?;
             self.batches.borrow_mut().push(req.chunks.len());
-            let reply = candid::encode_one(()).map_err(|e| e.to_string())?;
-            candid::decode_one(&reply).map_err(|e| e.to_string())
+            candid::encode_one(()).map_err(|e| e.to_string())
         }
     }
 
@@ -1181,19 +1175,14 @@ mod tests {
     }
 
     impl CanisterCall for CommitRecorder {
-        fn call<A, R>(&self, method: &str, arg: A, _: CallType, _: bool) -> Result<R, String>
-        where
-            A: CandidType,
-            R: CandidType + DeserializeOwned,
-        {
-            assert_eq!(method, "execute_operations");
-            let bytes = candid::encode_one(&arg).map_err(|e| e.to_string())?;
-            let req: CommitArgsMirror = candid::decode_one(&bytes).map_err(|e| e.to_string())?;
+        fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+            assert_eq!(call.method, "execute_operations");
+            let req: CommitArgsMirror =
+                Decode!(&call.arg, CommitArgsMirror).map_err(|e| e.to_string())?;
             self.calls
                 .borrow_mut()
                 .push((req.session_id, req.operations.len(), req.is_final));
-            let reply = candid::encode_one(()).map_err(|e| e.to_string())?;
-            candid::decode_one(&reply).map_err(|e| e.to_string())
+            candid::encode_one(()).map_err(|e| e.to_string())
         }
     }
 
@@ -1925,22 +1914,14 @@ mod tests {
     }
 
     impl CanisterCall for PermissionMock {
-        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, direct: bool) -> Result<R, String>
-        where
-            A: CandidType,
-            R: CandidType + DeserializeOwned,
-        {
-            match method {
-                "can_sync" => {
-                    let bytes = candid::encode_one(self.can_sync).map_err(|e| e.to_string())?;
-                    candid::decode_one(&bytes).map_err(|e| e.to_string())
-                }
+        fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+            match call.method.as_str() {
+                "can_sync" => candid::encode_one(self.can_sync).map_err(|e| e.to_string()),
                 "authorize" => {
-                    self.authorize_calls.borrow_mut().push(direct);
-                    let bytes = candid::encode_one(()).map_err(|e| e.to_string())?;
-                    candid::decode_one(&bytes).map_err(|e| e.to_string())
+                    self.authorize_calls.borrow_mut().push(call.direct);
+                    candid::encode_one(()).map_err(|e| e.to_string())
                 }
-                _ => panic!("unexpected method: {method}"),
+                other => panic!("unexpected method: {other}"),
             }
         }
     }
@@ -1977,22 +1958,13 @@ mod tests {
     }
 
     impl CanisterCall for SyncMock {
-        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
-        where
-            A: CandidType,
-            R: CandidType + DeserializeOwned,
-        {
-            let response = self
-                .queue
+        fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+            self.queue
                 .borrow_mut()
-                .entry(method.to_string())
+                .entry(call.method.clone())
                 .or_default()
                 .pop_front()
-                .unwrap_or_else(|| panic!("no programmed response for '{method}'"));
-            match response {
-                Ok(bytes) => candid::decode_one(&bytes).map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            }
+                .unwrap_or_else(|| panic!("no programmed response for '{}'", call.method))
         }
     }
 

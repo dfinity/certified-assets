@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use candid::{CandidType, Principal};
+use candid::{CandidType, Decode, Encode, Principal};
 use serde::de::DeserializeOwned;
 use serde_bytes::ByteBuf;
 use std::collections::HashMap;
@@ -23,7 +23,55 @@ pub enum CallType {
     Query,
 }
 
+/// One canister call, ready for the wire: the method name, its candid-encoded
+/// argument, and the routing flags. `sync-core` builds these via the typed layer
+/// ([`CanisterCall::call`] / [`CanisterCall::call_batch`]); a transport moves the
+/// bytes to the canister and back.
+pub struct Call {
+    /// Method name. Owned to keep the struct free of lifetimes; the allocation
+    /// is negligible next to a canister round-trip.
+    pub method: String,
+    /// Candid-encoded argument, produced by the typed layer.
+    pub arg: Vec<u8>,
+    pub call_type: CallType,
+    /// Call the canister directly (`true`) or route through the proxy (`false`).
+    pub direct: bool,
+}
+
+/// Transport seam between `sync-core` and a canister.
+///
+/// Two layers. The **raw layer** ([`dispatch`](Self::dispatch), required, and
+/// [`dispatch_batch`](Self::dispatch_batch), an overridable default) moves opaque
+/// candid bytes — so a transport can batch and run calls concurrently without
+/// knowing their types. The **typed layer** ([`call`](Self::call) /
+/// [`call_batch`](Self::call_batch), defaults never overridden) is the
+/// Encode/Decode sugar the rest of `sync-core` uses, so callers never hand-roll
+/// candid and single/batch stay symmetric.
+///
+/// The trait is not object-safe (its typed methods are generic), which is fine:
+/// every user is generic over `C: CanisterCall`; no `dyn CanisterCall` exists.
 pub trait CanisterCall {
+    // ── raw layer: transports implement `dispatch`; may override `dispatch_batch` ──
+
+    /// The one required method: move an encoded [`Call`] to the canister and
+    /// return the raw reply bytes.
+    fn dispatch(&self, call: Call) -> Result<Vec<u8>, String>;
+
+    /// Independent calls that MAY run concurrently. Results are **positional** —
+    /// `result[i]` is the reply to `calls[i]` — which is exactly what lets the
+    /// upload path map returned chunk ids back by position (see
+    /// `pack_and_upload_chunks`). This is the concurrency seam. The default runs
+    /// them sequentially via `dispatch`, so a transport that can't parallelize is
+    /// still correct, just not fast.
+    fn dispatch_batch(&self, calls: Vec<Call>) -> Vec<Result<Vec<u8>, String>> {
+        calls.into_iter().map(|c| self.dispatch(c)).collect()
+    }
+
+    // ── typed sugar: defaults, never overridden ──
+
+    /// Typed single call. Uses `Encode!`/`Decode!` (not `encode_one`/
+    /// `decode_one`) so no-arg methods like `version` encode to an empty argument
+    /// list rather than a one-tuple of unit.
     fn call<A, R>(
         &self,
         method: &str,
@@ -33,7 +81,61 @@ pub trait CanisterCall {
     ) -> Result<R, String>
     where
         A: CandidType,
-        R: CandidType + DeserializeOwned;
+        R: CandidType + DeserializeOwned,
+    {
+        let arg = Encode!(&arg).map_err(|e| format!("encode arg for {method}: {e}"))?;
+        let bytes = self.dispatch(Call {
+            method: method.to_string(),
+            arg,
+            call_type,
+            direct,
+        })?;
+        Decode!(&bytes, R).map_err(|e| format!("decode reply from {method}: {e}"))
+    }
+
+    /// Typed homogeneous batch: every call is the same `method` with the same
+    /// argument/return types (all we ever batch). Returns a flat, **positional**
+    /// `Vec<Result<R>>`. Arguments are moved into the [`Call`]s (no clone of the
+    /// ~MB chunk payloads); a per-item encode failure becomes that item's `Err`
+    /// without consuming a `dispatch_batch` slot, and `slots` stitches the
+    /// replies back so positions line up.
+    fn call_batch<A, R>(
+        &self,
+        method: &str,
+        args: Vec<A>,
+        call_type: CallType,
+        direct: bool,
+    ) -> Vec<Result<R, String>>
+    where
+        A: CandidType,
+        R: CandidType + DeserializeOwned,
+    {
+        let mut calls = Vec::with_capacity(args.len());
+        let mut slots: Vec<Result<(), String>> = Vec::with_capacity(args.len());
+        for arg in args {
+            match Encode!(&arg) {
+                Ok(arg) => {
+                    calls.push(Call {
+                        method: method.to_string(),
+                        arg,
+                        call_type,
+                        direct,
+                    });
+                    slots.push(Ok(()));
+                }
+                Err(e) => slots.push(Err(format!("encode arg for {method}: {e}"))),
+            }
+        }
+        let mut replies = self.dispatch_batch(calls).into_iter();
+        slots
+            .into_iter()
+            .map(|slot| {
+                slot?; // this slot's arg failed to encode; it was never dispatched
+                let bytes = replies.next().expect("one reply per dispatched call")?;
+                Decode!(&bytes, R).map_err(|e| format!("decode reply from {method}: {e}"))
+            })
+            .collect()
+    }
 }
 
 pub fn version(c: &impl CanisterCall) -> Result<Version, String> {
@@ -165,8 +267,6 @@ pub fn authorize_via_proxy(c: &impl CanisterCall, principal: Principal) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candid::CandidType;
-    use serde::de::DeserializeOwned;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use wire_types::RulePattern;
@@ -184,15 +284,10 @@ mod tests {
     }
 
     impl CanisterCall for PagedMock {
-        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
-        where
-            A: CandidType,
-            R: CandidType + DeserializeOwned,
-        {
-            assert_eq!(method, "get_asset_details");
+        fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+            assert_eq!(call.method, "get_asset_details");
             let page = self.pages.borrow_mut().pop_front().unwrap_or_default();
-            let bytes = candid::encode_one(page).map_err(|e| e.to_string())?;
-            candid::decode_one(&bytes).map_err(|e| e.to_string())
+            candid::encode_one(page).map_err(|e| e.to_string())
         }
     }
 
@@ -272,15 +367,10 @@ mod tests {
     }
 
     impl CanisterCall for RulePagedMock {
-        fn call<A, R>(&self, method: &str, _arg: A, _: CallType, _: bool) -> Result<R, String>
-        where
-            A: CandidType,
-            R: CandidType + DeserializeOwned,
-        {
-            assert_eq!(method, "get_redirect_rules");
+        fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+            assert_eq!(call.method, "get_redirect_rules");
             let page = self.pages.borrow_mut().pop_front().unwrap_or_default();
-            let bytes = candid::encode_one(page).map_err(|e| e.to_string())?;
-            candid::decode_one(&bytes).map_err(|e| e.to_string())
+            candid::encode_one(page).map_err(|e| e.to_string())
         }
     }
 
