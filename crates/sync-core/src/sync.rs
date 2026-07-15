@@ -9,14 +9,15 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use crate::canister::{
-    CanisterCall, authorize_via_proxy, can_sync, execute_operations, list_all_assets,
-    list_all_redirect_rules, start_sync, upload_chunks, version,
+    CallType, CanisterCall, authorize_via_proxy, can_sync, execute_operations, list_all_assets,
+    list_all_redirect_rules, start_sync, version,
 };
 use asset_prep::{MAX_CHUNK_SIZE, PreparedAsset, PreparedChunk, PreparedProject, prepare_project};
 use wire_types::{
-    AssetDetails, CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments,
-    Operation, RedirectRule, RulePattern, SetAssetContentArguments, SetAssetHeadersArguments,
-    SetRedirectRulesArguments, UnsetAssetContentArguments,
+    AssetDetails, ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding,
+    ExecuteOperationsArguments, Operation, RedirectRule, RulePattern, SetAssetContentArguments,
+    SetAssetHeadersArguments, SetRedirectRulesArguments, UnsetAssetContentArguments,
+    UploadChunksArguments,
 };
 
 /// One encoding of an asset, as the canister diff/upload sees it: the prepared
@@ -325,23 +326,29 @@ fn is_already_in_place(
 /// pattern: a project of 100 small files used to make 100 round-trips; now
 /// they ride in a single call (≈1.9 MB budget).
 ///
-/// Chunk ids are not returned over the wire. The canister numbers staged chunks
-/// 0, 1, 2, … per sync in the order it receives them, so we assign the same ids
-/// here as we hand each chunk off. This only holds because uploads are issued
-/// one call at a time, in order — if this loop is ever parallelized, the
-/// canister must echo the ids back again (see `upload_chunks` / `UploadChunksArguments`).
+/// Chunk ids come back over the wire. Each `upload_chunks` call returns the ids
+/// the canister assigned to its chunks, in that call's content order. We scatter
+/// `results[i][j]` into the slot that produced the j-th chunk of the i-th call —
+/// a purely positional mapping, with no assumption about the order the calls ran
+/// relative to one another. That is exactly what lets the transport issue these
+/// calls concurrently (see `CanisterCall::dispatch_batch`).
 ///
-/// Routing is by `(asset_key, encoding, chunk_index)`: each `PendingChunk`
-/// remembers where its inferred id should land in `enc.chunk_ids[chunk_index]`.
+/// Routing is by `(asset_key, encoding, chunk_index)`: each chunk carries a
+/// `Slot` recording where its returned id must land in `enc.chunk_ids`.
 fn pack_and_upload_chunks<C: CanisterCall>(
     canister: &C,
     session_id: u64,
     project_assets: &mut HashMap<String, ProjectAsset>,
 ) -> Result<(), String> {
-    struct PendingChunk {
+    /// Where a single chunk's returned id must land.
+    struct Slot {
         asset_key: String,
         encoding: Encoding,
         chunk_index: usize,
+    }
+
+    struct PendingChunk {
+        slot: Slot,
         data: Vec<u8>,
     }
 
@@ -358,9 +365,11 @@ fn pack_and_upload_chunks<C: CanisterCall>(
             enc.chunk_ids = vec![0u64; enc.chunks.len()];
             for (i, chunk) in enc.chunks.iter_mut().enumerate() {
                 pending.push(PendingChunk {
-                    asset_key: key.clone(),
-                    encoding,
-                    chunk_index: i,
+                    slot: Slot {
+                        asset_key: key.clone(),
+                        encoding,
+                        chunk_index: i,
+                    },
                     data: std::mem::take(&mut chunk.data),
                 });
             }
@@ -377,13 +386,13 @@ fn pack_and_upload_chunks<C: CanisterCall>(
     pending.sort_by_key(|b| std::cmp::Reverse(b.data.len()));
 
     let total_chunks = pending.len();
-    let mut total_calls = 0usize;
     let mut total_bytes = 0u64;
-    // The canister assigns ids 0, 1, 2, … across the whole sync in the order it
-    // receives chunks. We send batches sequentially and, within each batch, in
-    // `content` order — so mirroring that running counter here yields the same
-    // ids the canister will, without a wire round-trip.
-    let mut next_id: u64 = 0;
+
+    // Build one upload call per batch, keeping each batch's per-chunk routing
+    // alongside its arguments so the returned ids can be scattered back by
+    // position after the calls complete.
+    let mut args: Vec<UploadChunksArguments> = Vec::new();
+    let mut batch_routes: Vec<Vec<Slot>> = Vec::new();
 
     while !pending.is_empty() {
         let mut batch: Vec<PendingChunk> = Vec::new();
@@ -398,31 +407,50 @@ fn pack_and_upload_chunks<C: CanisterCall>(
             }
         }
         pending = leftovers;
-
-        // Move each chunk's bytes into the request; the post-call loop below
-        // only needs the routing fields (asset_key/encoding/chunk_index), not
-        // the data. Candid copies the bytes on encode either way, so this is a
-        // move, not an extra copy.
-        let content: Vec<ByteBuf> = batch
-            .iter_mut()
-            .map(|p| ByteBuf::from(std::mem::take(&mut p.data)))
-            .collect();
-        upload_chunks(canister, session_id, content)?;
-        total_calls += 1;
         total_bytes += batch_size as u64;
 
-        // Assign ids in the same order the bytes were placed in `content`, so
-        // they match the canister's arrival-order numbering.
-        for p in &batch {
-            let asset = project_assets
-                .get_mut(&p.asset_key)
-                .expect("asset present (collected above)");
-            let enc = asset
+        // Split each pending chunk into its wire bytes (moved into the request)
+        // and its routing `Slot` (kept for the scatter below). Candid copies the
+        // bytes on encode either way, so taking them here is a move, not a copy.
+        let mut chunks = Vec::with_capacity(batch.len());
+        let mut routes = Vec::with_capacity(batch.len());
+        for p in batch {
+            chunks.push(ByteBuf::from(p.data));
+            routes.push(p.slot);
+        }
+        args.push(UploadChunksArguments { session_id, chunks });
+        batch_routes.push(routes);
+    }
+
+    let total_calls = args.len();
+
+    // Issue every batch through the typed batch seam. `call_batch` returns one
+    // `Vec<ChunkId>` per batch, positionally (result i ↔ batch i); the transport
+    // decides whether to run them sequentially or concurrently.
+    let results = canister.call_batch::<_, Vec<ChunkId>>(
+        "upload_chunks",
+        args,
+        CallType::Update,
+        true,
+    );
+
+    for (routes, result) in batch_routes.into_iter().zip(results) {
+        let ids = result?;
+        if ids.len() != routes.len() {
+            return Err(format!(
+                "upload_chunks returned {} ids for {} chunk(s)",
+                ids.len(),
+                routes.len()
+            ));
+        }
+        for (slot, id) in routes.into_iter().zip(ids) {
+            let enc = project_assets
+                .get_mut(&slot.asset_key)
+                .expect("asset present (collected above)")
                 .encodings
-                .get_mut(&p.encoding)
+                .get_mut(&slot.encoding)
                 .expect("encoding present (collected above)");
-            enc.chunk_ids[p.chunk_index] = next_id;
-            next_id += 1;
+            enc.chunk_ids[slot.chunk_index] = id;
         }
     }
 
@@ -747,16 +775,19 @@ mod tests {
 
     // Records the batch sizes the packer produced (chunks per `upload_chunks`
     // call). Used to verify that `pack_and_upload_chunks` collapses many small
-    // chunks into single calls and assigns ids to the right encoding slots. The
-    // call returns unit; the plugin infers ids locally, so the mock doesn't.
+    // chunks into single calls and assigns ids to the right encoding slots. It
+    // numbers chunks 0, 1, 2, … in arrival order and echoes those ids back per
+    // call, exactly as the canister does.
     struct ChunkBatchRecorder {
         batches: RefCell<Vec<usize>>, // chunks-per-batch
+        next_id: RefCell<u64>,        // running chunk-id counter
     }
 
     impl ChunkBatchRecorder {
         fn new() -> Self {
             Self {
                 batches: RefCell::new(Vec::new()),
+                next_id: RefCell::new(0),
             }
         }
     }
@@ -774,8 +805,12 @@ mod tests {
             assert_eq!(call.method, "upload_chunks");
             let req: ChunksReqMirror =
                 Decode!(&call.arg, ChunksReqMirror).map_err(|e| e.to_string())?;
-            self.batches.borrow_mut().push(req.chunks.len());
-            candid::encode_one(()).map_err(|e| e.to_string())
+            let n = req.chunks.len();
+            self.batches.borrow_mut().push(n);
+            let start = *self.next_id.borrow();
+            *self.next_id.borrow_mut() = start + n as u64;
+            let ids: Vec<u64> = (start..start + n as u64).collect();
+            candid::encode_one(ids).map_err(|e| e.to_string())
         }
     }
 
@@ -998,6 +1033,102 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    // Overrides `dispatch_batch` to run the batched upload calls in REVERSED
+    // order — standing in for a transport that executed them out of order —
+    // while still returning results positionally (result[i] ↔ calls[i]). Ids are
+    // handed out the way a real canister would for that actual execution order:
+    // the call that runs first gets the lowest ids. Records the id assigned to
+    // each chunk (keyed by its content hash) so the test can confirm the scatter
+    // recovered each chunk's true id no matter what order the calls ran in.
+    struct ReorderingUploadMock {
+        assigned: RefCell<HashMap<[u8; 32], u64>>,
+    }
+
+    impl ReorderingUploadMock {
+        fn new() -> Self {
+            Self {
+                assigned: RefCell::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl CanisterCall for ReorderingUploadMock {
+        fn dispatch(&self, _call: Call) -> Result<Vec<u8>, String> {
+            unreachable!("the batched upload path goes through dispatch_batch")
+        }
+
+        fn dispatch_batch(&self, calls: Vec<Call>) -> Vec<Result<Vec<u8>, String>> {
+            // Decode every call's chunks up front, keeping input position.
+            let per_call: Vec<Vec<Vec<u8>>> = calls
+                .iter()
+                .map(|c| {
+                    let req: ChunksReqMirror = Decode!(&c.arg, ChunksReqMirror).unwrap();
+                    req.chunks.into_iter().map(|b| b.into_vec()).collect()
+                })
+                .collect();
+
+            // Assign ids in REVERSED execution order — the last input call runs
+            // first and takes the lowest ids — but store each call's ids at its
+            // input index so the returned Vec stays positional.
+            let mut ids_by_input: Vec<Vec<u64>> = vec![Vec::new(); per_call.len()];
+            let mut next: u64 = 0;
+            for i in (0..per_call.len()).rev() {
+                let mut ids = Vec::with_capacity(per_call[i].len());
+                for chunk in &per_call[i] {
+                    let hash: [u8; 32] = Sha256::digest(chunk).into();
+                    self.assigned.borrow_mut().insert(hash, next);
+                    ids.push(next);
+                    next += 1;
+                }
+                ids_by_input[i] = ids;
+            }
+
+            ids_by_input
+                .into_iter()
+                .map(|ids| candid::encode_one(ids).map_err(|e| e.to_string()))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn pack_maps_returned_ids_positionally_regardless_of_call_order() {
+        // Several single-chunk assets each larger than half of MAX_CHUNK_SIZE, so
+        // no two share a call → the packer emits one call per asset and the mock
+        // can run them out of order. Distinct fill bytes give each a distinct
+        // content hash.
+        let size = MAX_CHUNK_SIZE / 2 + 1;
+        let contents: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; size]).collect();
+        let mut assets: HashMap<String, ProjectAsset> = contents
+            .iter()
+            .enumerate()
+            .map(|(i, data)| mk_pending_asset(&format!("/a{i}"), "identity", data.clone()))
+            .collect();
+
+        let mock = ReorderingUploadMock::new();
+        pack_and_upload_chunks(&mock, 1, &mut assets).unwrap();
+
+        // Each asset's chunk must carry the exact id the mock assigned to that
+        // chunk's bytes — proving the mapping is positional per call, not a
+        // global arrival counter reproduced on the client.
+        let assigned = mock.assigned.borrow();
+        for (i, data) in contents.iter().enumerate() {
+            let ids = &assets[&format!("/a{i}")].encodings[&Encoding::Identity].chunk_ids;
+            let hash: [u8; 32] = Sha256::digest(data).into();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(ids[0], assigned[&hash], "asset /a{i} got the wrong id");
+        }
+
+        // The assigned ids are a full permutation of 0..4 — and because the mock
+        // ran the calls in reverse, they are genuinely scrambled relative to the
+        // packer's call order, so a client-side counter would have mismatched.
+        let mut all: Vec<u64> = contents
+            .iter()
+            .map(|d| assigned[&<[u8; 32]>::from(Sha256::digest(d))])
+            .collect();
+        all.sort_unstable();
+        assert_eq!(all, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -1620,8 +1751,8 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
-        // Injected /404.html bytes are uploaded before operations execute.
-        mock.push_ok("upload_chunks", ());
+        // Injected /404.html bytes are uploaded before operations execute;
+        // SyncMock synthesizes the returned ids from the request.
         mock.push_ok("execute_operations", ());
 
         let result = sync(
@@ -1959,6 +2090,17 @@ mod tests {
 
     impl CanisterCall for SyncMock {
         fn dispatch(&self, call: Call) -> Result<Vec<u8>, String> {
+            // The upload wire contract — return one id per staged chunk, in
+            // order — is fixed, so synthesize it from the request rather than
+            // scripting it. These sync-flow tests care about call *sequencing*,
+            // not id values (execute_operations is mocked), and the request's
+            // chunk count is what the batch length check needs to line up.
+            if call.method == "upload_chunks" {
+                let req: ChunksReqMirror =
+                    Decode!(&call.arg, ChunksReqMirror).map_err(|e| e.to_string())?;
+                let ids: Vec<u64> = (0..req.chunks.len() as u64).collect();
+                return candid::encode_one(ids).map_err(|e| e.to_string());
+            }
             self.queue
                 .borrow_mut()
                 .entry(call.method.clone())
@@ -2106,7 +2248,7 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
-        mock.push_ok("upload_chunks", ());
+        // SyncMock synthesizes upload_chunks' returned ids from the request.
         mock.push_ok("execute_operations", ());
 
         let result = sync(

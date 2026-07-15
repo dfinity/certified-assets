@@ -13,8 +13,8 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use wire_types::{
-    AssetDetails, ExecuteOperationsArguments, RedirectRule, StartSyncResult, UploadChunksArguments,
-    Version,
+    AssetDetails, ChunkId, ExecuteOperationsArguments, RedirectRule, StartSyncResult,
+    UploadChunksArguments, Version,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -200,14 +200,15 @@ pub fn start_sync(c: &impl CanisterCall) -> Result<u64, String> {
 /// them in (rather than borrowing) costs nothing and lets the caller hand off
 /// its buffers directly.
 ///
-/// Returns nothing: the canister numbers staged chunks 0, 1, 2, … per sync in
-/// arrival order, and the caller reproduces the same ids locally rather than
-/// receiving them over the wire (see `pack_and_upload_chunks`).
+/// Returns the id the canister assigned to each chunk, in the same order as
+/// `chunks`. The batched upload path (`pack_and_upload_chunks`) issues these
+/// calls via `call_batch` instead; this single-call helper stays for callers
+/// that upload one batch at a time.
 pub fn upload_chunks(
     c: &impl CanisterCall,
     session_id: u64,
     chunks: Vec<ByteBuf>,
-) -> Result<(), String> {
+) -> Result<Vec<ChunkId>, String> {
     let req = UploadChunksArguments { session_id, chunks };
     c.call("upload_chunks", req, CallType::Update, true)
 }

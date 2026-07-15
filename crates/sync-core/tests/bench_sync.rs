@@ -13,12 +13,12 @@
 //!
 //! Tests are `#[ignore]`'d so they don't slow down the regular suite.
 
-use candid::{CandidType, Encode, Principal};
+use candid::{CandidType, Decode, Encode, Principal};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 use sync_core::{Call, CanisterCall, sync};
-use wire_types::{AssetDetails, RedirectRule};
+use wire_types::{AssetDetails, RedirectRule, UploadChunksArguments};
 
 // Wire-compatible mirrors of the response types defined privately in
 // sync_core::canister. Same variant/field names → same Candid encoding.
@@ -80,7 +80,12 @@ impl CanisterCall for BenchMock {
             "get_asset_details" => Encode!(&Vec::<AssetDetails>::new()),
             "get_redirect_rules" => Encode!(&Vec::<RedirectRule>::new()),
             "start_sync" => Encode!(&StartSyncOk::Started { session_id: 1 }),
-            "upload_chunks" => Encode!(&()),
+            "upload_chunks" => {
+                // Echo one id per staged chunk, as the canister does.
+                let req = Decode!(&call.arg, UploadChunksArguments).map_err(|e| e.to_string())?;
+                let ids: Vec<u64> = (0..req.chunks.len() as u64).collect();
+                Encode!(&ids)
+            }
             "execute_operations" => Encode!(&()),
             // The bench drives sync() in direct mode, which checks can_sync up
             // front; report the identity as allowed so it proceeds.
