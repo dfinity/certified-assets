@@ -1,0 +1,23 @@
+[package]
+name = "sync-agent"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Native (non-WASI) transport for `sync-core`, built on `ic-agent` + `tokio`.
+# Kept out of `sync-core` so that crate stays lean and WASI-free; this is what a
+# native client (e.g. the Caffeine uploader) depends on to run uploads
+# concurrently.
+[dependencies]
+sync-core = { path = "../sync-core" }
+candid.workspace = true
+anyhow.workspace = true
+ic-agent = "0.49"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
