@@ -23,5 +23,5 @@ tempfile.workspace = true
 # scoping it to dev-deps.
 [dev-dependencies]
 sync-agent = { path = "../sync-agent" }
-ic-agent = "0.49"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+ic-agent.workspace = true
+tokio.workspace = true
