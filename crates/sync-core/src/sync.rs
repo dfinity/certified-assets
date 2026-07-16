@@ -427,12 +427,8 @@ fn pack_and_upload_chunks<C: CanisterCall>(
     // Issue every batch through the typed batch seam. `call_batch` returns one
     // `Vec<ChunkId>` per batch, positionally (result i ↔ batch i); the transport
     // decides whether to run them sequentially or concurrently.
-    let results = canister.call_batch::<_, Vec<ChunkId>>(
-        "upload_chunks",
-        args,
-        CallType::Update,
-        true,
-    );
+    let results =
+        canister.call_batch::<_, Vec<ChunkId>>("upload_chunks", args, CallType::Update, true);
 
     for (routes, result) in batch_routes.into_iter().zip(results) {
         let ids = result?;
