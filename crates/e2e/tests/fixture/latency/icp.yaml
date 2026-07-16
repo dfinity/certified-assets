@@ -1,0 +1,32 @@
+# Fixture for the native-transport latency test (tests/latency.rs).
+#
+# The launcher network adds an artificial delay to every update call, which is
+# what makes a local pocket-ic show the concurrency win: the upload phase is all
+# update calls, so serial uploads pay the delay once per call while concurrent
+# uploads overlap them. Queries (the diff's asset listing) are not delayed.
+#
+# Two build-only canisters (no sync step): the bench installs each, then syncs
+# the SAME payload to each via sync-agent — one at max_in_flight=1 (serial
+# baseline), one at max_in_flight=N (concurrent) — so each run starts from an
+# empty canister rather than a no-op re-sync.
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+    # Large enough that the per-call delay dominates transfer + polling (so the
+    # serial-vs-concurrent gap reflects overlapped round-trips, not noise), but
+    # not so large it drags out the delay-taxed canister installs on deploy.
+    artificial-delay-ms: 300
+
+canisters:
+  - name: bench-serial
+    build:
+      steps:
+        - type: pre-built
+          path: ../../dist/canister.wasm
+  - name: bench-concurrent
+    build:
+      steps:
+        - type: pre-built
+          path: ../../dist/canister.wasm

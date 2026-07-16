@@ -17,3 +17,11 @@ reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+# Only the #[ignore]'d native latency bench (tests/latency.rs) needs a live
+# agent; keep the heavy async stack out of the default test build's link set by
+# scoping it to dev-deps.
+[dev-dependencies]
+sync-agent = { path = "../sync-agent" }
+ic-agent.workspace = true
+tokio.workspace = true

@@ -9,5 +9,5 @@
 mod canister;
 mod sync;
 
-pub use canister::{CallType, CanisterCall};
+pub use canister::{Call, CallType, CanisterCall};
 pub use sync::sync;

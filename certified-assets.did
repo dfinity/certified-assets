@@ -248,11 +248,11 @@ service: {
   // Begin a sync. Returns a session id, or `Busy` if another non-stale sync is
   // already in progress (the owner can always reclaim their own sync).
   start_sync : () -> (StartSyncResult);
-  // Stage content chunks under the sync. Returns nothing: the canister numbers
-  // staged chunks 0, 1, 2, … per sync in arrival order, and the caller — which
-  // uploads sequentially — reproduces the same ids locally to reference them in
-  // SetAssetContent operations.
-  upload_chunks: (UploadChunksArguments) -> ();
+  // Stage content chunks under the sync. Returns the id assigned to each chunk,
+  // in the same order as the argument's `chunks`; the caller maps them by
+  // position to reference the chunks in SetAssetContent operations. Because the
+  // mapping is positional per call, uploads may be issued concurrently.
+  upload_chunks: (UploadChunksArguments) -> (vec ChunkId);
 
   // Apply a group of operations. Perform all successfully, or reject.
   execute_operations: (ExecuteOperationsArguments) -> ();
