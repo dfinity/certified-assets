@@ -1,17 +1,21 @@
-//! Manual latency bench for the concurrent native transport.
+//! Manual latency bench for the concurrent native transport — the **remote /
+//! mainnet** tool.
 //!
-//! This times one `sync_agent::sync` at a chosen concurrency against a
-//! canister you control. It is **not** a CI test: it needs a live replica and a
-//! deployed certified-assets canister the given identity may sync. Build-checked
-//! by `cargo build --examples`, run explicitly.
+//! This times one `sync_agent::sync` at a chosen concurrency against a canister
+//! you control at any replica URL. It is **not** a CI test: it needs a live
+//! canister and an identity that may sync it. Build-checked by
+//! `cargo build --examples`, run explicitly.
 //!
-//! # Why it lives here and not in a PocketIC test
+//! For an *automated, local* measurement, prefer the `#[ignore]`'d e2e test
+//! `native_transport_concurrency_speedup` (`crates/e2e/tests/latency.rs`): it
+//! stands up a local pocket-ic network with an artificial per-update-call delay
+//! and asserts the concurrent run beats the serial one. Use *this* example when
+//! you want the real thing — a boundary node or mainnet, where each round-trip
+//! is genuinely seconds and the full speedup shows without any artificial delay.
 //!
 //! The win from concurrency is overlapping *client-side round-trip latency*
-//! across many in-flight ingress messages. PocketIC executes rounds
-//! deterministically with nothing to overlap, so it can't show the effect. A
-//! single-node local replica has small finality/poll latency, so you'll see the
-//! *trend*; the full ~2× lives on mainnet where each round-trip is seconds.
+//! across many in-flight ingress messages; that latency is exactly what a real
+//! network has and a deterministic local replica does not.
 //!
 //! # Running
 //!

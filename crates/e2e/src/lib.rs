@@ -162,10 +162,10 @@ fn write_local_recipe(project: &Path) {
     fs::write(project.join("recipe.hbs"), recipe).expect("failed to write recipe.hbs");
 }
 
-/// Return the canister ID of `frontend` as printed by `icp canister status --id-only`.
-pub fn frontend_canister_id(project: &Path) -> String {
+/// Return the canister ID of `name` as printed by `icp canister status --id-only`.
+pub fn canister_id(project: &Path, name: &str) -> String {
     let stdout = icp_cmd(project)
-        .args(["canister", "status", "frontend", "--id-only"])
+        .args(["canister", "status", name, "--id-only"])
         .assert()
         .success()
         .get_output()
@@ -175,6 +175,11 @@ pub fn frontend_canister_id(project: &Path) -> String {
         .expect("--id-only output should be utf-8")
         .trim()
         .to_string()
+}
+
+/// Return the canister ID of `frontend` — the canister name every e2e project uses.
+pub fn frontend_canister_id(project: &Path) -> String {
+    canister_id(project, "frontend")
 }
 
 /// Return the local network's HTTP gateway URL (e.g. `http://localhost:1234`),

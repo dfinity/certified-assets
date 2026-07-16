@@ -1171,11 +1171,14 @@ dependencies = [
  "assert_cmd",
  "candid",
  "hex",
+ "ic-agent",
  "recipe-gen",
  "reqwest",
  "serde",
  "serde_json",
+ "sync-agent",
  "tempfile",
+ "tokio",
  "wire-types",
 ]
 
