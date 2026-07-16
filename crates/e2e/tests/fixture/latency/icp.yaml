@@ -1,4 +1,4 @@
-# Fixture for the native-transport latency bench (tests/latency.rs, #[ignore]'d).
+# Fixture for the native-transport latency test (tests/latency.rs).
 #
 # The launcher network adds an artificial delay to every update call, which is
 # what makes a local pocket-ic show the concurrency win: the upload phase is all
@@ -14,9 +14,10 @@ networks:
     mode: managed
     gateway:
       port: 0
-    # Large enough that the per-call delay dominates transfer + polling, so the
-    # serial-vs-concurrent gap reflects overlapped round-trips, not noise.
-    artificial-delay-ms: 500
+    # Large enough that the per-call delay dominates transfer + polling (so the
+    # serial-vs-concurrent gap reflects overlapped round-trips, not noise), but
+    # not so large it drags out the delay-taxed canister installs on deploy.
+    artificial-delay-ms: 300
 
 canisters:
   - name: bench-serial

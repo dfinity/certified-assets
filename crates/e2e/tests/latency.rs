@@ -1,5 +1,6 @@
-//! `#[ignore]`'d latency bench: the native transport's concurrency speedup on a
-//! local pocket-ic network with an artificial per-update-call delay.
+//! Latency test: the native transport's concurrency speedup on a local
+//! pocket-ic network with an artificial per-update-call delay. Runs in the
+//! normal suite (it is *not* `#[ignore]`'d) — see "Why this is safe to gate on".
 //!
 //! # Why the artificial delay
 //!
@@ -21,13 +22,22 @@
 //! (The future plugin bench will do the same, sweeping the icp-cli runtime's
 //! batch-import cap over {1, N}.)
 //!
+//! # Why this is safe to gate on
+//!
+//! It asserts a *ratio* between two runs done back-to-back in one test, on one
+//! machine, so machine-to-machine speed and CI load cancel out. The dominant
+//! cost — the artificial delay — is a replica-side wait, not client compute, so
+//! it doesn't shrink under CPU contention (which would only inflate the serial
+//! run more, never the concurrent one). The assertion keeps a wide margin below
+//! the observed ratio, so it trips on a real regression — uploads silently
+//! serialized — not on noise. If it ever does flake on a runner, re-add
+//! `#[ignore]` rather than widening the margin into meaninglessness.
+//!
 //! # Running
 //!
-//! Needs `make wasm` first (the fixture pins `../../dist/canister.wasm`). Then:
-//!
-//! ```sh
-//! cargo test -p e2e --test latency -- --ignored --nocapture
-//! ```
+//! Runs as part of `cargo test -p e2e`. To watch the numbers:
+//! `cargo test -p e2e --test latency -- --nocapture`. No manual build step —
+//! the e2e `build.rs` produces the pinned `../../dist/*.wasm` via `make wasm`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,11 +49,12 @@ use ic_agent::identity::AnonymousIdentity;
 use sync_agent::{SyncOpts, sync};
 
 /// Files and per-file size for the payload. Each file is incompressible and
-/// larger than half the ~1.9 MB per-call chunk budget, so no two share a call:
+/// larger than half the 1.9 MB per-call chunk budget, so no two share a call:
 /// the packer emits one upload call per file, giving many batches for the
-/// concurrency to overlap.
-const FILES: usize = 16;
-const FILE_BYTES: usize = 1_500_000;
+/// concurrency to overlap. Kept modest so the test stays quick in CI while the
+/// per-call delay still dominates.
+const FILES: usize = 12;
+const FILE_BYTES: usize = 1_100_000;
 /// Concurrency cap for the concurrent run (the serial run uses 1).
 const MAX_IN_FLIGHT: usize = 16;
 
@@ -91,7 +102,6 @@ async fn sync_timed(
 }
 
 #[test]
-#[ignore = "latency bench: run with --ignored --nocapture (needs make wasm + local network launcher)"]
 fn native_transport_concurrency_speedup() {
     let project = setup_project("latency");
     // Declared after `project` so it stops the replica before the dir is removed.
