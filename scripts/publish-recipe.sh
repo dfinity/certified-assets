@@ -2,11 +2,14 @@
 #
 # Publish the `static-site` recipe to the dfinity/icp-cli-recipes registry.
 #
-# Generates the *release* recipe (pinning this repo's canister/plugin wasm by
-# release URL + the exact published sha256), drops it into a sibling clone of
-# icp-cli-recipes on a fresh branch, commits, and — by default — stops so you can
-# review the diff before opening the PR. Pass --push to push the branch and open
-# the PR.
+# Downloads the `recipe.hbs` asset attached to this repo's GitHub release — the
+# exact file the release CI generated (pinning the canister/plugin wasm by
+# release URL + sha256) — drops it into a sibling clone of icp-cli-recipes on a
+# fresh branch, commits, and — by default — stops so you can review the diff
+# before opening the PR. Pass --push to push the branch and open the PR.
+#
+# The committed recipe is the release asset verbatim (not regenerated), and the
+# PR links back to that asset so a reviewer can confirm the two are identical.
 #
 # Resumable & idempotent: each phase (prepare the branch / push + open PR) is
 # safe to re-run. A review run (no --push) prepares the branch; re-running with
@@ -21,7 +24,7 @@
 #   scripts/publish-recipe.sh <version-tag> [--recipes-repo <path>] [--push]
 #
 #   <version-tag>      e.g. v1.0.0 — must match a published GitHub release of
-#                      this repo (the .sha256 release assets are downloaded).
+#                      this repo (its recipe.hbs asset is downloaded).
 #   --recipes-repo P   path to your icp-cli-recipes clone (default: ../icp-cli-recipes)
 #   --push             push the branch and open the PR (default: stop after
 #                      preparing the branch and print the commands)
@@ -110,15 +113,10 @@ else
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
 
-  echo "Downloading release checksums for $VERSION from $THIS_REPO ..."
-  gh release download "$VERSION" -R "$THIS_REPO" -p '*.sha256' --dir "$TMP" \
-    || die "could not download .sha256 assets for $VERSION — is the release published?"
-
-  echo "Generating $RECIPE_NAME recipe.hbs ..."
-  cargo run --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p recipe-gen -- release \
-    --version "$VERSION" \
-    --shas-from "$TMP" \
-    -o "$TMP/recipe.hbs"
+  echo "Downloading recipe.hbs for $VERSION from $THIS_REPO ..."
+  gh release download "$VERSION" -R "$THIS_REPO" -p 'recipe.hbs' --dir "$TMP" \
+    || die "could not download recipe.hbs for $VERSION — is the release published? (the release CI attaches it via 'make recipe-release')"
+  [ -s "$TMP/recipe.hbs" ] || die "downloaded recipe.hbs is empty"
 
   echo "Fetching origin/main in $RECIPES_REPO ..."
   git -C "$RECIPES_REPO" fetch --quiet origin main
@@ -141,7 +139,11 @@ git -C "$RECIPES_REPO" show --stat --oneline "$BRANCH" | sed 's/^/  /'
 # --- push + open PR (idempotent) ---------------------------------------------
 
 PR_TITLE="$COMMIT_MSG"
+RECIPE_ASSET_URL="https://github.com/$THIS_REPO/releases/download/$VERSION/recipe.hbs"
 PR_BODY="Publishes the \`$RECIPE_NAME\` recipe at $VERSION, pinning the canister and sync-plugin wasm from $THIS_REPO's $VERSION release.
+
+The committed \`recipe.hbs\` is the asset attached to that release, verbatim — verify it matches:
+$RECIPE_ASSET_URL
 
 After merge, tag \`$RECIPE_NAME-$VERSION\` in this repo to cut the recipe release."
 
