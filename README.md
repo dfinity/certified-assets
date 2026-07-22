@@ -93,6 +93,7 @@ canisters:
       configuration:
         dir: dist           # required: the single asset directory
         build: [npm run build]   # optional: commands run before sync
+        # presync: [npm run build]  # optional: like build, but at sync time with canister IDs in env
         # metadata: [...]    # optional: name/value pairs injected via ic-wasm
 ```
 
