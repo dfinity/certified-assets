@@ -1,0 +1,19 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: frontend
+    recipe:
+      type: "file://recipe.hbs"
+      configuration:
+        dir: dist
+        presync:
+          # Pre-sync steps run at sync time, after the canister exists, so the
+          # deployed canister IDs are in the environment. Capture them into
+          # served files so the test can prove they were really readable — both
+          # the bare `ICP_CLI_CID` and the per-canister `ICP_CLI_CID_<NAME>` form.
+          - sh -c 'printf %s "$ICP_CLI_CID" > dist/cid.txt'
+          - sh -c 'printf %s "$ICP_CLI_CID_FRONTEND" > dist/cid-frontend.txt'

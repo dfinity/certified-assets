@@ -57,8 +57,11 @@ jobs:
       - name: Install ic-wasm
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dfinity/ic-wasm/releases/download/0.9.11/ic-wasm-installer.sh | sh
 
-      - name: Build release artifacts
-        run: make release
+      - name: Build release artifacts and recipe
+        # `recipe-release` depends on `release`, so one invocation builds every
+        # wasm/candid/checksum artifact *and* generates dist/recipe.hbs (pinning
+        # this tag's release URLs + the shas just produced).
+        run: make recipe-release
 
       - name: Publish GitHub release
         env:
@@ -67,12 +70,14 @@ jobs:
           # The release title is just the version tag (e.g. v0.1.0).
           title="$GITHUB_REF_NAME"
 
-          # The full set `make release` produced: each artifact plus its
-          # sibling .sha256 (wasm + candid + checksums).
+          # The full set `make recipe-release` produced: each release artifact
+          # plus its sibling .sha256 (wasm + candid + checksums), and the recipe
+          # itself (`recipe.hbs`, no checksum — it pins the wasm shas internally).
           assets=(
             dist/canister-release.wasm.gz dist/canister-release.wasm.gz.sha256
             dist/plugin-release.wasm      dist/plugin-release.wasm.sha256
             dist/certified-assets.did     dist/certified-assets.did.sha256
+            dist/recipe.hbs
           )
 
           # Releases are allowed from any branch. One whose commit is not on main

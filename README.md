@@ -89,7 +89,7 @@ which `icp-cli` expands into a canister build + sync config:
 canisters:
   - name: frontend
     recipe:
-      type: "@dfinity/certified-assets@v1.0.0"
+      type: "@dfinity/static-site@v1.0.0"
       configuration:
         dir: dist           # required: the single asset directory
         build: [npm run build]   # optional: commands run before sync
@@ -102,8 +102,11 @@ in two variants that differ only in how the wasm is pinned:
 
 ```sh
 make recipe-local        # pins wasm by local path -> dist/recipe.local.hbs (for manual testing)
-make recipe-release      # pins wasm by release URL + sha256 -> dist/recipe.hbs (for publishing)
+make recipe-release      # pins wasm by release URL + sha256 -> dist/recipe.hbs (what CI attaches to the release)
 ```
+
+The release CI runs `make recipe-release` and attaches the resulting `recipe.hbs`
+to the GitHub release, so the published recipe has a canonical, verifiable origin.
 
 The e2e tests exercise the local variant through the real `icp` CLI
 ([`crates/e2e/tests/recipe.rs`](crates/e2e/tests/recipe.rs)), and `recipe-gen`'s
@@ -112,14 +115,16 @@ unit tests assert every config field renders to valid icp-cli YAML.
 To publish a new recipe version after a `v<version>` release exists:
 
 ```sh
-scripts/publish-recipe.sh v<version>          # generates + commits on a branch in ../icp-cli-recipes; prints the PR command
+scripts/publish-recipe.sh v<version>          # downloads the release recipe + commits on a branch in ../icp-cli-recipes; prints the PR command
 scripts/publish-recipe.sh v<version> --push   # also pushes and opens the PR
 ```
 
-The script downloads the release's `.sha256` assets to pin the exact published
-wasm, branches off a fresh `origin/main` in your icp-cli-recipes clone, and
-writes `recipes/certified-assets/{recipe.hbs,README.md}`. After the PR merges,
-tag `certified-assets-v<version>` in icp-cli-recipes to cut the recipe release.
+The script downloads the release's `recipe.hbs` asset (the exact file the release
+CI generated), branches off a fresh `origin/main` in your icp-cli-recipes clone,
+and writes `recipes/static-site/{recipe.hbs,README.md}` — committing the release
+asset verbatim rather than regenerating it. The PR links back to that asset so
+reviewers can verify the two are identical. After the PR merges, tag
+`static-site-v<version>` in icp-cli-recipes to cut the recipe release.
 
 ## Candid interface
 

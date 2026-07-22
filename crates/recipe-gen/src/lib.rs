@@ -1,4 +1,4 @@
-//! Generator for the `certified-assets` icp-cli recipe.
+//! Generator for the `static-site` icp-cli recipe.
 //!
 //! A recipe is a Handlebars template (`recipe.hbs`) hosted in the
 //! `dfinity/icp-cli-recipes` registry. icp-cli downloads it, renders it against
@@ -233,6 +233,30 @@ mod tests {
             .unwrap();
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0].as_str(), Some("npm ci"));
+    }
+
+    #[test]
+    fn local_with_presync() {
+        let cfg = serde_yaml::from_str("dir: dist\npresync:\n  - echo $ICP_CLI_CID").unwrap();
+        let out = render_with_config(&local(), cfg).unwrap();
+        let r = parse(&out);
+        // Build section is untouched — presync belongs to sync, not build.
+        assert_eq!(r.build.steps.len(), 1);
+        assert_eq!(step_type(&r.build.steps[0]), "pre-built");
+        // Sync section: the presync script step runs *before* the plugin step.
+        let sync = r.sync.expect("sync section present");
+        assert_eq!(sync.steps.len(), 2);
+        assert_eq!(step_type(&sync.steps[0]), "script");
+        assert_eq!(step_type(&sync.steps[1]), "plugin");
+        let cmds = sync.steps[0]
+            .get("commands")
+            .and_then(Value::as_sequence)
+            .unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert!(
+            cmds[0].as_str().unwrap().contains("ICP_CLI_CID"),
+            "presync command must survive verbatim, got: {cmds:?}"
+        );
     }
 
     #[test]
