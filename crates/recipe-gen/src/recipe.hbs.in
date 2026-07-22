@@ -1,6 +1,7 @@
 {{! Deploy static assets to the dfinity/certified-assets canister. }}
 {{! `dir: string` Required. The single directory of built assets to synchronize. }}
 {{! `build: [string]` Optional. Commands run before sync to produce the asset directory. }}
+{{! `presync: [string]` Optional. Commands run at sync time (after the canister exists), before assets upload, with the deployed canister IDs in the environment: ICP_CLI_CID, ICP_CLI_CID_<NAME>, ICP_CLI_NETWORK, ICP_CLI_ENVIRONMENT. }}
 {{! `metadata: [{name, value}]` Optional. Pairs injected into the canister wasm via ic-wasm. }}
 
 build:
@@ -29,6 +30,13 @@ build:
 
 sync:
   steps:
+    {{#if presync}}
+    - type: script
+      commands:
+        {{#each presync}}
+        - {{ this }}
+        {{/each}}
+    {{/if}}
     - type: plugin
 @@PLUGIN_SOURCE@@
       dirs:

@@ -47,12 +47,13 @@ That's it — your site is live and certified.
 
 ## Configuration
 
-The recipe takes three configuration fields:
+The recipe takes four configuration fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `dir` | string | **Yes** | The single directory of built files to serve. The canister owns its whole URL space, so this is one directory, not a list. |
-| `build` | array | No | Shell commands run *before* sync to produce `dir` (e.g. `npm run build`). |
+| `build` | array | No | Shell commands run *before* the canister exists to produce `dir` (e.g. `npm run build`). No canister IDs are available yet. |
+| `presync` | array | No | Shell commands run *at sync time*, after the canister exists, with the deployed canister IDs exported as env vars (`ICP_CLI_CID`, `ICP_CLI_CID_<NAME>`, `ICP_CLI_NETWORK`, `ICP_CLI_ENVIRONMENT`). Use it to build a frontend that must bake in a canister ID. |
 | `metadata` | array | No | `name`/`value` pairs baked into the canister wasm via `ic-wasm`. |
 
 A fuller example with a build step and metadata:
@@ -74,6 +75,31 @@ canisters:
 
 > `metadata` is the only field that needs `ic-wasm`. It ships with `icp-cli`, so if
 > you installed the CLI you already have it.
+
+### Building against canister IDs (`presync` vs `build`)
+
+`build` runs before the canister is created, so it can't know any canister IDs.
+When a client-side app needs to embed the ID of a canister it will call, build it
+in `presync` instead — that runs at sync time, once the IDs exist, and exports
+them to your commands:
+
+```yaml
+canisters:
+  - name: frontend
+    recipe:
+      type: "@dfinity/static-site@<version>"
+      configuration:
+        dir: dist
+        presync:
+          - npm ci
+          # $ICP_CLI_CID_BACKEND is the `backend` canister's principal.
+          - VITE_CANISTER_ID_BACKEND=$ICP_CLI_CID_BACKEND npm run build
+```
+
+The variables available to `presync`: `ICP_CLI_CID` (this canister's principal),
+`ICP_CLI_CID_<NAME>` (each project canister's principal — the name upper-cased,
+non-alphanumerics as `_`, e.g. `backend` → `ICP_CLI_CID_BACKEND`), `ICP_CLI_NETWORK`,
+and `ICP_CLI_ENVIRONMENT`.
 
 ## What you get automatically
 

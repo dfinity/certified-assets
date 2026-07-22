@@ -25,6 +25,7 @@ canisters:
 |-----------|------|----------|-------------|---------|
 | dir | string | Yes | The single directory of built assets to synchronize to the canister | - |
 | build | array | No | Shell commands run before sync to produce the asset directory (e.g. `npm run build`) | [] |
+| presync | array | No | Shell commands run at sync time (after the canister exists), with the deployed canister IDs in the environment — see [Pre-sync environment](#pre-sync-environment) | [] |
 | metadata | array | No | Name/value pairs injected into the canister wasm via `ic-wasm` | [] |
 
 > The sync plugin owns the canister's full URL space and accepts **exactly one** asset directory, so `dir` is a single string rather than a list.
@@ -67,14 +68,51 @@ canisters:
             value: "react"
 ```
 
+### With a pre-sync build that needs canister IDs
+
+Build in `presync` rather than `build` when the frontend must embed a canister
+ID — those IDs only exist once the canister is created, which is *after* `build`
+runs:
+
+```yaml
+canisters:
+  - name: frontend
+    recipe:
+      type: "@dfinity/static-site@<version>"
+      configuration:
+        dir: dist
+        presync:
+          - npm ci
+          # `$ICP_CLI_CID_BACKEND` is the `backend` canister's principal.
+          - VITE_CANISTER_ID_BACKEND=$ICP_CLI_CID_BACKEND npm run build
+```
+
 ## Build Process
 
 When this recipe runs:
 
-1. (If `build` is set) runs your build commands to produce the asset directory.
+1. (If `build` is set) runs your build commands to produce the asset directory. This runs *before* the canister exists, so no canister IDs are available yet.
 2. Downloads the pinned certified-assets canister wasm (verified against its `sha256`).
 3. (If `metadata` is set) injects each name/value pair into the wasm with `ic-wasm`.
-4. Installs the canister, then runs the pinned sync plugin to upload and certify the assets in `dir`.
+4. Installs the canister.
+5. (If `presync` is set) runs your pre-sync commands — the canister IDs now exist and are exported as environment variables (see [Pre-sync environment](#pre-sync-environment)).
+6. Runs the pinned sync plugin to upload and certify the assets in `dir`.
+
+## Pre-sync environment
+
+`presync` commands run via `sh -c` in your project directory, after the canister
+is created but before its assets upload. Unlike `build` (which runs earlier, when
+only `ICP_WASM_OUTPUT_PATH` is available), `presync` sees the deployed canister IDs:
+
+| Variable | Value |
+|----------|-------|
+| `ICP_CLI_CID` | This (frontend) canister's principal. |
+| `ICP_CLI_CID_<NAME>` | Each project canister's principal, keyed by its upper-cased name with non-alphanumeric characters replaced by `_` (e.g. `backend` → `ICP_CLI_CID_BACKEND`). |
+| `ICP_CLI_NETWORK` | The target network name. |
+| `ICP_CLI_ENVIRONMENT` | The target environment name. |
+
+This is what lets a client-side app (Vite, Next static export, etc.) embed the
+canister IDs it will call, at build time.
 
 ## Asset Synchronization
 
