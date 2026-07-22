@@ -89,7 +89,7 @@ which `icp-cli` expands into a canister build + sync config:
 canisters:
   - name: frontend
     recipe:
-      type: "@dfinity/certified-assets@v1.0.0"
+      type: "@dfinity/static-site@v1.0.0"
       configuration:
         dir: dist           # required: the single asset directory
         build: [npm run build]   # optional: commands run before sync
@@ -118,8 +118,8 @@ scripts/publish-recipe.sh v<version> --push   # also pushes and opens the PR
 
 The script downloads the release's `.sha256` assets to pin the exact published
 wasm, branches off a fresh `origin/main` in your icp-cli-recipes clone, and
-writes `recipes/certified-assets/{recipe.hbs,README.md}`. After the PR merges,
-tag `certified-assets-v<version>` in icp-cli-recipes to cut the recipe release.
+writes `recipes/static-site/{recipe.hbs,README.md}`. After the PR merges,
+tag `static-site-v<version>` in icp-cli-recipes to cut the recipe release.
 
 ## Candid interface
 

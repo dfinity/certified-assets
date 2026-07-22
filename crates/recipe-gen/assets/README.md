@@ -1,4 +1,4 @@
-# Certified Assets Recipe
+# Static Site Recipe
 
 Deploy a static frontend to the [`dfinity/certified-assets`](https://github.com/dfinity/certified-assets) canister, with response certification and asset synchronization handled for you.
 
@@ -12,12 +12,12 @@ Reference this recipe in an `icp.yaml` (or `canister.yaml`) file:
 canisters:
   - name: frontend
     recipe:
-      type: "@dfinity/certified-assets@<version>"
+      type: "@dfinity/static-site@<version>"
       configuration:
         dir: dist
 ```
 
-> Replace `<version>` with a release version (e.g. `v1.0.0`). See [available versions](https://github.com/dfinity/icp-cli-recipes/releases?q=certified-assets&expanded=true).
+> Replace `<version>` with a release version (e.g. `v1.0.0`). See [available versions](https://github.com/dfinity/icp-cli-recipes/releases?q=static-site&expanded=true).
 
 ## Configuration Parameters
 
@@ -45,7 +45,7 @@ canisters:
 canisters:
   - name: website
     recipe:
-      type: "@dfinity/certified-assets@<version>"
+      type: "@dfinity/static-site@<version>"
       configuration:
         dir: build
 ```
@@ -56,7 +56,7 @@ canisters:
 canisters:
   - name: spa-frontend
     recipe:
-      type: "@dfinity/certified-assets@<version>"
+      type: "@dfinity/static-site@<version>"
       configuration:
         build:
           - npm ci
@@ -101,4 +101,4 @@ The sync plugin diffs your local directory against the canister and uploads only
 
 ## Release History
 
-See the [release history](https://github.com/dfinity/icp-cli-recipes/releases?q=certified-assets&expanded=true) for changelogs and version updates.
+See the [release history](https://github.com/dfinity/icp-cli-recipes/releases?q=static-site&expanded=true) for changelogs and version updates.

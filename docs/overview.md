@@ -23,13 +23,13 @@ sites need nothing more than this page.
 canisters:
   - name: frontend
     recipe:
-      type: "@dfinity/certified-assets@<version>"
+      type: "@dfinity/static-site@<version>"
       configuration:
         dir: dist          # the directory of files to serve
 ```
 
 Replace `<version>` with a released version (e.g. `v1.0.0`); see the
-[available versions](https://github.com/dfinity/icp-cli-recipes/releases?q=certified-assets&expanded=true).
+[available versions](https://github.com/dfinity/icp-cli-recipes/releases?q=static-site&expanded=true).
 Pick the version here — because the recipe pins a matched canister + plugin pair,
 there is no separate canister version to choose.
 
@@ -61,7 +61,7 @@ A fuller example with a build step and metadata:
 canisters:
   - name: frontend
     recipe:
-      type: "@dfinity/certified-assets@<version>"
+      type: "@dfinity/static-site@<version>"
       configuration:
         build:
           - npm ci

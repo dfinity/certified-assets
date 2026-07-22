@@ -1,4 +1,4 @@
-//! End-to-end tests for the `certified-assets` recipe.
+//! End-to-end tests for the `static-site` recipe.
 //!
 //! Each test renders the *local* recipe variant (via `recipe-gen`, pinning the
 //! freshly built wasm by path), drops it next to a fixture `icp.yaml` that

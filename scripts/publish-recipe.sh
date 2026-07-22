@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Publish the `certified-assets` recipe to the dfinity/icp-cli-recipes registry.
+# Publish the `static-site` recipe to the dfinity/icp-cli-recipes registry.
 #
 # Generates the *release* recipe (pinning this repo's canister/plugin wasm by
 # release URL + the exact published sha256), drops it into a sibling clone of
@@ -27,12 +27,12 @@
 #                      preparing the branch and print the commands)
 #
 # After the PR merges, publish the recipe release by pushing the registry tag:
-#   git -C <recipes-repo> tag certified-assets-<version> && git push origin certified-assets-<version>
+#   git -C <recipes-repo> tag static-site-<version> && git push origin static-site-<version>
 # which triggers icp-cli-recipes' release-recipe.yml.
 
 set -euo pipefail
 
-RECIPE_NAME="certified-assets"
+RECIPE_NAME="static-site"
 THIS_REPO="dfinity/certified-assets"
 
 die() {

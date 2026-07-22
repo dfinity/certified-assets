@@ -1,4 +1,4 @@
-//! `recipe-gen` — emit the `certified-assets` recipe (`recipe.hbs`) pinning the
+//! `recipe-gen` — emit the `static-site` recipe (`recipe.hbs`) pinning the
 //! canister and sync-plugin wasm either by local path or by release URL + sha256.
 //!
 //! ```text

@@ -1,4 +1,4 @@
-//! Generator for the `certified-assets` icp-cli recipe.
+//! Generator for the `static-site` icp-cli recipe.
 //!
 //! A recipe is a Handlebars template (`recipe.hbs`) hosted in the
 //! `dfinity/icp-cli-recipes` registry. icp-cli downloads it, renders it against
