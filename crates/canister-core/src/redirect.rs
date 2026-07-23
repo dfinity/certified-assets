@@ -228,22 +228,21 @@ pub fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
     let resp_hash = response_hash(&certified, rule.status, &body_hash);
 
     let location = tree_location(rule);
-    let mut full_segs = location.0.clone();
-    full_segs.push(NestedTreeKey::Hash(expression.expression_hash));
-    full_segs.push(NestedTreeKey::String(String::new())); // empty request hash sentinel
-    full_segs.push(NestedTreeKey::Hash(resp_hash.0));
+    let tree_path = response_leaf_path(&location, expression.expression_hash, resp_hash.0);
 
     CertifiedRuleEntry {
-        tree_paths: vec![HashTreePath::from(full_segs)],
+        tree_paths: vec![tree_path],
         location,
         kind: CertifiedRuleEntryKind::Synthetic { expression },
     }
 }
 
-/// Build a tree path slot for the rule's location with the given expression
-/// hash and response hash. Used by the status-200 path to mirror each
-/// encoding of a target asset.
-pub fn alias_tree_path(
+/// Build a response-only certified leaf at `location`: the location prefix
+/// followed by `[expression_hash, <empty request hash>, response_hash]`. This is
+/// the generic leaf shape every certified response uses (asset, alias, synthetic
+/// redirect, protection sibling), not anything alias-specific — the empty request
+/// hash is the "no request certification" sentinel.
+pub fn response_leaf_path(
     location: &HashTreePath,
     expression_hash: [u8; 32],
     response_hash: [u8; 32],

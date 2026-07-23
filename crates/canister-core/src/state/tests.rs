@@ -2062,6 +2062,86 @@ mod certification {
     }
 
     #[test]
+    fn conditional_request_to_exact_alias_serves_certified_304() {
+        // Regression: a 200-rewrite alias (`/` → `/index.html`) must certify the
+        // 304 at the *alias* location, not only at the target asset's own path. A
+        // normal browser refresh of `/` sends `If-None-Match`, so the alias serves
+        // a 304; before the fix that 304 was uncertified and failed response
+        // verification (a direct `/index.html` hit was fine, masking the bug).
+        // Requesting the alias path through `certified_http_request` reproduces the
+        // browser path and asserts the 304 is cryptographically valid.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![BODY]),
+            ],
+        );
+        set_exact_rewrite_rule(&mut state, "/", "/index.html");
+
+        // Matching etag against the alias path -> certified 304, empty body.
+        let not_modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("If-None-Match", &etag)
+                .build(),
+        );
+        assert_eq!(not_modified.status_code, 304);
+        assert!(not_modified.body.is_empty());
+        assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
+
+        // A first visit (no `If-None-Match`) still serves the full certified 200.
+        let full = certified_http_request(
+            &state,
+            RequestBuilder::get("/")
+                .with_header("Accept-Encoding", "identity")
+                .build(),
+        );
+        assert_eq!(full.status_code, 200);
+        assert_eq!(full.body.as_ref(), BODY);
+    }
+
+    #[test]
+    fn conditional_request_to_subtree_alias_serves_certified_304() {
+        // The 304 certification must also hold for a subtree (SPA) fallback alias,
+        // whose leaves live at a `<*>` tree location rather than an exact `<$>` one.
+        let mut state = State::default();
+        let system_context = mock_system_context();
+
+        const BODY: &[u8] = b"<!DOCTYPE html><html></html>";
+        let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(BODY)));
+
+        create_assets(
+            &mut state,
+            &system_context,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![BODY]),
+            ],
+        );
+        set_root_spa_rule(&mut state, "/index.html");
+
+        // A deep client route with no asset falls through to the SPA alias; a
+        // matching `If-None-Match` there must serve a certified 304.
+        let not_modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/deep/client/route")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("If-None-Match", &etag)
+                .build(),
+        );
+        assert_eq!(not_modified.status_code, 304);
+        assert!(not_modified.body.is_empty());
+        assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
+    }
+
+    #[test]
     fn ic_certificate_expression_present_for_new_assets() {
         let mut state = State::default();
         let system_context = mock_system_context();
@@ -2857,6 +2937,23 @@ mod redirect_rules {
         );
         assert_eq!(ranged.status_code, 206);
         assert_eq!(ranged.body.as_ref(), C1);
+
+        // A conditional request short-circuits the 206 path: a matching
+        // `If-None-Match` (the whole-content ETag the 206 carries) must serve a
+        // certified 304 at the alias location, exactly as for a single-chunk
+        // target. The 304 leaf is certified with the non-range expression, so its
+        // certification is independent of chunk count.
+        let etag = lookup_header(&plain, "etag").unwrap().to_string();
+        let not_modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/landing")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("If-None-Match", &etag)
+                .build(),
+        );
+        assert_eq!(not_modified.status_code, 304);
+        assert!(not_modified.body.is_empty());
+        assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
     }
 
     #[test]
