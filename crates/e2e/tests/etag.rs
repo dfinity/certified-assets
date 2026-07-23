@@ -59,4 +59,29 @@ fn conditional_request_yields_certified_304() {
         !modified.bytes().unwrap().is_empty(),
         "stale If-None-Match should serve the full body"
     );
+
+    // Regression: the same round-trip against the `/` alias (the `/ →
+    // /index.html` 200 rewrite a browser actually navigates to), not just the
+    // direct asset path. A normal browser refresh of `/` sends `If-None-Match`,
+    // so the alias serves a 304 — which must be certified at the *alias*
+    // location or the gateway rejects it with a Response Verification Error. The
+    // direct hit above once passed while this failed, masking the bug.
+    let root = http_fetch(project, "/");
+    assert_eq!(root.status(), StatusCode::OK);
+    let root_etag = etag_of(root.headers());
+    assert!(
+        !root.bytes().unwrap().is_empty(),
+        "`/` 200 should carry a body"
+    );
+
+    let root_not_modified = http_fetch_with_headers(project, "/", &[("If-None-Match", &root_etag)]);
+    assert_eq!(
+        root_not_modified.status(),
+        StatusCode::NOT_MODIFIED,
+        "conditional GET of the `/` alias must yield a certified 304"
+    );
+    assert!(
+        root_not_modified.bytes().unwrap().is_empty(),
+        "304 must have an empty body"
+    );
 }

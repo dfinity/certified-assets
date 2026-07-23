@@ -483,22 +483,58 @@ impl Certifier {
             }
             let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
 
-            // A 200-rewrite to a multi-chunk target serves N×206 (the gateway
-            // reassembles them into a 200), exactly like a direct hit. Certify
-            // those 206 leaves at the alias location and move on.
-            if status == 200 && enc.num_chunks > 1 {
-                let (range_cert_expr, resp_hashes) = self.range_response_certs(
-                    store,
+            if status == 200 {
+                // Compute the 200/304 response hashes once. A conditional
+                // request (a matching `If-None-Match`) to a 200-rewrite alias is
+                // served as a certified 304 with an empty body by
+                // `build_ok_http_response` — exactly like a direct hit, and
+                // regardless of chunk count, since its 304 branch runs ahead of
+                // the 206 branch. So the 304 leaf must exist at the alias
+                // location too; without it a normal browser refresh of an
+                // aliased path (e.g. `/` → `/index.html`) serves an uncertified
+                // 304 and fails response verification.
+                let resp_hashes = response_hashes_for(
                     &effective_headers,
                     &meta.content_type,
                     encoding,
-                    enc,
+                    &cert_expr,
+                    &enc.sha256,
                 );
-                for resp_hash in resp_hashes {
+                let tp_304 = crate::redirect::alias_tree_path(
+                    &location,
+                    cert_expr.expression_hash,
+                    resp_hashes[&304],
+                );
+                self.asset_hashes.certify_response_precomputed(&tp_304);
+                tree_paths.push(tp_304);
+
+                if enc.num_chunks > 1 {
+                    // Multi-chunk target: the 200 is delivered as N×206 (the
+                    // gateway reassembles them into a 200), exactly like a direct
+                    // hit. Certify those 206 leaves; the full 200 is never served
+                    // for a multi-chunk encoding, so it is not certified.
+                    let (range_cert_expr, resp_206) = self.range_response_certs(
+                        store,
+                        &effective_headers,
+                        &meta.content_type,
+                        encoding,
+                        enc,
+                    );
+                    for resp_hash in resp_206 {
+                        let tp = crate::redirect::alias_tree_path(
+                            &location,
+                            range_cert_expr.expression_hash,
+                            resp_hash,
+                        );
+                        self.asset_hashes.certify_response_precomputed(&tp);
+                        tree_paths.push(tp);
+                    }
+                } else {
+                    // Single-chunk target: certify the encoding's full 200.
                     let tp = crate::redirect::alias_tree_path(
                         &location,
-                        range_cert_expr.expression_hash,
-                        resp_hash,
+                        cert_expr.expression_hash,
+                        resp_hashes[&200],
                     );
                     self.asset_hashes.certify_response_precomputed(&tp);
                     tree_paths.push(tp);
@@ -506,29 +542,20 @@ impl Certifier {
                 continue;
             }
 
-            let resp_hash = if status == 200 {
-                // The encoding's already-certified 200 response hash.
-                response_hashes_for(
-                    &effective_headers,
-                    &meta.content_type,
-                    encoding,
-                    &cert_expr,
-                    &enc.sha256,
-                )[&200]
-            } else {
-                // 4xx custom error page: re-certify with the override status
-                // using the same headers and body the asset would serve at 200.
-                let base_headers: Vec<(String, Value)> = headers_for(
-                    &effective_headers,
-                    &meta.content_type,
-                    encoding,
-                    &enc.sha256,
-                )
-                .into_iter()
-                .map(|(k, v)| (k, Value::String(v)))
-                .collect();
-                response_hash(&base_headers, status, &enc.sha256).0
-            };
+            // 4xx custom error page: re-certify with the override status using
+            // the same headers and body the asset would serve at 200. Only
+            // single-chunk encodings reach here (multi-chunk 4xx was skipped
+            // above), and an error page never takes the etag/304 path.
+            let base_headers: Vec<(String, Value)> = headers_for(
+                &effective_headers,
+                &meta.content_type,
+                encoding,
+                &enc.sha256,
+            )
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect();
+            let resp_hash = response_hash(&base_headers, status, &enc.sha256).0;
             let tp =
                 crate::redirect::alias_tree_path(&location, cert_expr.expression_hash, resp_hash);
             self.asset_hashes.certify_response_precomputed(&tp);
