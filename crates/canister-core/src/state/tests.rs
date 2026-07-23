@@ -2937,6 +2937,23 @@ mod redirect_rules {
         );
         assert_eq!(ranged.status_code, 206);
         assert_eq!(ranged.body.as_ref(), C1);
+
+        // A conditional request short-circuits the 206 path: a matching
+        // `If-None-Match` (the whole-content ETag the 206 carries) must serve a
+        // certified 304 at the alias location, exactly as for a single-chunk
+        // target. The 304 leaf is certified with the non-range expression, so its
+        // certification is independent of chunk count.
+        let etag = lookup_header(&plain, "etag").unwrap().to_string();
+        let not_modified = certified_http_request(
+            &state,
+            RequestBuilder::get("/landing")
+                .with_header("Accept-Encoding", "identity")
+                .with_header("If-None-Match", &etag)
+                .build(),
+        );
+        assert_eq!(not_modified.status_code, 304);
+        assert!(not_modified.body.is_empty());
+        assert_eq!(lookup_header(&not_modified, "etag").unwrap(), etag);
     }
 
     #[test]
