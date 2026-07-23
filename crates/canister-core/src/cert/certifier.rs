@@ -165,7 +165,8 @@ impl Certifier {
     ) -> HashTreePath {
         let cert_expr = resp.cert_expr();
         let resp_hash = resp.response_hash();
-        let tp = crate::redirect::alias_tree_path(location, cert_expr.expression_hash, resp_hash);
+        let tp =
+            crate::redirect::response_leaf_path(location, cert_expr.expression_hash, resp_hash);
         self.asset_hashes.certify_response_precomputed(&tp);
         tp
     }
@@ -293,8 +294,9 @@ impl Certifier {
             &enc.sha256,
         );
 
-        let leaf =
-            |expr_hash, resp_hash| crate::redirect::alias_tree_path(location, expr_hash, resp_hash);
+        let leaf = |expr_hash, resp_hash| {
+            crate::redirect::response_leaf_path(location, expr_hash, resp_hash)
+        };
         let mut leaves = vec![leaf(cert_expr.expression_hash, resp_hashes[&304])];
         if enc.num_chunks == 1 {
             leaves.push(leaf(cert_expr.expression_hash, resp_hashes[&200]));
@@ -531,8 +533,11 @@ impl Certifier {
             .map(|(k, v)| (k, Value::String(v)))
             .collect();
             let resp_hash = response_hash(&base_headers, status, &enc.sha256).0;
-            let tp =
-                crate::redirect::alias_tree_path(&location, cert_expr.expression_hash, resp_hash);
+            let tp = crate::redirect::response_leaf_path(
+                &location,
+                cert_expr.expression_hash,
+                resp_hash,
+            );
             self.asset_hashes.certify_response_precomputed(&tp);
             tree_paths.push(tp);
         }
