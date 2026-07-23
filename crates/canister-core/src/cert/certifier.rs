@@ -33,7 +33,7 @@ use ic_representation_independent_hash::Value;
 
 use super::primitives::{
     AssetKey, AssetPath, CertificateExpression, CertifiedResponses, HashTreePath, NestedTreeKey,
-    RequestHash, ResponseHash, response_hash,
+    response_hash,
 };
 use crate::asset::{
     AssetMeta, EncodingMeta, certificate_expression_for, headers_for,
@@ -209,60 +209,27 @@ impl Certifier {
     /// access-protection tail there runs even for a content-less asset.
     fn certify_asset_encodings(&mut self, store: &Store, key: &AssetKey, meta: &AssetMeta) {
         let effective_headers = self.effective_headers(store, meta);
-        let path = AssetPath::from(key.as_str());
+        // The asset's own `<$>` slot — the same location a 200-rewrite rule to
+        // this path would mirror (see `redirect::tree_location`).
+        let location = AssetPath::from(key.as_str()).asset_hash_path_root();
         for (&encoding, enc) in &meta.encodings {
-            let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
-            let response_hashes = response_hashes_for(
+            self.certify_ok_leaves(
+                store,
+                &location,
                 &effective_headers,
                 &meta.content_type,
                 encoding,
-                &cert_expr,
-                &enc.sha256,
+                enc,
             );
-            // Always certify the 304 (empty body). Certify the full 200 only for
-            // single-chunk encodings — a multi-chunk asset is served as N×206 (the
-            // gateway reassembles them into a 200), so a full 200 is never served
-            // and certifying it would be dead weight in the tree.
-            let hash_304 = path.hash_tree_path(
-                &cert_expr,
-                &RequestHash::default(),
-                ResponseHash::from(&response_hashes[&304]),
-            );
-            self.asset_hashes.certify_response_precomputed(&hash_304);
-            if enc.num_chunks == 1 {
-                let hash_200 = path.hash_tree_path(
-                    &cert_expr,
-                    &RequestHash::default(),
-                    ResponseHash::from(&response_hashes[&200]),
-                );
-                self.asset_hashes.certify_response_precomputed(&hash_200);
-            } else {
-                // Multi-chunk: certify one 206 per chunk (response-only).
-                let (range_cert_expr, resp_hashes) = self.range_response_certs(
-                    store,
-                    &effective_headers,
-                    &meta.content_type,
-                    encoding,
-                    enc,
-                );
-                for resp_hash in resp_hashes {
-                    let hash_path = path.hash_tree_path(
-                        &range_cert_expr,
-                        &RequestHash::default(),
-                        ResponseHash::from(&resp_hash),
-                    );
-                    self.asset_hashes.certify_response_precomputed(&hash_path);
-                }
-            }
         }
     }
 
     /// Content-free per-chunk 206 certification data for a multi-chunk encoding:
     /// the shared range certificate expression plus one response hash per chunk,
     /// in chunk order. Derived from `chunk_certs` + `content_len`, so it never
-    /// reads chunk bytes. Both the direct-asset path (`certify_asset_encodings`)
-    /// and the alias path (`build_alias_rule_entry`) use it, each placing the
-    /// resulting leaves at its own tree location.
+    /// reads chunk bytes. Used by [`Self::certify_ok_leaves`], which places the
+    /// resulting leaves at whichever tree location its caller passes (an asset's
+    /// own slot or an alias's).
     fn range_response_certs(
         &self,
         store: &Store,
@@ -294,6 +261,56 @@ impl Certifier {
             offset += len;
         }
         (range_cert_expr, resp_hashes)
+    }
+
+    /// Certifies the OK-family response leaves for one encoding at `location`:
+    /// the 304 (empty body) always, plus either the full 200 (single-chunk) or
+    /// the N×206 range leaves (multi-chunk — the 200 is delivered as reassembled
+    /// 206s and never served whole, so certifying it would be dead weight).
+    /// Shared by the direct-asset path ([`Self::certify_asset_encodings`]) and the
+    /// 200-rewrite alias path ([`Self::build_alias_rule_entry`]) so the two always
+    /// certify the *identical* leaf set — only `location` differs (an asset's own
+    /// `<$>` vs the alias's `<$>`/`<*>`). Returns every leaf it certified.
+    ///
+    /// The 304 uses the non-range expression at every location: a conditional
+    /// request short-circuits the 206 path in `build_ok_http_response`, so a
+    /// matching `If-None-Match` yields a 304 regardless of chunk count.
+    fn certify_ok_leaves(
+        &mut self,
+        store: &Store,
+        location: &HashTreePath,
+        effective_headers: &[(String, String)],
+        content_type: &str,
+        encoding: Encoding,
+        enc: &EncodingMeta,
+    ) -> Vec<HashTreePath> {
+        let cert_expr = certificate_expression_for(effective_headers, encoding, &enc.sha256);
+        let resp_hashes = response_hashes_for(
+            effective_headers,
+            content_type,
+            encoding,
+            &cert_expr,
+            &enc.sha256,
+        );
+
+        let leaf =
+            |expr_hash, resp_hash| crate::redirect::alias_tree_path(location, expr_hash, resp_hash);
+        let mut leaves = vec![leaf(cert_expr.expression_hash, resp_hashes[&304])];
+        if enc.num_chunks == 1 {
+            leaves.push(leaf(cert_expr.expression_hash, resp_hashes[&200]));
+        } else {
+            let (range_cert_expr, resp_206) =
+                self.range_response_certs(store, effective_headers, content_type, encoding, enc);
+            leaves.extend(
+                resp_206
+                    .into_iter()
+                    .map(|h| leaf(range_cert_expr.expression_hash, h)),
+            );
+        }
+        for tp in &leaves {
+            self.asset_hashes.certify_response_precomputed(tp);
+        }
+        leaves
     }
 
     // ---- access-protection certify helpers ----
@@ -481,64 +498,21 @@ impl Certifier {
             if status != 200 && enc.num_chunks > 1 {
                 continue;
             }
-            let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
-
             if status == 200 {
-                // Compute the 200/304 response hashes once. A conditional
-                // request (a matching `If-None-Match`) to a 200-rewrite alias is
-                // served as a certified 304 with an empty body by
-                // `build_ok_http_response` — exactly like a direct hit, and
-                // regardless of chunk count, since its 304 branch runs ahead of
-                // the 206 branch. So the 304 leaf must exist at the alias
-                // location too; without it a normal browser refresh of an
-                // aliased path (e.g. `/` → `/index.html`) serves an uncertified
-                // 304 and fails response verification.
-                let resp_hashes = response_hashes_for(
+                // A 200-rewrite serves the target asset unchanged, so it must
+                // certify the very same leaves a direct hit does — the 200/206
+                // *and* the 304. Without the 304 leaf a normal browser refresh of
+                // an aliased path (e.g. `/` → `/index.html`) sends `If-None-Match`,
+                // is served a 304, and fails response verification. Reuse the exact
+                // direct-hit certification, only at the alias location.
+                tree_paths.extend(self.certify_ok_leaves(
+                    store,
+                    &location,
                     &effective_headers,
                     &meta.content_type,
                     encoding,
-                    &cert_expr,
-                    &enc.sha256,
-                );
-                let tp_304 = crate::redirect::alias_tree_path(
-                    &location,
-                    cert_expr.expression_hash,
-                    resp_hashes[&304],
-                );
-                self.asset_hashes.certify_response_precomputed(&tp_304);
-                tree_paths.push(tp_304);
-
-                if enc.num_chunks > 1 {
-                    // Multi-chunk target: the 200 is delivered as N×206 (the
-                    // gateway reassembles them into a 200), exactly like a direct
-                    // hit. Certify those 206 leaves; the full 200 is never served
-                    // for a multi-chunk encoding, so it is not certified.
-                    let (range_cert_expr, resp_206) = self.range_response_certs(
-                        store,
-                        &effective_headers,
-                        &meta.content_type,
-                        encoding,
-                        enc,
-                    );
-                    for resp_hash in resp_206 {
-                        let tp = crate::redirect::alias_tree_path(
-                            &location,
-                            range_cert_expr.expression_hash,
-                            resp_hash,
-                        );
-                        self.asset_hashes.certify_response_precomputed(&tp);
-                        tree_paths.push(tp);
-                    }
-                } else {
-                    // Single-chunk target: certify the encoding's full 200.
-                    let tp = crate::redirect::alias_tree_path(
-                        &location,
-                        cert_expr.expression_hash,
-                        resp_hashes[&200],
-                    );
-                    self.asset_hashes.certify_response_precomputed(&tp);
-                    tree_paths.push(tp);
-                }
+                    enc,
+                ));
                 continue;
             }
 
@@ -546,6 +520,7 @@ impl Certifier {
             // the same headers and body the asset would serve at 200. Only
             // single-chunk encodings reach here (multi-chunk 4xx was skipped
             // above), and an error page never takes the etag/304 path.
+            let cert_expr = certificate_expression_for(&effective_headers, encoding, &enc.sha256);
             let base_headers: Vec<(String, Value)> = headers_for(
                 &effective_headers,
                 &meta.content_type,
