@@ -122,6 +122,8 @@ When you need finer control, each topic has its own page:
 
 - **[Routing & clean URLs](routing.md)** — how request paths map to files, trailing
   slashes, and 404 handling.
+- **[Single-page apps](routing.md#single-page-apps-spa)** — the one `_redirects` rule a
+  client-side-routed app needs, so every URL loads (and reloads) your shell.
 - **[Redirects & rewrites](redirects.md)** — the `_redirects` file: send `/old` to
   `/new`, serve one file at another path, set custom error pages.
 - **[Custom headers](headers.md)** — the `_headers` file: cache-control, a Content

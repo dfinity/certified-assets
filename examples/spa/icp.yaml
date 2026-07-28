@@ -1,0 +1,21 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: frontend
+    build:
+      steps:
+        # The canister + sync-plugin wasms are built from this repo by `make wasm`,
+        # which writes them to the repo-root `dist/` directory.
+        - type: pre-built
+          path: ../../dist/canister.wasm
+
+    sync:
+      steps:
+        - type: plugin
+          path: ../../dist/plugin.wasm
+          dirs:
+            - dist # the site to serve (this example's own dist/)

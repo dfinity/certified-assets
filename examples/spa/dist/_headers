@@ -1,0 +1,11 @@
+# Patterns match the *file* (its asset key), not the URL a visitor typed. The
+# shell is served at every client route through the `/*` rewrite, and a rewrite
+# reuses the target file's headers — so this block covers /dashboard,
+# /dashboard/settings/deep, and every other client route too.
+/*.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+# Fingerprinted build output never changes, so cache it hard. A real bundler
+# emits hashed names (app-a1b2c3.js); this example keeps the name readable.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

@@ -1,7 +1,7 @@
 # Custom headers
 
 Add a file named `_headers` to the root of your asset directory to attach response
-headers — cache-control, a Content Security Policy, other security headers — to paths
+headers — cache-control, a Content Security Policy, other security headers — to files
 on your site. The syntax follows [Netlify's `_headers`](https://docs.netlify.com/manage/routing/headers/):
 a path pattern on its own line, followed by indented `Name: value` lines.
 
@@ -20,18 +20,37 @@ A blank line or a `#` comment ends a block.
 
 A pattern is an absolute path (leading `/`) with an optional `*` wildcard:
 
-- `/` — the home page only.
-- `/about` — one exact path.
+- `/index.html` — one exact file (the home page).
+- `/about.html` — likewise, one exact file.
 - `/assets/*` — everything under `/assets/`.
-- `/*.css` — every path ending in `.css`.
-- `/*` — every path.
+- `/*.css` — every file ending in `.css`.
+- `/*` — every file.
 
 The single `*` matches any run of characters, including `/`. There is no `**`, no
 `?`, and no `:placeholder` capture (see [why dynamic rules aren't supported](redirects.md#what-isnt-supported-dynamic-rules)).
 
+### Patterns match files, not URLs
+
+A pattern is matched against the **path of the file inside your directory** — its
+asset key — not against the URL a visitor typed. For most sites the two are the same
+string and the distinction never comes up, but it matters wherever a URL and a file
+differ:
+
+- **Clean URLs.** Write `/about.html`, not `/about`, and `/index.html` for the home
+  page. There is no file at `/`, so a `/` pattern matches nothing at all.
+- **Rewrites.** A `200` [rewrite](redirects.md) serves its target file's contents,
+  and reuses that file's headers. So the headers for `/article` come from the pattern
+  matching `/content/article.html`. For a [SPA](routing.md#single-page-apps-spa) — where
+  a single `/*` rewrite serves the shell at every client route — this means a
+  `Cache-Control` declared for `/index.html` reaches all of them, and a block written
+  against a route like `/dashboard/*` matches no file and does nothing.
+- **Redirects.** A `3xx` rule is the one exception: it synthesizes its own response
+  rather than serving a file, so its headers come from patterns matching the rule's
+  `from` path.
+
 ## How rules combine
 
-A path can match several blocks at once, and **all matching blocks contribute** their
+A file can match several blocks at once, and **all matching blocks contribute** their
 headers — patterns don't override each other wholesale. For a single header name:
 
 - Values from different matching blocks are combined into one header, comma-separated

@@ -51,16 +51,71 @@ Every request must resolve to a certified response, so there is always a `404` p
   `404` page for any unmatched path.
 - **Custom.** Add a file at the root of your directory named `404.html`. It's
   automatically wired up as the site-wide not-found page (served with a `404` status).
-- **Single-page apps (SPA).** If your app does client-side routing, send every
-  unmatched path to your shell instead of a 404, by adding this to
-  [`_redirects`](redirects.md):
+- **Client-side routing.** A [single-page app](#single-page-apps-spa) sends unmatched
+  paths to its shell instead of to a 404 page.
+
+## Single-page apps (SPA)
+
+If your app does client-side routing — React Router, Vue Router, SvelteKit in SPA
+mode, or a hand-rolled `history.pushState` router — the server has to answer *every*
+URL with the app shell so the router can take over. Add one rule to
+[`_redirects`](redirects.md):
+
+```
+/*  /index.html  200
+```
+
+That's the whole SPA configuration. `200` makes it a **rewrite**: the shell's
+contents are served at the requested URL with no visible redirect, so
+`/dashboard/settings` works on a fresh load and on a browser reload, not just on
+in-app navigation. Every one of those responses is certified, including the ones at
+paths that have no file behind them.
+
+See the [`spa` example](../examples/spa/) for a complete, runnable project.
+
+### What the `/*` rule changes
+
+- **The default 404 page is not added.** Your root catch-all takes over the whole
+  path space, so unknown paths serve the shell and the app decides what a bad route
+  looks like.
+- **A missing asset returns HTML.** A typo'd or stale `/assets/app-old.js` matches
+  `/*` too, so it serves the shell with `Content-Type: text/html` and a `200`. This
+  mirrors Netlify and Cloudflare Pages, and it's the one behavior worth overriding: a
+  `fetch()` for missing JSON gets HTML it can't parse, and a missing script fails with
+  a confusing MIME-type error instead of a plain 404.
+
+  Give your build output an honest 404 by scoping a rule to it *above* the catch-all
+  — rules are matched in file order:
 
   ```
-  /*  /index.html  200
+  /assets/*  /404.html  404
+  /*         /index.html  200
   ```
 
-  When you declare your own root catch-all (`/*`) like this, it takes over the whole
-  path space and the default 404 page is not added — your rule wins, as a SPA needs.
+  Real files still win over both rules, so this only affects URLs under `/assets/`
+  that don't exist. It needs a `404.html` in your directory: declaring `/*` means the
+  built-in default is never added, and a 4xx rule whose target is missing goes
+  inert.
+
+### What it doesn't change
+
+- **Real files still win.** Files are matched before any rule, so you can mix
+  server-rendered pages into a SPA at no cost: ship `legal.html` and `/legal` serves
+  it, while `/*` only catches what nothing else claimed.
+- **Clean URLs still apply.** The [synthesized rules](#clean-urls) are matched before
+  your `_redirects`, so `/index` still `307`s to `/` and `/legal/` to `/legal`.
+
+### Two things to get right in the app
+
+- **Link assets with absolute paths.** Use `/assets/app.js`, not `assets/app.js`. A
+  relative URL resolves against the *client route*, so at `/dashboard/settings` the
+  browser would request `/dashboard/settings/assets/app.js` — which the `/*` rule
+  answers with the HTML shell.
+- **Put shell headers on the file, not the route.** [`_headers`](headers.md) patterns
+  match the file, and a rewrite reuses its target's headers, so a
+  `Cache-Control` declared for `/index.html` (or `/*.html`) is what every client
+  route gets. A block written against `/dashboard/*` matches no file and does
+  nothing. See [patterns match files, not URLs](headers.md#patterns-match-files-not-urls).
 
 ## See also
 

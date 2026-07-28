@@ -12,6 +12,7 @@ the HTTP gateway (see [`crates/e2e/`](../crates/e2e/)), so these stay working.
 | [redirects](redirects/) | Redirects, custom error pages, and rewrites via a `_redirects` file. |
 | [clean-urls](clean-urls/) | Extensionless routing (`/foo` → `foo.html`), auto-synthesised with no config. |
 | [catch-all-404](catch-all-404/) | A `/*` catch-all serving a custom 404 page for every unknown URL. |
+| [spa](spa/) | A client-side-routed single-page app: one `/* /index.html 200` rule, so every URL loads the shell. |
 | [access-protection](access-protection/) | Turning a public site into a private one gated behind an access token. |
 
 ## Running any example
