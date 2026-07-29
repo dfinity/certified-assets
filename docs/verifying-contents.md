@@ -57,9 +57,11 @@ that produce the served directory).
    you reproduced from source. If they differ, the served content, headers, or
    redirects do not match that source.
 
-The deploy also prints the hash in the `icp deploy` / sync result (`state hash
-<hex>`), so the operator can confirm their own deploy is self-consistent — but
-again, that is not third-party verification.
+The deploy also prints a hash in the `icp deploy` / sync result (`canister reports
+state hash <hex>`). That value comes back from the canister on the call that
+finalizes the sync, so it tells the operator what the canister now holds — it is
+*not* a locally-derived cross-check, and not third-party verification. Only the
+`state-hash` tool above, run against source you reproduced, is that.
 
 ## The frozen contract
 
@@ -76,9 +78,10 @@ parameters baked into the hash:
   stream (see the `state-hash` crate). Independent of map/header iteration order,
   but bound to this layout version.
 
-Because there are no production instances and no stored hashes to preserve, this
-contract can change between releases; when it does, the format version is bumped
-and every previously-computed hash is expected to change.
+The contract can change between releases; when it does, the format version is
+bumped and every previously-computed hash is expected to change. Within a release
+series it is frozen — a patch upgrade preserves stored content, so a build that
+changed these parameters would silently invalidate every deployed canister's hash.
 
 ## Relationship to certification
 

@@ -2,11 +2,22 @@
 //! prepared assets + final redirect rules out — the exact state a finished sync
 //! leaves on the canister, minus the canister diff/upload.
 //!
-//! `sync-core` calls [`prepare_project`] and then diffs/uploads; the
-//! `state-hash-cli` verifier calls [`state_hash_for_dir`]. Both build the
-//! [`state_hash::Manifest`] from the *same* output here, so the canister's
-//! stored-state hash and the verifier's `dist/`-derived hash agree by
-//! construction.
+//! Preparation runs in **two phases**, because they cost wildly different
+//! amounts:
+//!
+//! 1. [`plan_project`] — scan, parse `_redirects`/`_headers`, synthesise rules,
+//!    load each asset and hash its *uncompressed* bytes. Cheap: a read and a
+//!    SHA-256 per file.
+//! 2. [`PlannedAsset::encode`] — gzip + brotli, chunk, hash. Expensive: brotli
+//!    q11 dominates a deploy's local cost.
+//!
+//! Splitting them lets `sync-core` encode only the assets the canister doesn't
+//! already hold (see its `sync()`); [`prepare_project`] is the eager wrapper
+//! that runs both phases over everything, which is what the `state-hash-cli`
+//! verifier needs — it has no canister to compare against and must do the full
+//! work. Both build the [`state_hash::Manifest`] from the *same* output here, so
+//! the canister's stored-state hash and the verifier's `dist/`-derived hash
+//! agree by construction.
 
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -57,14 +68,6 @@ pub struct PreparedAsset {
     pub encodings: Vec<PreparedEncoding>,
 }
 
-impl PreparedAsset {
-    /// Whether any encoding will be stored as more than one chunk. Used to reject
-    /// oversized 4xx error-page targets (see `sync-core`).
-    pub fn is_multichunk(&self) -> bool {
-        self.encodings.iter().any(|e| e.chunks.len() > 1)
-    }
-}
-
 /// Everything a sync will install on the canister, derived purely from `dist/`:
 /// every asset (including the injected branded 404 when applicable) and the
 /// final redirect rules in match order, with 3xx rules' `_headers` already
@@ -75,14 +78,115 @@ pub struct PreparedProject {
     pub redirect_rules: Vec<RedirectRule>,
 }
 
-/// Prepares a project's `dist/` directory: scans assets, parses `_redirects` and
-/// `_headers`, synthesizes the html-handling and 404 rules, then loads, encodes,
-/// chunks, and hashes every asset's content and resolves its headers.
+/// One asset discovered in `dist/`: loaded, its media type and headers
+/// resolved, and its **uncompressed** bytes hashed — but not yet encoded.
+///
+/// Everything here is cheap to derive, and it is enough to decide whether an
+/// asset needs encoding at all: a caller that finds the canister already holds
+/// this exact content (same `content_type`, same `identity_sha256`, same
+/// encoding set) can skip [`encode`](PlannedAsset::encode) entirely, because
+/// every compressed encoding is a pure function of the identity bytes for a
+/// given build of this crate.
+#[derive(Clone, Debug)]
+pub struct PlannedAsset {
+    pub key: String,
+    /// The stored media type, after any `_headers` `Content-Type` override.
+    pub content_type: String,
+    /// Per-asset response headers resolved from `_headers`.
+    pub headers: Vec<(String, String)>,
+    /// SHA-256 of the uncompressed bytes — the identity encoding's
+    /// whole-encoding hash, and the identity the sync diff matches on.
+    pub identity_sha256: [u8; 32],
+    /// Length of the uncompressed bytes.
+    pub identity_len: u64,
+    /// Loaded bytes + resolved media type, consumed by `encode`.
+    content: Content,
+}
+
+impl PlannedAsset {
+    /// The encodings preparation will *attempt* for this asset: Identity plus,
+    /// for compressible media types, Gzip and Brotli. Whether a compressed
+    /// encoding is actually kept is decided by the size check in
+    /// [`encode`](PlannedAsset::encode).
+    pub fn attempted_encodings(&self) -> Vec<Encoding> {
+        encoders_for(&self.content.media_type)
+    }
+
+    /// Whether any encoding will be stored as more than one chunk. Used to
+    /// reject oversized 4xx error-page targets (see `sync-core`).
+    ///
+    /// Exact without encoding anything: a compressed encoding is only kept when
+    /// it is *smaller* than identity, so identity is the longest kept encoding
+    /// and its length alone decides this.
+    pub fn is_multichunk(&self) -> bool {
+        self.identity_len > MAX_CHUNK_SIZE as u64
+    }
+
+    /// The expensive half of preparation: encode each attempted encoding, keep a
+    /// compressed one only when it actually saves bytes, then chunk and hash
+    /// every kept encoding.
+    pub fn encode(self) -> Result<PreparedAsset, String> {
+        let mut encodings = Vec::new();
+        for encoding in encoders_for(&self.content.media_type) {
+            let encoded = self.content.encode(encoding)?;
+            // Identity is always kept. A compressed encoding is only kept if it
+            // actually saves bytes vs identity — otherwise storing it just wastes
+            // canister space.
+            if !encoding.is_identity() && encoded.data.len() >= self.content.data.len() {
+                continue;
+            }
+            encodings.push(prepare_encoding(encoding, encoded.data));
+        }
+
+        Ok(PreparedAsset {
+            key: self.key,
+            content_type: self.content_type,
+            headers: self.headers,
+            encodings,
+        })
+    }
+}
+
+/// The cheap half of [`prepare_project`]: every asset located, loaded and
+/// identified, plus the final redirect rules — with no encoding done yet.
+#[derive(Clone, Debug, Default)]
+pub struct ProjectPlan {
+    pub assets: Vec<PlannedAsset>,
+    pub redirect_rules: Vec<RedirectRule>,
+}
+
+/// Prepares a project's `dist/` directory in full: [`plan_project`] followed by
+/// [`PlannedAsset::encode`] on every asset.
 ///
 /// This is the canister-agnostic front half of a sync — no canister diff and no
-/// uploads. Errors carry file paths / line numbers so misconfigurations are
-/// caught before any canister round-trip.
+/// uploads. `sync-core` uses the two phases separately so it can skip encoding
+/// assets the canister already holds; the `state-hash-cli` verifier calls this,
+/// since reproducing the manifest requires every encoding.
 pub fn prepare_project(dir: &str) -> Result<PreparedProject, String> {
+    let ProjectPlan {
+        assets,
+        redirect_rules,
+    } = plan_project(dir)?;
+
+    let assets = assets
+        .into_iter()
+        .map(PlannedAsset::encode)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PreparedProject {
+        assets,
+        redirect_rules,
+    })
+}
+
+/// Scans assets, parses `_redirects` and `_headers`, synthesizes the
+/// html-handling and 404 rules, then loads each asset's content, resolves its
+/// media type and headers, and hashes its uncompressed bytes.
+///
+/// Everything except encoding. Errors carry file paths / line numbers so
+/// misconfigurations are caught before any canister round-trip — and before any
+/// compression work.
+pub fn plan_project(dir: &str) -> Result<ProjectPlan, String> {
     let sources = scan::scan(dir)?;
     let user_rules = load_redirect_rules(dir)?;
 
@@ -108,10 +212,10 @@ pub fn prepare_project(dir: &str) -> Result<PreparedProject, String> {
 
     let mut assets = Vec::with_capacity(sources.len() + 1);
     for source in sources {
-        assets.push(prepare_asset(source, &header_rules)?);
+        assets.push(plan_asset(source, &header_rules)?);
     }
     if not_found_plan.inject_branded_asset {
-        assets.push(prepare_branded_404(&header_rules)?);
+        assets.push(plan_branded_404(&header_rules)?);
     }
 
     // 3xx rules synthesize their own response (no target asset to inherit
@@ -119,16 +223,13 @@ pub fn prepare_project(dir: &str) -> Result<PreparedProject, String> {
     // form a re-sync diffs cleanly against.
     let redirect_rules = resolve_3xx_rule_headers(&project_rules, &header_rules);
 
-    Ok(PreparedProject {
+    Ok(ProjectPlan {
         assets,
         redirect_rules,
     })
 }
 
-fn prepare_asset(
-    source: AssetSource,
-    header_rules: &[HeaderRule],
-) -> Result<PreparedAsset, String> {
+fn plan_asset(source: AssetSource, header_rules: &[HeaderRule]) -> Result<PlannedAsset, String> {
     let mut content = Content::load(&source.path)?;
     // Apply a per-glob `Content-Type` override from `_headers` before deciding
     // encoders or the stored media type (e.g. a `.did` declared `text/plain`
@@ -136,51 +237,38 @@ fn prepare_asset(
     if let Some(override_mime) = headers::content_type_for(&source.key, header_rules) {
         content.media_type = override_mime;
     }
-    prepare_content_asset(source.key, content, header_rules)
+    Ok(plan_content_asset(source.key, content, header_rules))
 }
 
 /// Builds the in-memory branded `/404.html` injected when a project ships no root
 /// `404.html`. Treated like any other HTML asset, but its bytes come from a
 /// constant and `_headers` content-type overrides are not applied (it is always
 /// `text/html`); its per-asset headers are still resolved from `_headers`.
-fn prepare_branded_404(header_rules: &[HeaderRule]) -> Result<PreparedAsset, String> {
+fn plan_branded_404(header_rules: &[HeaderRule]) -> Result<PlannedAsset, String> {
     let content = Content {
         data: not_found::DEFAULT_404_HTML.as_bytes().to_vec(),
         media_type: mime_guess::from_path(not_found::ROOT_404_KEY)
             .first()
             .unwrap_or(mime::TEXT_HTML),
     };
-    prepare_content_asset(not_found::ROOT_404_KEY.to_string(), content, header_rules)
+    Ok(plan_content_asset(
+        not_found::ROOT_404_KEY.to_string(),
+        content,
+        header_rules,
+    ))
 }
 
-/// Shared tail: pick encoders for `content`, encode each, keep a compressed
-/// encoding only when it actually saves bytes, then chunk and hash each kept
-/// encoding and resolve the asset's headers.
-fn prepare_content_asset(
-    key: String,
-    content: Content,
-    header_rules: &[HeaderRule],
-) -> Result<PreparedAsset, String> {
-    let encoders: Vec<Encoding> = encoders_for(&content.media_type);
-
-    let mut encodings = Vec::new();
-    for encoding in encoders {
-        let encoded = content.encode(encoding)?;
-        // Identity is always kept. A compressed encoding is only kept if it
-        // actually saves bytes vs identity — otherwise storing it just wastes
-        // canister space.
-        if !encoding.is_identity() && encoded.data.len() >= content.data.len() {
-            continue;
-        }
-        encodings.push(prepare_encoding(encoding, encoded.data));
-    }
-
-    Ok(PreparedAsset {
+/// Shared tail of the planning phase: hash the uncompressed bytes and resolve
+/// the asset's stored media type and headers.
+fn plan_content_asset(key: String, content: Content, header_rules: &[HeaderRule]) -> PlannedAsset {
+    PlannedAsset {
         content_type: content.media_type.to_string(),
         headers: headers::resolve(&key, header_rules),
+        identity_sha256: Sha256::digest(&content.data).into(),
+        identity_len: content.data.len() as u64,
         key,
-        encodings,
-    })
+        content,
+    }
 }
 
 /// Slices encoded bytes into ≤ `MAX_CHUNK_SIZE` chunks and hashes each — the
@@ -439,6 +527,72 @@ mod tests {
         assert_eq!(enc.chunks.len(), 1);
         assert_eq!(enc.chunks[0].len, 0);
         assert_eq!(enc.content_len, 0);
+    }
+
+    // --- two-phase planning ---
+
+    /// `PlannedAsset::is_multichunk` must agree with the encoded truth, since
+    /// `sync-core` trusts it for assets it never encodes. `.bin` keeps this fast:
+    /// octet-stream is incompressible, so no brotli pass runs on the big file.
+    #[test]
+    fn planned_multichunk_matches_encoded_chunk_count() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "big.bin", &vec![0u8; MAX_CHUNK_SIZE + 1]);
+        write(&dir, "small.bin", &vec![0u8; MAX_CHUNK_SIZE]);
+
+        let plan = plan_project(&dir_str(&dir)).unwrap();
+        for planned in plan.assets {
+            let expected = planned.is_multichunk();
+            let prepared = planned.encode().unwrap();
+            assert_eq!(
+                expected,
+                prepared.encodings.iter().any(|e| e.chunks.len() > 1),
+                "multichunk mismatch for {}",
+                prepared.key
+            );
+        }
+    }
+
+    /// The planning phase must resolve exactly the identity, media type and
+    /// headers the eager path produces — `sync-core` diffs on those without
+    /// encoding.
+    #[test]
+    fn plan_matches_prepare_without_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<!DOCTYPE html><h1>hi</h1>");
+        write(&dir, "logo.png", &[0u8; 16]);
+        write(&dir, "_headers", b"/*\n  X-Frame-Options: DENY\n");
+
+        let plan = plan_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        assert_eq!(plan.redirect_rules, prepared.redirect_rules);
+        assert_eq!(plan.assets.len(), prepared.assets.len());
+
+        for (planned, prepared) in plan.assets.iter().zip(&prepared.assets) {
+            assert_eq!(planned.key, prepared.key);
+            assert_eq!(planned.content_type, prepared.content_type);
+            assert_eq!(planned.headers, prepared.headers);
+
+            let identity = prepared
+                .encodings
+                .iter()
+                .find(|e| e.encoding == Encoding::Identity)
+                .expect("identity is always kept");
+            assert_eq!(planned.identity_sha256, identity.sha256);
+            assert_eq!(planned.identity_len, identity.content_len);
+
+            let mut attempted = planned.attempted_encodings();
+            attempted.sort_by_key(|e| e.label());
+            assert_eq!(attempted, encoders_for_sorted(&planned.content_type));
+        }
+    }
+
+    /// The encoding set `encoders_for` attempts, by media type, sorted — mirrors
+    /// the rule under test without reaching into `content`'s private state.
+    fn encoders_for_sorted(content_type: &str) -> Vec<Encoding> {
+        let mut encs = crate::content::encoders_for(&content_type.parse().unwrap());
+        encs.sort_by_key(|e| e.label());
+        encs
     }
 
     fn encodings_of(prepared: &PreparedProject, key: &str) -> Vec<Encoding> {

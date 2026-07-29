@@ -255,7 +255,11 @@ service: {
   upload_chunks: (UploadChunksArguments) -> (vec ChunkId);
 
   // Apply a group of operations. Perform all successfully, or reject.
-  execute_operations: (ExecuteOperationsArguments) -> ();
+  // The call flagged `is_final` finalizes the sync and returns the canonical
+  // state hash recomputed over the now-final state (the same value `state_hash`
+  // then reports); every other call returns `null`. Returning it here saves a
+  // finishing sync a second round trip.
+  execute_operations: (ExecuteOperationsArguments) -> (opt blob);
 
   // ───────── Authorization ─────────
   // A set of extra principals authorized to sync assets. Canister controllers

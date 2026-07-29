@@ -25,6 +25,14 @@ The compatibility contract is the one the release machinery already encodes — 
   fields (`dir`, `build`, `presync`, `metadata`) live in users' committed project
   files. Renaming or removing one breaks those projects — treat the recipe schema like
   any other released API.
+- **Asset-preparation parameters are frozen within a series.** The compressor
+  settings (gzip level, brotli quality/window) and `MAX_CHUNK_SIZE` may only change
+  on a series bump. Two things depend on it: the state-hash contract documented in
+  [`docs/verifying-contents.md`](../../docs/verifying-contents.md), and `sync-core`'s
+  skip-if-unchanged diff, which infers that a matching *uncompressed* hash implies
+  matching compressed encodings. Note the version lock does **not** protect this: it
+  pairs canister and plugin *code*, while a canister upgraded in place still holds
+  content written by an earlier build of the same series.
 
 Two things do **not** change:
 

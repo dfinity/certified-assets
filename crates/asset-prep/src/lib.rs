@@ -26,8 +26,8 @@ pub mod scan;
 
 mod prepare;
 pub use prepare::{
-    MAX_CHUNK_SIZE, PreparedAsset, PreparedChunk, PreparedEncoding, PreparedProject, manifest,
-    prepare_project, state_hash_for_dir,
+    MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, PreparedEncoding, PreparedProject,
+    ProjectPlan, manifest, plan_project, prepare_project, state_hash_for_dir,
 };
 
 /// Strips a Netlify-style trailing comment from a single line of a `_redirects`

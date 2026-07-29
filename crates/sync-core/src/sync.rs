@@ -12,7 +12,9 @@ use crate::canister::{
     CallType, CanisterCall, authorize_via_proxy, can_sync, execute_operations, list_all_assets,
     list_all_redirect_rules, start_sync, version,
 };
-use asset_prep::{MAX_CHUNK_SIZE, PreparedAsset, PreparedChunk, PreparedProject, prepare_project};
+use asset_prep::{
+    MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, ProjectPlan, plan_project,
+};
 use wire_types::{
     AssetDetails, ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding,
     ExecuteOperationsArguments, Operation, RedirectRule, RulePattern, SetAssetContentArguments,
@@ -41,65 +43,167 @@ struct ProjectAsset {
     key: String,
     content_type: String,
     /// Per-asset response headers, already resolved from `_headers` by
-    /// `asset-prep::prepare_project` — the canonical stored form. Used as-is by
+    /// `asset-prep`'s planning phase — the canonical stored form. Used as-is by
     /// `build_operations` (no re-resolution).
     headers: Vec<(String, String)>,
     encodings: HashMap<Encoding, ProjectAssetEncoding>,
-}
-
-impl ProjectAsset {
     /// Whether any encoding will be stored as more than one chunk. Used to reject
     /// 4xx error-page rules whose target is too large to serve as a single inline
     /// body (see [`validate_error_page_targets`]).
-    fn is_multichunk(&self) -> bool {
-        self.encodings.values().any(|e| e.chunks.len() > 1)
-    }
+    ///
+    /// Carried as a flag rather than derived from `encodings` because an asset
+    /// the canister already holds is never encoded, so it has no chunks here.
+    /// `asset-prep` decides it from the uncompressed length alone.
+    multichunk: bool,
 }
 
-/// Adapts the canister-agnostic [`PreparedAsset`]s from `asset-prep` into the
-/// keyed diff structure the sync pipeline operates on, carrying the headers
-/// `prepare_project` already resolved and marking each encoding already-in-place
-/// when the canister already holds that exact content.
+/// Turns the planned assets into the keyed diff structure the sync pipeline
+/// operates on — **encoding only what the canister doesn't already hold.**
+///
+/// For each planned asset, [`current_encodings`] asks whether the canister's
+/// stored content is already exactly what preparation would produce. When it is,
+/// the asset is adopted as-is (every encoding already in place, nothing to
+/// upload) and the expensive gzip/brotli pass is skipped entirely — which is
+/// where a re-deploy's local cost goes. Otherwise it is encoded and diffed
+/// per-encoding, so a partially-current asset still uploads only what's missing.
+///
+/// Note this skips *encoding*, never *diffing*: headers and content_type are
+/// compared for every asset either way, since `_headers` can change while
+/// content doesn't.
 fn diff_assets(
-    assets: Vec<PreparedAsset>,
+    planned: Vec<PlannedAsset>,
     canister_assets: &HashMap<String, AssetDetails>,
-) -> HashMap<String, ProjectAsset> {
-    assets
-        .into_iter()
-        .map(|pa| {
-            let encodings = pa
-                .encodings
-                .into_iter()
-                .map(|enc| {
-                    let already_in_place = is_already_in_place(
-                        &pa.key,
-                        &pa.content_type,
-                        enc.encoding,
-                        &enc.sha256,
-                        canister_assets,
-                    );
-                    (
-                        enc.encoding,
-                        ProjectAssetEncoding {
-                            sha256: enc.sha256,
-                            chunks: enc.chunks,
-                            already_in_place,
-                            chunk_ids: Vec::new(),
-                        },
-                    )
-                })
-                .collect();
-            (
-                pa.key.clone(),
+) -> Result<HashMap<String, ProjectAsset>, String> {
+    let mut project_assets = HashMap::with_capacity(planned.len());
+    let mut reused = 0usize;
+
+    for asset in planned {
+        let multichunk = asset.is_multichunk();
+        let project_asset = match current_encodings(&asset, canister_assets.get(&asset.key)) {
+            Some(encodings) => {
+                reused += 1;
                 ProjectAsset {
-                    key: pa.key,
-                    content_type: pa.content_type,
-                    headers: pa.headers,
+                    key: asset.key,
+                    content_type: asset.content_type,
+                    headers: asset.headers,
                     encodings,
-                },
-            )
+                    multichunk,
+                }
+            }
+            None => {
+                let PreparedAsset {
+                    key,
+                    content_type,
+                    headers,
+                    encodings,
+                } = asset.encode()?;
+                let encodings = encodings
+                    .into_iter()
+                    .map(|enc| {
+                        let already_in_place = is_already_in_place(
+                            &key,
+                            &content_type,
+                            enc.encoding,
+                            &enc.sha256,
+                            canister_assets,
+                        );
+                        (
+                            enc.encoding,
+                            ProjectAssetEncoding {
+                                sha256: enc.sha256,
+                                chunks: enc.chunks,
+                                already_in_place,
+                                chunk_ids: Vec::new(),
+                            },
+                        )
+                    })
+                    .collect();
+                ProjectAsset {
+                    key,
+                    content_type,
+                    headers,
+                    encodings,
+                    multichunk,
+                }
+            }
+        };
+
+        project_assets.insert(project_asset.key.clone(), project_asset);
+    }
+
+    println!(
+        "encoded {} asset(s); {reused} already current on the canister",
+        project_assets.len() - reused
+    );
+    Ok(project_assets)
+}
+
+/// The canister's encodings for `planned`, when the canister already holds
+/// exactly the content preparation would produce — so encoding can be skipped.
+///
+/// Sound because compression is deterministic: for a given build of
+/// `asset-prep`, every compressed encoding is a pure function of the identity
+/// bytes. So if the canister holds the same identity hash under the same
+/// `content_type`, its compressed encodings are byte-identical to the ones we
+/// would spend brotli time recomputing.
+///
+/// Three things must line up, and the third is deliberately strict:
+///
+/// 1. same `content_type` — it is part of the stored, certified response;
+/// 2. same identity hash — identity is always kept, so it is always reported;
+/// 3. the stored encoding set is *exactly* the set preparation attempts.
+///
+/// (3) is what makes this safe without extra canister state. A missing
+/// compressed encoding is ambiguous — it could mean "compression didn't shrink
+/// this asset" or "an earlier deploy died mid-upload" — and the two are
+/// indistinguishable without doing the compression. Treating any mismatch as
+/// stale re-encodes those assets on every sync, but an asset whose compressed
+/// form isn't smaller than its identity form is tiny by definition, so the cost
+/// is noise.
+///
+/// This also relies on preparation parameters being frozen within a release
+/// series: the version lock pairs *code*, but a canister upgraded in place still
+/// holds content written by an earlier build of the same series.
+fn current_encodings(
+    planned: &PlannedAsset,
+    canister_asset: Option<&AssetDetails>,
+) -> Option<HashMap<Encoding, ProjectAssetEncoding>> {
+    let canister_asset = canister_asset?;
+    if canister_asset.content_type != planned.content_type {
+        return None;
+    }
+
+    let attempted = planned.attempted_encodings();
+    if canister_asset.encodings.len() != attempted.len()
+        || !attempted.iter().all(|encoding| {
+            canister_asset
+                .encodings
+                .iter()
+                .any(|d| d.encoding == *encoding)
         })
-        .collect()
+    {
+        return None;
+    }
+
+    let mut encodings = HashMap::with_capacity(canister_asset.encodings.len());
+    for details in &canister_asset.encodings {
+        // A malformed hash can't be matched or reused; treat the asset as stale
+        // and let the normal path re-upload it.
+        let sha256: [u8; 32] = details.sha256.as_ref().try_into().ok()?;
+        if details.encoding.is_identity() && sha256 != planned.identity_sha256 {
+            return None;
+        }
+        encodings.insert(
+            details.encoding,
+            ProjectAssetEncoding {
+                sha256,
+                chunks: Vec::new(),
+                already_in_place: true,
+                chunk_ids: Vec::new(),
+            },
+        );
+    }
+    Some(encodings)
 }
 
 /// Rejects 404/410 rules whose target asset will be multi-chunk. A custom error
@@ -116,10 +220,7 @@ fn validate_error_page_targets(
         if !matches!(rule.status, 404 | 410) {
             continue;
         }
-        if project_assets
-            .get(&rule.to)
-            .is_some_and(ProjectAsset::is_multichunk)
-        {
+        if project_assets.get(&rule.to).is_some_and(|a| a.multichunk) {
             let from = match &rule.from {
                 RulePattern::Exact(p) | RulePattern::Subtree(p) => p,
             };
@@ -219,30 +320,26 @@ pub fn sync<C: CanisterCall>(
     }
     println!("version: {canister_version}");
 
-    // Prepare the project's `dist/` once: scan + parse `_redirects`/`_headers` +
-    // synthesise html-handling/404 rules + load, encode, chunk, and hash every
-    // asset. This is the single, canister-agnostic preparation path shared with
-    // the offline `state-hash-cli` verifier (see `asset-prep`), so the content
-    // the canister stores and the hash a verifier reproduces from source match
-    // by construction.
-    let prepared = prepare_project(dir)?;
-    println!("prepared {} asset(s) from {dir}", prepared.assets.len());
+    // Plan the project's `dist/`: scan + parse `_redirects`/`_headers` +
+    // synthesise html-handling/404 rules + load each asset, resolve its media
+    // type and headers, and hash its uncompressed bytes. This is the cheap half
+    // of the canister-agnostic preparation path shared with the offline
+    // `state-hash-cli` verifier (see `asset-prep`); the expensive half —
+    // gzip/brotli — is deferred to `diff_assets`, which runs it only for assets
+    // the canister doesn't already hold.
+    let plan = plan_project(dir)?;
+    println!("planned {} asset(s) from {dir}", plan.assets.len());
     println!(
         "{} redirect rule(s) (incl. synthesised)",
-        prepared.redirect_rules.len()
+        plan.redirect_rules.len()
     );
 
-    // The state hash a verifier can compare against the canister's `state_hash()`,
-    // built from the same prepared project — so it equals the value the canister
-    // recomputes at the end of this sync. Printed in the result either way.
-    let state_hash = hex::encode(asset_prep::manifest(&prepared).digest());
-
-    let PreparedProject {
-        assets: prepared_assets,
+    let ProjectPlan {
+        assets: planned_assets,
         // Already in canonical stored form — 3xx rules carry their resolved
         // `_headers`. Used directly in the diff; no re-resolution.
         redirect_rules: project_rules,
-    } = prepared;
+    } = plan;
 
     let canister_assets: HashMap<String, AssetDetails> = list_all_assets(canister)?;
     println!("canister currently has {} asset(s)", canister_assets.len());
@@ -253,8 +350,8 @@ pub fn sync<C: CanisterCall>(
         canister_rules.len()
     );
 
-    // Phase 1: compute the diff only — no batch created yet.
-    let mut project_assets = diff_assets(prepared_assets, &canister_assets);
+    // Phase 1: encode what's stale and compute the diff — no batch created yet.
+    let mut project_assets = diff_assets(planned_assets, &canister_assets)?;
 
     // Reject oversized 4xx error-page targets before starting a sync.
     validate_error_page_targets(&project_rules, &project_assets)?;
@@ -269,7 +366,7 @@ pub fn sync<C: CanisterCall>(
     {
         println!("canister is up to date, nothing to commit");
         return Ok(format!(
-            "{} asset(s) already up to date; state hash {state_hash}",
+            "{} asset(s) already up to date",
             project_assets.len()
         ));
     }
@@ -288,12 +385,22 @@ pub fn sync<C: CanisterCall>(
     );
     println!("executing {} operation(s)", operations.len());
 
-    execute_in_stages(canister, session_id, operations)?;
+    // The canister recomputes its canonical state hash while finalizing the last
+    // group and hands it back, so the summary can report it without a second
+    // round trip. It is *canister-reported* — a self-consistency read, not
+    // third-party verification; for that, run `state-hash <dist>` offline and
+    // compare against the canister's `state_hash()` (see
+    // `docs/verifying-contents.md`).
+    let state_hash = execute_in_stages(canister, session_id, operations)?;
 
-    Ok(format!(
-        "synced {} asset(s) to canister; state hash {state_hash}",
-        project_assets.len()
-    ))
+    Ok(match state_hash {
+        Some(hash) => format!(
+            "synced {} asset(s) to canister; canister reports state hash {}",
+            project_assets.len(),
+            hex::encode(hash)
+        ),
+        None => format!("synced {} asset(s) to canister", project_assets.len()),
+    })
 }
 
 /// Whether the canister already holds this exact encoding (same `content_type`
@@ -468,6 +575,11 @@ fn pack_and_upload_chunks<C: CanisterCall>(
 /// open. Staged chunks survive between calls because the canister only drops
 /// them on sync start/finish, not between `execute_operations` calls.
 ///
+/// Returns the canonical state hash the canister recomputed while finalizing —
+/// the `is_final` call carries it back, so reporting it costs no extra round
+/// trip. `None` if the canister returned no hash (or a malformed one), which is
+/// cosmetic: the sync itself has already succeeded by then.
+///
 /// Trade-off: splitting forfeits cross-call atomicity. A failure mid-deploy
 /// leaves the canister with the operations from previously successful calls
 /// applied; the next sync run diffs against the canister and resumes from
@@ -476,7 +588,13 @@ fn execute_in_stages<C: CanisterCall>(
     canister: &C,
     session_id: u64,
     operations: Vec<Operation>,
-) -> Result<(), String> {
+) -> Result<Option<[u8; 32]>, String> {
+    /// A reported hash is cosmetic, so a wrong-sized blob degrades to `None`
+    /// rather than failing a sync that has already been applied.
+    fn as_hash(reported: Option<ByteBuf>) -> Option<[u8; 32]> {
+        reported.and_then(|h| h.as_ref().try_into().ok())
+    }
+
     let groups = split_operation_groups(operations);
     // The caller only reaches this with a non-empty diff, so there is always at
     // least one group. Guard anyway: we hold a session and must release it.
@@ -488,9 +606,11 @@ fn execute_in_stages<C: CanisterCall>(
                 operations: vec![],
                 is_final: true,
             },
-        );
+        )
+        .map(as_hash);
     }
     let total = groups.len();
+    let mut state_hash = None;
     for (i, ops) in groups.into_iter().enumerate() {
         let is_final = i + 1 == total;
         if total > 1 {
@@ -501,16 +621,17 @@ fn execute_in_stages<C: CanisterCall>(
                 ops.len()
             );
         }
-        execute_operations(
+        // Only the `is_final` call reports a hash; earlier groups return `None`.
+        state_hash = as_hash(execute_operations(
             canister,
             ExecuteOperationsArguments {
                 session_id,
                 operations: ops,
                 is_final,
             },
-        )?;
+        )?);
     }
-    Ok(())
+    Ok(state_hash)
 }
 
 /// Splits `operations` into groups, each small enough that a single
@@ -828,6 +949,9 @@ mod tests {
                 content_type: "application/octet-stream".to_string(),
                 headers: vec![],
                 encodings: enc_map,
+                // Same rule `asset-prep` applies: identity is the longest kept
+                // encoding, so its length alone decides this.
+                multichunk: data.len() > MAX_CHUNK_SIZE,
             },
         )
     }
@@ -1380,6 +1504,7 @@ mod tests {
                 content_type: content_type.to_string(),
                 headers: vec![],
                 encodings: enc_map,
+                multichunk: false,
             },
         )
     }
@@ -1447,6 +1572,8 @@ mod tests {
                         | (Operation::CreateAsset(_), "CreateAsset")
                         | (Operation::SetAssetContent(_), "SetAssetContent")
                         | (Operation::UnsetAssetContent(_), "UnsetAssetContent")
+                        | (Operation::SetAssetHeaders(_), "SetAssetHeaders")
+                        | (Operation::SetRedirectRules(_), "SetRedirectRules")
                 )
             })
             .count()
@@ -2422,5 +2549,181 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("not authorized"), "got: {err}");
+    }
+
+    // ───────── Lazy encoding ─────────
+    //
+    // `diff_assets` must encode an asset only when the canister doesn't already
+    // hold exactly what preparation would produce. "Was it encoded?" is directly
+    // observable: a reused asset carries no chunks at all (an encoded one always
+    // has at least one per encoding, even for empty content).
+
+    /// A body repetitive enough that both gzip and brotli beat identity, so the
+    /// asset keeps the full `{identity, gzip, brotli}` set — the case where
+    /// skipping the encode pass actually saves work.
+    fn compressible_html() -> Vec<u8> {
+        format!("<!DOCTYPE html><h1>{}</h1>", "hello world ".repeat(200)).into_bytes()
+    }
+
+    /// The `AssetDetails` map the canister would report after a full sync of
+    /// `dir` — i.e. what the diff sees on a re-deploy of an unchanged project.
+    fn canister_view(dir: &str) -> HashMap<String, AssetDetails> {
+        asset_prep::prepare_project(dir)
+            .expect("prepare project")
+            .assets
+            .into_iter()
+            .map(|a| {
+                let details = AssetDetails {
+                    encodings: a
+                        .encodings
+                        .iter()
+                        .map(|e| AssetEncodingDetails {
+                            encoding: e.encoding,
+                            sha256: ByteBuf::from(e.sha256.to_vec()),
+                        })
+                        .collect(),
+                    content_type: a.content_type,
+                    headers: a.headers,
+                    key: a.key.clone(),
+                };
+                (a.key, details)
+            })
+            .collect()
+    }
+
+    fn was_encoded(assets: &HashMap<String, ProjectAsset>, key: &str) -> bool {
+        assets[key].encodings.values().any(|e| !e.chunks.is_empty())
+    }
+
+    #[test]
+    fn unchanged_asset_is_not_encoded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), compressible_html()).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        let canister = canister_view(dir_str);
+        // Full set kept, so this exercises the reuse path rather than the
+        // "compression didn't help" one.
+        assert_eq!(canister["/index.html"].encodings.len(), 3);
+
+        let plan = plan_project(dir_str).unwrap();
+        let project = diff_assets(plan.assets, &canister).unwrap();
+
+        for key in project.keys() {
+            assert!(!was_encoded(&project, key), "{key} should not be encoded");
+        }
+        assert!(
+            build_operations(
+                &project,
+                &canister,
+                &plan.redirect_rules,
+                &plan.redirect_rules
+            )
+            .is_empty(),
+            "an unchanged project must produce no operations"
+        );
+    }
+
+    #[test]
+    fn header_only_change_reuses_content_and_sets_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), compressible_html()).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        // Canister state from before the `_headers` file existed.
+        let canister = canister_view(dir_str);
+        std::fs::write(
+            dir.path().join("_headers"),
+            b"/*\n  X-Frame-Options: DENY\n",
+        )
+        .unwrap();
+
+        let plan = plan_project(dir_str).unwrap();
+        let project = diff_assets(plan.assets, &canister).unwrap();
+
+        assert!(
+            !was_encoded(&project, "/index.html"),
+            "content is unchanged, so it must not be re-encoded"
+        );
+        let ops = build_operations(
+            &project,
+            &canister,
+            &plan.redirect_rules,
+            &plan.redirect_rules,
+        );
+        assert_eq!(count_op(&ops, "SetAssetHeaders"), project.len());
+        assert_eq!(count_op(&ops, "SetAssetContent"), 0);
+    }
+
+    #[test]
+    fn changed_asset_is_re_encoded_and_uploaded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), compressible_html()).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        let canister = canister_view(dir_str);
+        std::fs::write(dir.path().join("index.html"), b"<h1>new</h1>").unwrap();
+
+        let plan = plan_project(dir_str).unwrap();
+        let project = diff_assets(plan.assets, &canister).unwrap();
+
+        assert!(was_encoded(&project, "/index.html"));
+        assert!(
+            !was_encoded(&project, not_found::ROOT_404_KEY),
+            "the untouched branded 404 must still be reused"
+        );
+        let ops = build_operations(
+            &project,
+            &canister,
+            &plan.redirect_rules,
+            &plan.redirect_rules,
+        );
+        assert!(count_op(&ops, "SetAssetContent") > 0);
+    }
+
+    #[test]
+    fn missing_encoding_forces_re_encode_and_uploads_only_the_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), compressible_html()).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        // Simulate a deploy that died before brotli landed: identity and gzip
+        // match, brotli is absent. Indistinguishable from "brotli didn't shrink
+        // this asset" without encoding, so the asset must be re-encoded.
+        let mut canister = canister_view(dir_str);
+        canister
+            .get_mut("/index.html")
+            .unwrap()
+            .encodings
+            .retain(|e| e.encoding != Encoding::Brotli);
+
+        let plan = plan_project(dir_str).unwrap();
+        let project = diff_assets(plan.assets, &canister).unwrap();
+
+        assert!(was_encoded(&project, "/index.html"));
+        // ...but only the missing encoding is actually uploaded: the per-encoding
+        // hash check still marks identity and gzip as already in place.
+        let ops = build_operations(
+            &project,
+            &canister,
+            &plan.redirect_rules,
+            &plan.redirect_rules,
+        );
+        assert_eq!(count_op(&ops, "SetAssetContent"), 1);
+    }
+
+    #[test]
+    fn content_type_drift_forces_re_encode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), compressible_html()).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        let mut canister = canister_view(dir_str);
+        canister.get_mut("/index.html").unwrap().content_type = "text/plain".to_string();
+
+        let plan = plan_project(dir_str).unwrap();
+        let project = diff_assets(plan.assets, &canister).unwrap();
+
+        assert!(was_encoded(&project, "/index.html"));
     }
 }

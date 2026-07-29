@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use wire_types::Encoding;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Content {
     pub data: Vec<u8>,
     pub media_type: Mime,

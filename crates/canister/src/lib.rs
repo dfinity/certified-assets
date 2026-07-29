@@ -94,8 +94,11 @@ fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
     canister_core::upload_chunks(arg)
 }
 
+// Returns the canonical state hash on the call flagged `is_final` (`None`
+// otherwise), so a finishing sync learns what it installed without a second
+// round trip. Canister-reported: a self-consistency read, not verification.
 #[update(guard = "guard_can_sync")]
-async fn execute_operations(arg: ExecuteOperationsArguments) {
+async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteBuf> {
     canister_core::execute_operations(arg).await
 }
 

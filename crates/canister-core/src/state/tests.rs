@@ -2254,6 +2254,7 @@ mod redirect_rules {
                 &system_context,
             )
         })
+        .map(|_| ())
     }
 
     fn sample_rules() -> Vec<RedirectRule> {

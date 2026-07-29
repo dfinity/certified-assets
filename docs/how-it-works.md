@@ -55,6 +55,14 @@ At request time the canister reads the browser's `Accept-Encoding` header and se
 the best encoding both sides support, setting `Content-Encoding` accordingly. You get
 smaller transfers for free, with no build-step configuration.
 
+Compressing is the slowest part of a deploy, so a sync does it only where it has to.
+It first reads each file and hashes it uncompressed, then asks the canister what it
+already holds; any asset whose uncompressed hash, content type and encoding set
+already match is left alone, and only the rest are compressed and uploaded. Editing
+one file in a large site therefore costs one file's worth of compression, and
+re-deploying an unchanged site costs none at all. (Header and redirect changes are
+still detected for every asset — those don't depend on content.)
+
 ## ETag and conditional requests
 
 Every asset is served with an `ETag` — a strong validator derived from the SHA-256

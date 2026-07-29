@@ -83,18 +83,28 @@ pub fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
     })
 }
 
-pub async fn execute_operations(arg: ExecuteOperationsArguments) {
+/// Applies a group of sync operations. The call flagged `is_final` finalizes the
+/// sync and returns the canonical state hash recomputed over the now-final
+/// state; every other call returns `None`. Reporting it here means a client
+/// never needs a second `state_hash()` round trip to learn what it just
+/// installed — though that value is *canister-reported*, so a third party
+/// verifying a deploy still reproduces the hash from source (see
+/// `docs/verifying-contents.md`).
+pub async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteBuf> {
     let system_context = SystemContext::new();
     let arg_ref = &arg;
 
-    loop_with_message_extension_until_completion(|progress| {
+    let state_hash = loop_with_message_extension_until_completion(|progress| {
         STATE.with_borrow_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
     })
     .await
     .map_err(|msg| trap(&msg))
-    .ok();
+    .ok()
+    .flatten();
 
     STATE.with_borrow_mut(|s| certified_data_set(s.root_hash()));
+
+    state_hash.map(|hash| ByteBuf::from(hash.to_vec()))
 }
 
 pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {

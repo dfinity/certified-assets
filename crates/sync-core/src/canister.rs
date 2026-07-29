@@ -213,10 +213,13 @@ pub fn upload_chunks(
     c.call("upload_chunks", req, CallType::Update, true)
 }
 
+/// Applies a group of operations. The call flagged `is_final` finalizes the sync
+/// and returns the canonical state hash the canister recomputed over the now-
+/// final state; every other call returns `None`.
 pub fn execute_operations(
     c: &impl CanisterCall,
     args: ExecuteOperationsArguments,
-) -> Result<(), String> {
+) -> Result<Option<ByteBuf>, String> {
     c.call("execute_operations", args, CallType::Update, true)
 }
 
