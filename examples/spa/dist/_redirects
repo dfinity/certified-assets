@@ -1,0 +1,18 @@
+# Build output should 404, not fall through to the app. Without this line a
+# typo'd or stale bundle URL would match the `/*` rule below and be answered with
+# the HTML shell and a 200 — so a `fetch()` for missing JSON gets HTML it can't
+# parse, and a missing script fails with a confusing MIME-type error. Scoping a
+# 404 to this subtree keeps real files working (an asset always wins over a rule)
+# and gives everything else under /assets/ an honest 404.
+#
+# It must come *before* the catch-all: rules are matched in file order.
+/assets/*  /404.html  404
+
+# Single-page-app fallback: any path that no real asset — and no
+# auto-synthesised clean-URL rule — already claims is served the app shell with
+# a 200, so the client-side router can take over. This is the one rule a SPA
+# needs.
+#
+# Declaring a root `/*` also means no default 404 page is added: every unknown
+# path serves the shell, which is exactly what a SPA wants.
+/*  /index.html  200

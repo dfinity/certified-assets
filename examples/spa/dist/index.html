@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SPA demo</title>
+    <!-- Absolute src (leading `/`). A relative `assets/app.js` would resolve
+         against the *client route* — at /dashboard/settings it would request
+         /dashboard/assets/app.js, which the `/*` rewrite answers with this HTML
+         page instead of the script. -->
+    <script defer src="/assets/app.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>SPA demo</h1>
+      <p>Every path below is handled by the client-side router in
+        <code>/assets/app.js</code>. The canister serves this same shell for all
+        of them, via one <code>/* /index.html 200</code> rule.</p>
+
+      <nav>
+        <a href="/" data-link>Home</a>
+        <a href="/dashboard" data-link>Dashboard</a>
+        <a href="/dashboard/settings/deep" data-link>Deeply nested route</a>
+        <!-- No data-link: a full page load, proving the server returns the
+             shell for this path too (not a 404). -->
+        <a href="/dashboard/settings/deep">Same route, full reload</a>
+        <!-- A genuinely static page, served from its own file. -->
+        <a href="/legal">Legal (static page)</a>
+      </nav>
+
+      <section id="app">
+        <!-- Rendered by the router; this text only shows if JS is disabled. -->
+        <p>Loading…</p>
+      </section>
+    </main>
+  </body>
+</html>

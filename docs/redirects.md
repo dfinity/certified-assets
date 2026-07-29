@@ -82,7 +82,8 @@ overall order:
 4. **The 404 fallback.** Finally the [not-found page](routing.md#not-found-handling).
 
 So a `/*` rule at the end of your file only catches paths that nothing earlier
-claimed — which is exactly what makes the SPA fallback above safe.
+claimed — which is exactly what makes the
+[SPA fallback](routing.md#single-page-apps-spa) above safe.
 
 ## What isn't supported: dynamic rules
 

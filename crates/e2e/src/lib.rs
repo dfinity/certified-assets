@@ -241,6 +241,17 @@ pub fn http_fetch_with_headers(
 /// (notably around path normalisation), so tests that mirror real browser
 /// behaviour should prefer this helper.
 pub fn http_fetch_subdomain(project: &Path, path: &str) -> reqwest::blocking::Response {
+    http_fetch_subdomain_with_headers(project, path, &[])
+}
+
+/// Like [`http_fetch_subdomain`], but attaches arbitrary request headers — e.g.
+/// an `If-None-Match` to exercise a 304 through the browser-style URL, which is
+/// the form that forces the gateway's full v2 verification.
+pub fn http_fetch_subdomain_with_headers(
+    project: &Path,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> reqwest::blocking::Response {
     let cid = frontend_canister_id(project);
     let base = gateway_url(project);
     // base looks like `http://127.0.0.1:PORT` or `http://localhost:PORT`. We
@@ -262,13 +273,16 @@ pub fn http_fetch_subdomain(project: &Path, path: &str) -> reqwest::blocking::Re
         .expect("subdomain URL has port");
     let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
 
-    reqwest::blocking::Client::builder()
+    let mut req = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .resolve(&host, addr)
         .build()
         .expect("build reqwest client")
-        .get(&url)
-        .send()
+        .get(&url);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    req.send()
         .unwrap_or_else(|e| panic!("GET {url} failed: {e}"))
 }
 
