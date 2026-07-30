@@ -77,6 +77,17 @@ fn state_hash() -> ByteBuf {
     canister_core::state_hash()
 }
 
+// The compression fingerprint of the client that last prepared every asset (see
+// `asset-prep::canary`), or 32 zero bytes if none has. A syncing client reads it
+// to decide whether it may trust unchanged uncompressed hashes to imply
+// unchanged compressed bytes. A **query**: it only steers the client's own local
+// work, so a stale read costs at worst some redundant preparation, never
+// incorrect state — unlike `state_hash`, which a third party trusts.
+#[query]
+fn preparation_canary() -> ByteBuf {
+    canister_core::preparation_canary()
+}
+
 // Whether the calling identity may sync assets (authorized or a controller).
 // Lets a client check access up front instead of discovering it mid-sync.
 #[query]
@@ -94,8 +105,11 @@ fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
     canister_core::upload_chunks(arg)
 }
 
+// Returns the canonical state hash on the call flagged `is_final` (`None`
+// otherwise), so a finishing sync learns what it installed without a second
+// round trip. Canister-reported: a self-consistency read, not verification.
 #[update(guard = "guard_can_sync")]
-async fn execute_operations(arg: ExecuteOperationsArguments) {
+async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteBuf> {
     canister_core::execute_operations(arg).await
 }
 

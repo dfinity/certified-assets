@@ -121,7 +121,8 @@ fn run_to_completion(state: &mut State, args: &ExecuteOperationsArguments, ctx: 
     let mut progress = ExecuteOperationsProgress::default();
     loop {
         match state.execute_operations(args, progress, ctx) {
-            ComputationStatus::Done(()) => return,
+            // `Done` carries the state hash on a final call; benches ignore it.
+            ComputationStatus::Done(_) => return,
             ComputationStatus::InProgress(p) => progress = p,
             ComputationStatus::Error(e) => panic!("execute_operations failed: {e}"),
         }

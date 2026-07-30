@@ -3,20 +3,35 @@ use e2e::{AssetDetails, Encoding, LocalNetwork, icp_cmd, list_assets, setup_exam
 use std::fs;
 
 /// Deploy the `static-site` example to a local replica and verify that
-/// `/index.html` appears in the canister's asset list.
+/// `/index.html` appears in the canister's asset list, and that the finalizing
+/// call handed the state hash back for the summary.
 #[test]
 fn basic_deploy() {
     let tmp = setup_example("static-site");
     let project = tmp.path();
     let _network = LocalNetwork::start(project);
 
-    icp_cmd(project).arg("deploy").assert().success();
+    let output = icp_cmd(project)
+        .args(["--debug", "deploy"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 
     let assets = list_assets(project);
 
     assert!(
         assets.iter().any(|a| a.key == "/index.html"),
         "expected /index.html in canister asset list; got: {assets:#?}",
+    );
+    assert!(
+        combined.contains("canister reports state hash"),
+        "expected the finalizing call to report a state hash; got:\n{combined}",
     );
 }
 
@@ -52,8 +67,9 @@ fn basic_deploy_with_proxy() {
     );
 }
 
-/// Run sync twice without modifying any files.
-/// The second deploy must report "up to date" and must not change canister state.
+/// Run sync twice without modifying any files. The second deploy must report
+/// "up to date", must not change canister state, and — the point of preparing
+/// lazily — must not compress a single asset to find that out.
 #[test]
 fn no_op_sync() {
     let tmp = setup_example("static-site");
@@ -82,6 +98,10 @@ fn no_op_sync() {
     assert!(
         combined.contains("up to date"),
         "expected 'up to date' in deploy output on second run; got:\n{combined}",
+    );
+    assert!(
+        combined.contains("encoded 0 asset(s)"),
+        "a re-deploy of an unchanged project must encode nothing; got:\n{combined}",
     );
 
     let mut assets_after = list_assets(project);

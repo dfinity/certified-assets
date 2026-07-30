@@ -16,13 +16,18 @@
 //!   state-hash <dist-dir>
 //!
 //! `<dist-dir>` is the built site directory (the same one passed to a deploy),
-//! including any `_headers` / `_redirects` files. Prints the 64-char hex hash on
-//! success; on error, prints a message to stderr and exits non-zero.
+//! including any `_headers` / `_redirects` files. Prints one 64-char hex hash
+//! per preparation mode — `compressed` (what `icp deploy` produces) and
+//! `uncompressed` — since the same directory hashes differently depending on
+//! whether compressed encodings were stored. A canister matches exactly one.
+//! On error, prints a message to stderr and exits non-zero.
 //!
-//! The hash is bound to a frozen contract — the compressor parameters (gzip
-//! `flate2` default; brotli quality 11 / window 22) and `MAX_CHUNK_SIZE` — so a
-//! verifier must use a `state-hash` build matching the deploying plugin's
-//! version. See `docs/verifying-contents.md`.
+//! The `compressed` hash is bound to a contract — the compressor parameters
+//! (gzip `flate2` default; brotli quality 11 / window 22), the compressor
+//! implementations themselves, and `MAX_CHUNK_SIZE` — so a verifier must use a
+//! `state-hash` build matching the deploying plugin's version. The
+//! `uncompressed` hash depends on no compressor at all. See
+//! `docs/verifying-contents.md`.
 
 use std::process::ExitCode;
 
@@ -43,16 +48,25 @@ fn main() -> ExitCode {
         }
     };
 
-    match asset_prep::state_hash_for_dir(&dir) {
-        Ok(hash) => {
-            println!("{}", hex::encode(hash));
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
+    // A deploy either stores compressed encodings alongside the uncompressed
+    // copy or doesn't, and the two produce different state hashes from the same
+    // directory. Rather than ask the verifier which was used — a question they
+    // often can't answer, and a flag that would invite more flags — print both
+    // and let them see which one the canister reports.
+    let modes = [
+        (asset_prep::Compression::Enabled, "compressed"),
+        (asset_prep::Compression::Disabled, "uncompressed"),
+    ];
+    for (compression, label) in modes {
+        match asset_prep::state_hash_for_dir(&dir, compression) {
+            Ok(hash) => println!("{label:<14}{}", hex::encode(hash)),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
+    ExitCode::SUCCESS
 }
 
 fn print_usage(program: &str) {

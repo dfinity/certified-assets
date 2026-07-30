@@ -7,9 +7,11 @@ Tests are organized around these components. Each runs independently.
 - **Location**: inline `#[cfg(test)]` modules in each [`crates/asset-prep/src/`](../../crates/asset-prep/src/)`*.rs` file
 - **Run**: `cargo test -p asset-prep`
 
-`asset-prep` is the native, local-only crate that turns a `dist/` directory into prepared assets + redirect rules + the canonical `state-hash::Manifest` (shared by `sync-core` and the `state-hash-cli` verifier). It owns directory scanning, MIME detection, encoding selection, `_headers`/`_redirects` parsing, html-handling synthesis, the 404 convention, content chunking/hashing, and the `dist → Manifest` builder.
+`asset-prep` is the native, local-only crate that turns a `dist/` directory into prepared assets + redirect rules + the canonical `state-hash::Manifest` (shared by `sync-core` and the `state-hash-cli` verifier). It owns directory scanning, MIME detection, encoding selection, `_headers`/`_redirects` parsing, html-handling synthesis, the 404 convention, content chunking/hashing, the compression canary, and the `dist → Manifest` builder.
 
 **Add tests here when** you change how files are discovered, how MIME/encodings are chosen, how `_headers`/`_redirects` parse, how html-handling/404 rules are synthesised, or how content is chunked/hashed into a manifest.
+
+**Golden vectors live here** ([`content.rs`](../../crates/asset-prep/src/content.rs), [`canary.rs`](../../crates/asset-prep/src/canary.rs)): the compressors' output bytes and the canary fingerprint are pinned, because nothing in semver protects them and a drift silently costs every deployed canister a full re-upload. A failure there is a signal, not a nuisance — read the guidance above the vectors before updating them.
 
 ## State hash (`state-hash`)
 
@@ -40,7 +42,7 @@ Tests are organized around these components. Each runs independently.
 
 ## End-to-end (`e2e`)
 
-- **Location**: [`crates/e2e/`](../../crates/e2e/) — split across focused test files (e.g. `sync.rs`, `redirects.rs`, `etag.rs`, `streaming.rs`, `protection.rs`, `recipe.rs`)
+- **Location**: [`crates/e2e/`](../../crates/e2e/) — split across focused test files (e.g. `sync.rs`, `redirects.rs`, `etag.rs`, `streaming.rs`, `protection.rs`, `recipe.rs`, `state_hash.rs`)
 - **Run**: `cargo test -p e2e`
 
 E2E tests verify that the canister and plugin work correctly together through the `icp` CLI against a live local replica — deploy, re-sync, content update/deletion, serving, certification, redirects, headers, streaming/range, ETag, env cookie, upgrade persistence, access protection, and recipe resolution.

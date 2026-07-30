@@ -142,6 +142,18 @@ pub fn version(c: &impl CanisterCall) -> Result<Version, String> {
     c.call("version", (), CallType::Query, true)
 }
 
+/// The compression fingerprint recorded by the client that last prepared every
+/// asset, or `None` when the canister reports the "unknown" value (32 zero
+/// bytes) or something that isn't a 32-byte hash — both of which mean the same
+/// thing to a caller: nothing here may be trusted to match local compression.
+pub fn preparation_canary(c: &impl CanisterCall) -> Result<Option<[u8; 32]>, String> {
+    let reported: ByteBuf = c.call("preparation_canary", (), CallType::Query, true)?;
+    let Ok(canary) = <[u8; 32]>::try_from(reported.as_ref()) else {
+        return Ok(None);
+    };
+    Ok((canary != [0u8; 32]).then_some(canary))
+}
+
 // Fetch the complete asset list by paging through `get_asset_details`, returned
 // as a map keyed by asset key — the shape the sync diff consumes. Building the
 // map directly avoids materializing an intermediate Vec of every asset and a
@@ -213,10 +225,13 @@ pub fn upload_chunks(
     c.call("upload_chunks", req, CallType::Update, true)
 }
 
+/// Applies a group of operations. The call flagged `is_final` finalizes the sync
+/// and returns the canonical state hash the canister recomputed over the now-
+/// final state; every other call returns `None`.
 pub fn execute_operations(
     c: &impl CanisterCall,
     args: ExecuteOperationsArguments,
-) -> Result<(), String> {
+) -> Result<Option<ByteBuf>, String> {
     c.call("execute_operations", args, CallType::Update, true)
 }
 

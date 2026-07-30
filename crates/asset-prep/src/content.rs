@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use wire_types::Encoding;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Content {
     pub data: Vec<u8>,
     pub media_type: Mime,
@@ -206,6 +206,71 @@ mod tests {
             .read_to_end(&mut decompressed)
             .unwrap();
         assert_eq!(decompressed, original);
+    }
+
+    // --- golden vectors ---
+    //
+    // The compressors' *output bytes*, pinned. Nothing in the compressor crates
+    // promises these: compressed output isn't part of a published API, so a
+    // semver-compatible bump may re-tune heuristics, and `flate2`'s DEFLATE
+    // bytes depend on which backend feature unification selected. RFC 1951 and
+    // RFC 7932 don't settle it either — they specify decoders.
+    //
+    // Changing these bytes is legal but expensive: every deployed canister
+    // re-uploads every compressible asset on its next sync, and every
+    // previously-published state hash stops matching. So this fires at PR time,
+    // before anything ships. The canary (`crate::canary`) covers the other
+    // window — a *deploy* whose compressors differ from the canister's,
+    // including builds CI never sees.
+    //
+    // **If this fails**: something changed how we compress. Check for a
+    // dependency bump (`brotli`, `flate2`, `miniz_oxide`), a `flate2` backend
+    // feature pulled in by another crate, or an edit to `encode` above. If the
+    // change is intended, update the goldens here and in
+    // `canary::fingerprint_is_pinned`, and expect the re-uploads.
+
+    /// A fixed input with enough structure for both compressors to make real
+    /// choices — a uniform run would survive almost any heuristic change.
+    fn golden_input() -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..256 {
+            out.extend_from_slice(
+                format!("line {i}: the quick brown fox jumps over it\n").as_bytes(),
+            );
+        }
+        out
+    }
+
+    fn digest_of(data: &[u8]) -> [u8; 32] {
+        Sha256::digest(data).into()
+    }
+
+    #[test]
+    fn gzip_output_is_pinned() {
+        let encoded = content(&golden_input()).encode(Encoding::Gzip).unwrap();
+        assert_eq!(encoded.data.len(), 730, "gzip output length drifted");
+        assert_eq!(
+            digest_of(&encoded.data),
+            [
+                53, 21, 232, 48, 211, 165, 56, 190, 113, 46, 204, 53, 164, 16, 135, 245, 158, 67,
+                167, 35, 218, 133, 12, 150, 25, 243, 215, 140, 95, 197, 49, 211,
+            ],
+            "gzip output bytes drifted"
+        );
+    }
+
+    #[test]
+    fn brotli_output_is_pinned() {
+        let encoded = content(&golden_input()).encode(Encoding::Brotli).unwrap();
+        assert_eq!(encoded.data.len(), 353, "brotli output length drifted");
+        assert_eq!(
+            digest_of(&encoded.data),
+            [
+                212, 217, 148, 219, 167, 195, 250, 83, 46, 171, 21, 217, 14, 42, 139, 156, 216,
+                254, 76, 185, 100, 97, 88, 156, 47, 215, 255, 52, 180, 230, 245, 5,
+            ],
+            "brotli output bytes drifted"
+        );
     }
 
     // --- sha256 ---

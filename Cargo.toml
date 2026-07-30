@@ -20,16 +20,22 @@ ic-http-certification = "3.0.3"
 ic-response-verification = "3.0.3"
 ic-representation-independent-hash = "3.0.3"
 
+# Compressors. Their output bytes are part of what a deployed canister stores and
+# what `state_hash` covers, and semver doesn't protect them: a compatible bump may
+# re-tune an encoder, and flate2's bytes also depend on which backend feature
+# unification selects. Left unpinned deliberately — a version pin can't see a
+# backend swap, and `asset-prep`'s golden vectors fail on any drift either way.
+brotli = "8.0.2"
+flate2 = "1.0"
+
 # Others
 anyhow = "1.0.103"
 assert_cmd = "2"
 base64 = "0.22.1"
-brotli = "8.0.2"
 canbench-rs = "0.6.0"
 candid = "0.10.18"
 candid_parser = "0.4.0"
 ciborium = "0.2.2"
-flate2 = "1.0"
 futures = "0.3"
 # Pinned to the versions icp-cli uses so recipe-gen's tests render recipes the
 # same way the real CLI does.

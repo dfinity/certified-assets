@@ -83,18 +83,28 @@ pub fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
     })
 }
 
-pub async fn execute_operations(arg: ExecuteOperationsArguments) {
+/// Applies a group of sync operations. The call flagged `is_final` finalizes the
+/// sync and returns the canonical state hash recomputed over the now-final
+/// state; every other call returns `None`. Reporting it here means a client
+/// never needs a second `state_hash()` round trip to learn what it just
+/// installed — though that value is *canister-reported*, so a third party
+/// verifying a deploy still reproduces the hash from source (see
+/// `docs/verifying-contents.md`).
+pub async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteBuf> {
     let system_context = SystemContext::new();
     let arg_ref = &arg;
 
-    loop_with_message_extension_until_completion(|progress| {
+    let state_hash = loop_with_message_extension_until_completion(|progress| {
         STATE.with_borrow_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
     })
     .await
     .map_err(|msg| trap(&msg))
-    .ok();
+    .ok()
+    .flatten();
 
     STATE.with_borrow_mut(|s| certified_data_set(s.root_hash()));
+
+    state_hash.map(|hash| ByteBuf::from(hash.to_vec()))
 }
 
 pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
@@ -116,6 +126,18 @@ pub fn get_redirect_rules(start_index: u64) -> Vec<RedirectRule> {
 /// cached value with no recomputation, so there is no cycle-DoS vector.
 pub fn state_hash() -> ByteBuf {
     STATE.with_borrow(|s| ByteBuf::from(s.cached_state_hash().to_vec()))
+}
+
+/// The compression fingerprint of the client that last prepared every asset (see
+/// `asset-prep::canary`), or 32 zero bytes if no client has recorded one.
+///
+/// A syncing client reads this to decide whether the compressed encodings stored
+/// here are the ones its own compressors would produce. If they differ — a
+/// dependency bump, a different DEFLATE backend, a different target — it must
+/// re-prepare every asset instead of trusting an unchanged uncompressed hash to
+/// imply unchanged compressed bytes. The canister assigns the bytes no meaning.
+pub fn preparation_canary() -> ByteBuf {
+    STATE.with_borrow(|s| ByteBuf::from(s.preparation_canary().to_vec()))
 }
 
 pub fn http_request(req: HttpRequest) -> HttpResponse {

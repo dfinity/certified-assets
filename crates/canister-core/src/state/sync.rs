@@ -98,12 +98,15 @@ impl State {
         Ok(ids)
     }
 
+    /// Completes with the canonical state hash recomputed over the now-final
+    /// state when `arg.is_final`, and `None` otherwise — so the finalizing call
+    /// hands the client its hash without a second round trip.
     pub fn execute_operations(
         &mut self,
         arg: &ExecuteOperationsArguments,
         progress: ExecuteOperationsProgress,
         system_context: &SystemContext,
-    ) -> ComputationStatus<(), ExecuteOperationsProgress, String> {
+    ) -> ComputationStatus<Option<[u8; 32]>, ExecuteOperationsProgress, String> {
         match progress {
             ExecuteOperationsProgress::Starting => {
                 // Reject calls that don't belong to the active sync, and reset
@@ -144,7 +147,7 @@ impl State {
                         );
                     }
 
-                    return ComputationStatus::Done(());
+                    return ComputationStatus::Done(None);
                 }
 
                 let op = &arg.operations[operation_index];
@@ -194,6 +197,16 @@ impl State {
                         Ok(())
                     }
                     Operation::SetAssetHeaders(arg) => self.set_asset_headers(arg.clone()),
+                    Operation::SetPreparationCanary(arg) => match arg.canary.as_ref().try_into() {
+                        Ok(canary) => {
+                            self.set_preparation_canary(canary);
+                            Ok(())
+                        }
+                        Err(_) => Err(format!(
+                            "preparation canary must be 32 bytes, got {}",
+                            arg.canary.len()
+                        )),
+                    },
                     Operation::SetRedirectRules(arg) => {
                         // Validate every rule before mutating state so a single
                         // bad rule fails the whole op with no partial update.
@@ -249,10 +262,12 @@ impl State {
                         },
                     );
                 }
-                // Keyspace exhausted: fold the redirect rules, finalize, cache.
+                // Keyspace exhausted: fold the redirect rules, finalize, cache,
+                // and hand the hash back to the client that finalized the sync.
                 self.fold_redirect_rules(&mut hasher);
-                self.cache_state_hash(hasher.finish());
-                ComputationStatus::Done(())
+                let hash = hasher.finish();
+                self.cache_state_hash(hash);
+                ComputationStatus::Done(Some(hash))
             }
         }
     }

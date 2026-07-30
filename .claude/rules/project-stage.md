@@ -25,6 +25,16 @@ The compatibility contract is the one the release machinery already encodes — 
   fields (`dir`, `build`, `presync`, `metadata`) live in users' committed project
   files. Renaming or removing one breaks those projects — treat the recipe schema like
   any other released API.
+- **Changing asset preparation is expensive, not unsafe.** The compressor settings
+  (gzip level, brotli quality/window), the compressor *implementations* (a `brotli`
+  or `flate2` bump, or a different `flate2` backend selected by feature
+  unification), and `MAX_CHUNK_SIZE` all change the bytes a sync stores. Nothing
+  needs freezing to stay correct: `asset-prep`'s compression canary detects a change
+  and makes the next sync re-prepare and re-upload every asset, and the
+  [`docs/verifying-contents.md`](../../docs/verifying-contents.md) contract is
+  already version-scoped. But each change costs every deployed canister one full
+  re-upload and invalidates previously-published state hashes, so make it
+  deliberately — ideally on a series bump — rather than as a drive-by `cargo update`.
 
 Two things do **not** change:
 

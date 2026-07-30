@@ -16,6 +16,18 @@ impl State {
         self.store.cached_state_hash()
     }
 
+    /// The compression fingerprint of the client that last prepared every asset
+    /// (see `asset-prep::canary`), or `[0; 32]` if unknown. Read by the public
+    /// `preparation_canary` endpoint; the canister itself never interprets it.
+    pub fn preparation_canary(&self) -> [u8; 32] {
+        self.store.preparation_canary()
+    }
+
+    /// Records a syncing client's compression fingerprint.
+    pub(super) fn set_preparation_canary(&mut self, canary: [u8; 32]) {
+        self.store.set_preparation_canary(canary);
+    }
+
     /// Number of assets the staged hash will fold in — the `asset_count` written
     /// into the digest header (see `state_hash::StateHasher::begin`).
     pub(super) fn state_hash_asset_count(&self) -> u64 {

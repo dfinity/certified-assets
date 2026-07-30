@@ -2,11 +2,22 @@
 //! prepared assets + final redirect rules out — the exact state a finished sync
 //! leaves on the canister, minus the canister diff/upload.
 //!
-//! `sync-core` calls [`prepare_project`] and then diffs/uploads; the
-//! `state-hash-cli` verifier calls [`state_hash_for_dir`]. Both build the
-//! [`state_hash::Manifest`] from the *same* output here, so the canister's
-//! stored-state hash and the verifier's `dist/`-derived hash agree by
-//! construction.
+//! Preparation runs in **two phases**, because they cost wildly different
+//! amounts:
+//!
+//! 1. [`plan_project`] — scan, parse `_redirects`/`_headers`, synthesise rules,
+//!    load each asset and hash its *uncompressed* bytes. Cheap: a read and a
+//!    SHA-256 per file.
+//! 2. [`PlannedAsset::encode`] — gzip + brotli, chunk, hash. Expensive: brotli
+//!    q11 dominates a deploy's local cost.
+//!
+//! Splitting them lets `sync-core` encode only the assets the canister doesn't
+//! already hold (see its `sync()`); [`prepare_project`] is the eager wrapper
+//! that runs both phases over everything, which is what the `state-hash-cli`
+//! verifier needs — it has no canister to compare against and must do the full
+//! work. Both build the [`state_hash::Manifest`] from the *same* output here, so
+//! the canister's stored-state hash and the verifier's `dist/`-derived hash
+//! agree by construction.
 
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -57,14 +68,6 @@ pub struct PreparedAsset {
     pub encodings: Vec<PreparedEncoding>,
 }
 
-impl PreparedAsset {
-    /// Whether any encoding will be stored as more than one chunk. Used to reject
-    /// oversized 4xx error-page targets (see `sync-core`).
-    pub fn is_multichunk(&self) -> bool {
-        self.encodings.iter().any(|e| e.chunks.len() > 1)
-    }
-}
-
 /// Everything a sync will install on the canister, derived purely from `dist/`:
 /// every asset (including the injected branded 404 when applicable) and the
 /// final redirect rules in match order, with 3xx rules' `_headers` already
@@ -75,14 +78,149 @@ pub struct PreparedProject {
     pub redirect_rules: Vec<RedirectRule>,
 }
 
-/// Prepares a project's `dist/` directory: scans assets, parses `_redirects` and
-/// `_headers`, synthesizes the html-handling and 404 rules, then loads, encodes,
-/// chunks, and hashes every asset's content and resolves its headers.
+/// Whether a sync stores compressed encodings alongside the uncompressed copy.
+///
+/// A deploy-time choice, not a project setting: the same `dist/` is a valid
+/// input either way, and which one is right depends on what the deploy is *for*.
+/// The cost is asymmetric and lands on different people — compressing costs the
+/// deployer seconds, and not compressing costs every visitor a 5–6× larger text
+/// transfer for as long as the deploy is live.
+///
+/// [`Compression::Enabled`] is therefore the default everywhere, and the only
+/// mode `icp deploy` uses. [`Compression::Disabled`] exists for a platform that
+/// deploys throwaway builds nobody browses — a preview a developer opens once —
+/// where it removes the compression pass entirely *and* uploads ~20–25% fewer
+/// bytes, since only one copy of each asset goes over the wire.
+///
+/// Switching a canister between modes is safe and needs no bookkeeping: the diff
+/// derives the desired encoding set from the mode, so enabling compresses and
+/// uploads the missing encodings, and disabling unsets them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compression {
+    /// Store gzip and brotli alongside identity, where they save bytes. The
+    /// canonical preparation, and the one `docs/verifying-contents.md` describes.
+    #[default]
+    Enabled,
+    /// Store only the uncompressed copy. No compressor runs, so preparation is
+    /// just reading and hashing — and nothing about the stored bytes depends on
+    /// a compressor implementation.
+    Disabled,
+}
+
+/// One asset discovered in `dist/`: loaded, its media type and headers
+/// resolved, and its **uncompressed** bytes hashed — but not yet encoded.
+///
+/// Everything here is cheap to derive, and it is enough to decide whether an
+/// asset needs encoding at all: a caller that finds the canister already holds
+/// this exact content (same `content_type`, same `identity_sha256`, same
+/// encoding set) can skip [`encode`](PlannedAsset::encode) entirely, because
+/// every compressed encoding is a pure function of the identity bytes for a
+/// given build of this crate.
+#[derive(Clone, Debug)]
+pub struct PlannedAsset {
+    pub key: String,
+    /// The stored media type, after any `_headers` `Content-Type` override.
+    pub content_type: String,
+    /// Per-asset response headers resolved from `_headers`.
+    pub headers: Vec<(String, String)>,
+    /// SHA-256 of the uncompressed bytes — the identity encoding's
+    /// whole-encoding hash, and the identity the sync diff matches on.
+    pub identity_sha256: [u8; 32],
+    /// Length of the uncompressed bytes.
+    pub identity_len: u64,
+    /// Loaded bytes + resolved media type, consumed by `encode`.
+    content: Content,
+    /// Whether compressed encodings are wanted at all; fixed by the plan.
+    compression: Compression,
+}
+
+impl PlannedAsset {
+    /// The encodings preparation will *attempt* for this asset: Identity plus,
+    /// for compressible media types under [`Compression::Enabled`], Gzip and
+    /// Brotli. Whether a compressed encoding is actually kept is decided by the
+    /// size check in [`encode`](PlannedAsset::encode).
+    pub fn attempted_encodings(&self) -> Vec<Encoding> {
+        match self.compression {
+            Compression::Enabled => encoders_for(&self.content.media_type),
+            Compression::Disabled => vec![Encoding::Identity],
+        }
+    }
+
+    /// Whether any encoding will be stored as more than one chunk. Used to
+    /// reject oversized 4xx error-page targets (see `sync-core`).
+    ///
+    /// Exact without encoding anything: a compressed encoding is only kept when
+    /// it is *smaller* than identity, so identity is the longest kept encoding
+    /// and its length alone decides this.
+    pub fn is_multichunk(&self) -> bool {
+        self.identity_len > MAX_CHUNK_SIZE as u64
+    }
+
+    /// The expensive half of preparation: encode each attempted encoding, keep a
+    /// compressed one only when it actually saves bytes, then chunk and hash
+    /// every kept encoding.
+    pub fn encode(self) -> Result<PreparedAsset, String> {
+        let mut encodings = Vec::new();
+        for encoding in self.attempted_encodings() {
+            let encoded = self.content.encode(encoding)?;
+            // Identity is always kept. A compressed encoding is only kept if it
+            // actually saves bytes vs identity — otherwise storing it just wastes
+            // canister space.
+            if !encoding.is_identity() && encoded.data.len() >= self.content.data.len() {
+                continue;
+            }
+            encodings.push(prepare_encoding(encoding, encoded.data));
+        }
+
+        Ok(PreparedAsset {
+            key: self.key,
+            content_type: self.content_type,
+            headers: self.headers,
+            encodings,
+        })
+    }
+}
+
+/// The cheap half of [`prepare_project`]: every asset located, loaded and
+/// identified, plus the final redirect rules — with no encoding done yet.
+#[derive(Clone, Debug, Default)]
+pub struct ProjectPlan {
+    pub assets: Vec<PlannedAsset>,
+    pub redirect_rules: Vec<RedirectRule>,
+}
+
+/// Prepares a project's `dist/` directory in full: [`plan_project`] followed by
+/// [`PlannedAsset::encode`] on every asset.
 ///
 /// This is the canister-agnostic front half of a sync — no canister diff and no
-/// uploads. Errors carry file paths / line numbers so misconfigurations are
-/// caught before any canister round-trip.
-pub fn prepare_project(dir: &str) -> Result<PreparedProject, String> {
+/// uploads. `sync-core` uses the two phases separately so it can skip encoding
+/// assets the canister already holds; the `state-hash-cli` verifier calls this,
+/// since reproducing the manifest requires every encoding.
+pub fn prepare_project(dir: &str, compression: Compression) -> Result<PreparedProject, String> {
+    let ProjectPlan {
+        assets,
+        redirect_rules,
+    } = plan_project(dir, compression)?;
+
+    let assets = assets
+        .into_iter()
+        .map(PlannedAsset::encode)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PreparedProject {
+        assets,
+        redirect_rules,
+    })
+}
+
+/// Scans assets, parses `_redirects` and `_headers`, synthesizes the
+/// html-handling and 404 rules, then loads each asset's content, resolves its
+/// media type and headers, and hashes its uncompressed bytes.
+///
+/// Everything except encoding. Errors carry file paths / line numbers so
+/// misconfigurations are caught before any canister round-trip — and before any
+/// compression work.
+pub fn plan_project(dir: &str, compression: Compression) -> Result<ProjectPlan, String> {
     let sources = scan::scan(dir)?;
     let user_rules = load_redirect_rules(dir)?;
 
@@ -108,10 +246,10 @@ pub fn prepare_project(dir: &str) -> Result<PreparedProject, String> {
 
     let mut assets = Vec::with_capacity(sources.len() + 1);
     for source in sources {
-        assets.push(prepare_asset(source, &header_rules)?);
+        assets.push(plan_asset(source, &header_rules, compression)?);
     }
     if not_found_plan.inject_branded_asset {
-        assets.push(prepare_branded_404(&header_rules)?);
+        assets.push(plan_branded_404(&header_rules, compression)?);
     }
 
     // 3xx rules synthesize their own response (no target asset to inherit
@@ -119,16 +257,17 @@ pub fn prepare_project(dir: &str) -> Result<PreparedProject, String> {
     // form a re-sync diffs cleanly against.
     let redirect_rules = resolve_3xx_rule_headers(&project_rules, &header_rules);
 
-    Ok(PreparedProject {
+    Ok(ProjectPlan {
         assets,
         redirect_rules,
     })
 }
 
-fn prepare_asset(
+fn plan_asset(
     source: AssetSource,
     header_rules: &[HeaderRule],
-) -> Result<PreparedAsset, String> {
+    compression: Compression,
+) -> Result<PlannedAsset, String> {
     let mut content = Content::load(&source.path)?;
     // Apply a per-glob `Content-Type` override from `_headers` before deciding
     // encoders or the stored media type (e.g. a `.did` declared `text/plain`
@@ -136,51 +275,53 @@ fn prepare_asset(
     if let Some(override_mime) = headers::content_type_for(&source.key, header_rules) {
         content.media_type = override_mime;
     }
-    prepare_content_asset(source.key, content, header_rules)
+    Ok(plan_content_asset(
+        source.key,
+        content,
+        header_rules,
+        compression,
+    ))
 }
 
 /// Builds the in-memory branded `/404.html` injected when a project ships no root
 /// `404.html`. Treated like any other HTML asset, but its bytes come from a
 /// constant and `_headers` content-type overrides are not applied (it is always
 /// `text/html`); its per-asset headers are still resolved from `_headers`.
-fn prepare_branded_404(header_rules: &[HeaderRule]) -> Result<PreparedAsset, String> {
+fn plan_branded_404(
+    header_rules: &[HeaderRule],
+    compression: Compression,
+) -> Result<PlannedAsset, String> {
     let content = Content {
         data: not_found::DEFAULT_404_HTML.as_bytes().to_vec(),
         media_type: mime_guess::from_path(not_found::ROOT_404_KEY)
             .first()
             .unwrap_or(mime::TEXT_HTML),
     };
-    prepare_content_asset(not_found::ROOT_404_KEY.to_string(), content, header_rules)
+    Ok(plan_content_asset(
+        not_found::ROOT_404_KEY.to_string(),
+        content,
+        header_rules,
+        compression,
+    ))
 }
 
-/// Shared tail: pick encoders for `content`, encode each, keep a compressed
-/// encoding only when it actually saves bytes, then chunk and hash each kept
-/// encoding and resolve the asset's headers.
-fn prepare_content_asset(
+/// Shared tail of the planning phase: hash the uncompressed bytes and resolve
+/// the asset's stored media type and headers.
+fn plan_content_asset(
     key: String,
     content: Content,
     header_rules: &[HeaderRule],
-) -> Result<PreparedAsset, String> {
-    let encoders: Vec<Encoding> = encoders_for(&content.media_type);
-
-    let mut encodings = Vec::new();
-    for encoding in encoders {
-        let encoded = content.encode(encoding)?;
-        // Identity is always kept. A compressed encoding is only kept if it
-        // actually saves bytes vs identity — otherwise storing it just wastes
-        // canister space.
-        if !encoding.is_identity() && encoded.data.len() >= content.data.len() {
-            continue;
-        }
-        encodings.push(prepare_encoding(encoding, encoded.data));
-    }
-
-    Ok(PreparedAsset {
+    compression: Compression,
+) -> PlannedAsset {
+    PlannedAsset {
         content_type: content.media_type.to_string(),
         headers: headers::resolve(&key, header_rules),
+        identity_sha256: Sha256::digest(&content.data).into(),
+        identity_len: content.data.len() as u64,
         key,
-        encodings,
-    })
+        content,
+        compression,
+    }
 }
 
 /// Slices encoded bytes into ≤ `MAX_CHUNK_SIZE` chunks and hashes each — the
@@ -318,10 +459,17 @@ pub fn manifest(prepared: &PreparedProject) -> state_hash::Manifest {
     }
 }
 
-/// Convenience for the verifier: prepare `dir` and return its canonical state
-/// hash — the value to compare against a canister's `state_hash()`.
-pub fn state_hash_for_dir(dir: &str) -> Result<[u8; 32], String> {
-    let prepared = prepare_project(dir)?;
+/// Convenience for the verifier: prepare `dir` under `compression` and return the
+/// resulting canonical state hash — the value to compare against a canister's
+/// `state_hash()`.
+///
+/// The mode is an input because it changes the stored state, and therefore the
+/// hash: a canister deployed with [`Compression::Disabled`] holds only identity
+/// encodings and hashes differently from the same `dist/` deployed with
+/// compression on. A verifier who doesn't know which was used can compute both
+/// and see which matches.
+pub fn state_hash_for_dir(dir: &str, compression: Compression) -> Result<[u8; 32], String> {
+    let prepared = prepare_project(dir, compression)?;
     Ok(manifest(&prepared).digest())
 }
 
@@ -346,7 +494,7 @@ mod tests {
     #[test]
     fn empty_dir_injects_branded_404_and_catchall() {
         let dir = tempfile::tempdir().unwrap();
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         // A project shipping no root `404.html` gets the branded default injected
         // plus the `/* -> /404.html 404` catch-all (see `not_found`).
         assert_eq!(prepared.assets.len(), 1);
@@ -363,7 +511,7 @@ mod tests {
     fn ships_own_404_is_not_overridden() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "404.html", b"<h1>my 404</h1>");
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         // The user's own /404.html is used; no branded duplicate.
         let count_404 = prepared
             .assets
@@ -383,7 +531,7 @@ mod tests {
     fn single_html_asset_is_prepared_with_identity_encoding() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "index.html", b"<!DOCTYPE html><html></html>");
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
 
         let index = prepared
             .assets
@@ -410,7 +558,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A tiny PNG-typed file: not compressible, so identity only.
         write(&dir, "logo.png", &[0u8; 16]);
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         let logo = prepared
             .assets
             .iter()
@@ -425,10 +573,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "index.html", b"<!DOCTYPE html><h1>hi</h1>");
         write(&dir, "style.css", b"body{color:red}");
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         // The convenience helper equals manifest(&prepared).digest().
         assert_eq!(
-            state_hash_for_dir(&dir_str(&dir)).unwrap(),
+            state_hash_for_dir(&dir_str(&dir), Compression::Enabled).unwrap(),
             manifest(&prepared).digest()
         );
     }
@@ -439,6 +587,143 @@ mod tests {
         assert_eq!(enc.chunks.len(), 1);
         assert_eq!(enc.chunks[0].len, 0);
         assert_eq!(enc.content_len, 0);
+    }
+
+    // --- two-phase planning ---
+
+    /// `PlannedAsset::is_multichunk` must agree with the encoded truth, since
+    /// `sync-core` trusts it for assets it never encodes. `.bin` keeps this fast:
+    /// octet-stream is incompressible, so no brotli pass runs on the big file.
+    #[test]
+    fn planned_multichunk_matches_encoded_chunk_count() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "big.bin", &vec![0u8; MAX_CHUNK_SIZE + 1]);
+        write(&dir, "small.bin", &vec![0u8; MAX_CHUNK_SIZE]);
+
+        let plan = plan_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        for planned in plan.assets {
+            let expected = planned.is_multichunk();
+            let prepared = planned.encode().unwrap();
+            assert_eq!(
+                expected,
+                prepared.encodings.iter().any(|e| e.chunks.len() > 1),
+                "multichunk mismatch for {}",
+                prepared.key
+            );
+        }
+    }
+
+    // --- compression mode ---
+
+    #[test]
+    fn disabled_compression_keeps_only_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        // Repetitive enough that both compressors would beat identity, so the
+        // absent encodings are a decision and not a size check.
+        write(&dir, "index.html", "<p>hello</p>".repeat(200).as_bytes());
+
+        let prepared = prepare_project(&dir_str(&dir), Compression::Disabled).unwrap();
+        for asset in &prepared.assets {
+            assert_eq!(
+                asset
+                    .encodings
+                    .iter()
+                    .map(|e| e.encoding)
+                    .collect::<Vec<_>>(),
+                vec![Encoding::Identity],
+                "{} should keep only identity",
+                asset.key
+            );
+        }
+
+        let compressed = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        assert!(
+            compressed.assets.iter().any(|a| a.encodings.len() > 1),
+            "the same project with compression on must keep more encodings"
+        );
+    }
+
+    /// Identity content is identical either way — the mode only decides what is
+    /// stored *alongside* it. This is what makes flipping modes converge without
+    /// re-uploading unchanged uncompressed bytes.
+    #[test]
+    fn compression_mode_does_not_change_identity_content() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<!DOCTYPE html><h1>hi</h1>");
+
+        let identity_of = |compression| {
+            let prepared = prepare_project(&dir_str(&dir), compression).unwrap();
+            prepared
+                .assets
+                .iter()
+                .map(|a| {
+                    let identity = a
+                        .encodings
+                        .iter()
+                        .find(|e| e.encoding == Encoding::Identity)
+                        .expect("identity is always kept");
+                    (a.key.clone(), identity.sha256, identity.content_len)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            identity_of(Compression::Enabled),
+            identity_of(Compression::Disabled)
+        );
+    }
+
+    /// The two modes must hash differently, or `state-hash`'s two-line output
+    /// couldn't tell a verifier which one a canister was deployed with.
+    #[test]
+    fn compression_mode_changes_the_state_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", "<p>hello</p>".repeat(200).as_bytes());
+        assert_ne!(
+            state_hash_for_dir(&dir_str(&dir), Compression::Enabled).unwrap(),
+            state_hash_for_dir(&dir_str(&dir), Compression::Disabled).unwrap()
+        );
+    }
+
+    /// The planning phase must resolve exactly the identity, media type and
+    /// headers the eager path produces — `sync-core` diffs on those without
+    /// encoding.
+    #[test]
+    fn plan_matches_prepare_without_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<!DOCTYPE html><h1>hi</h1>");
+        write(&dir, "logo.png", &[0u8; 16]);
+        write(&dir, "_headers", b"/*\n  X-Frame-Options: DENY\n");
+
+        let plan = plan_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        assert_eq!(plan.redirect_rules, prepared.redirect_rules);
+        assert_eq!(plan.assets.len(), prepared.assets.len());
+
+        for (planned, prepared) in plan.assets.iter().zip(&prepared.assets) {
+            assert_eq!(planned.key, prepared.key);
+            assert_eq!(planned.content_type, prepared.content_type);
+            assert_eq!(planned.headers, prepared.headers);
+
+            let identity = prepared
+                .encodings
+                .iter()
+                .find(|e| e.encoding == Encoding::Identity)
+                .expect("identity is always kept");
+            assert_eq!(planned.identity_sha256, identity.sha256);
+            assert_eq!(planned.identity_len, identity.content_len);
+
+            let mut attempted = planned.attempted_encodings();
+            attempted.sort_by_key(|e| e.label());
+            assert_eq!(attempted, encoders_for_sorted(&planned.content_type));
+        }
+    }
+
+    /// The encoding set `encoders_for` attempts, by media type, sorted — mirrors
+    /// the rule under test without reaching into `content`'s private state.
+    fn encoders_for_sorted(content_type: &str) -> Vec<Encoding> {
+        let mut encs = crate::content::encoders_for(&content_type.parse().unwrap());
+        encs.sort_by_key(|e| e.label());
+        encs
     }
 
     fn encodings_of(prepared: &PreparedProject, key: &str) -> Vec<Encoding> {
@@ -461,7 +746,7 @@ mod tests {
         // keep-if-smaller guard drops gzip (identity is always kept).
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "blob.txt", &(0u8..=255u8).collect::<Vec<u8>>());
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         let encs = encodings_of(&prepared, "/blob.txt");
         assert!(encs.contains(&Encoding::Identity), "identity always kept");
         assert!(
@@ -480,7 +765,7 @@ mod tests {
             "style.css",
             "body { color: red; }\n".repeat(500).as_bytes(),
         );
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         assert_eq!(
             encodings_of(&prepared, "/style.css"),
             vec![Encoding::Identity, Encoding::Gzip, Encoding::Brotli]
@@ -500,7 +785,7 @@ mod tests {
             b"/old /new 301\n/page /target.html 200\n",
         );
         write(&dir, "_headers", b"/*\n  X-Robots-Tag: noindex\n");
-        let prepared = prepare_project(&dir_str(&dir)).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
 
         let r301 = prepared
             .redirect_rules
@@ -537,7 +822,7 @@ mod tests {
                 .as_ref(),
         );
 
-        let without = prepare_project(&dir_str(&dir)).unwrap();
+        let without = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         let did = without.assets.iter().find(|a| a.key == "/ic.did").unwrap();
         assert_eq!(did.content_type, "application/octet-stream");
         assert_eq!(encodings_of(&without, "/ic.did"), vec![Encoding::Identity]);
@@ -547,7 +832,7 @@ mod tests {
             "_headers",
             b"/*.did\n  Content-Type: text/plain; charset=utf-8\n",
         );
-        let with = prepare_project(&dir_str(&dir)).unwrap();
+        let with = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
         let did = with.assets.iter().find(|a| a.key == "/ic.did").unwrap();
         assert_eq!(did.content_type, "text/plain; charset=utf-8");
         assert!(encodings_of(&with, "/ic.did").contains(&Encoding::Gzip));
