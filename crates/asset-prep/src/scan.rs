@@ -25,34 +25,31 @@ pub struct AssetSource {
     pub key: String,
 }
 
-/// Builds an absolute root for `dir` (a manifest-relative directory the host
-/// preopened) by prepending `/` and dropping `.` / redundant components.
+/// Scans `dir` for asset files.
 ///
-/// We deliberately avoid [`Path::canonicalize`] here. Under WASI it calls
+/// `dir` is used exactly as given — neither canonicalized nor rewritten — so a
+/// relative path stays relative. Both callers depend on that: the `state-hash`
+/// verifier is run from a shell (`state-hash ./dist`, as
+/// `docs/verifying-contents.md` documents) where a relative path resolves
+/// against the process's working directory, and under WASI the sync plugin's
+/// `dir` is the guest name of a read-only preopen, which resolves relative just
+/// as well. It also matches how `prepare` reads `_headers` / `_redirects` from
+/// the same `dir`.
+///
+/// In particular, do not reintroduce [`Path::canonicalize`]. Under WASI it calls
 /// `realpath`, which returns `ENOENT` ("No such file or directory") for *any*
 /// path beneath a preopen whose guest name has more than one component (e.g.
 /// `src/frontend/dist`) — even though ordinary access (`read_dir`, `metadata`,
-/// `read`) through that preopen works fine. Single-component dirs like `dist`
-/// happen to canonicalize to `/dist`; this helper produces the same shape
-/// (`/src/frontend/dist`) for nested dirs without touching `realpath`.
-///
-/// The host guarantees `dir` is relative and free of `..` components, so keeping
-/// only `Normal` components cannot escape the preopen.
-fn absolute_root(dir: &str) -> PathBuf {
-    let mut root = PathBuf::from("/");
-    for component in Path::new(dir).components() {
-        if let std::path::Component::Normal(c) = component {
-            root.push(c);
-        }
-    }
-    root
-}
-
-/// Scans `dir` for asset files.
+/// `read`) through that preopen works fine. Nothing here needs an absolute root:
+/// [`walk`] only joins onto the root it was handed and strips that same prefix
+/// back off to build keys. Sandbox safety is the preopen's, not this path's: a
+/// WASI guest reaches nothing outside its preopens however it spells a path, and
+/// the host rejects `dirs` entries that are absolute or contain `..` before
+/// preopening them.
 pub fn scan(dir: &str) -> Result<Vec<AssetSource>, String> {
     let mut out = Vec::new();
-    let root_abs = absolute_root(dir);
-    walk(&root_abs, &root_abs, &mut out)?;
+    let root = Path::new(dir);
+    walk(root, root, &mut out)?;
     Ok(out)
 }
 
@@ -129,6 +126,25 @@ mod tests {
         fs::write(dir.path().join("sub/app.js"), b"js").unwrap();
         let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/sub/app.js"]);
+    }
+
+    // A relative dir must be scanned relative to the working directory, not
+    // reinterpreted as absolute: `state-hash ./dist` is the invocation
+    // `docs/verifying-contents.md` documents, and it used to fail with
+    // "read_dir /dist: No such file or directory".
+    //
+    // Scans this crate's own `src/` — cargo runs a test with the crate root as
+    // the working directory. A tempdir can't stand in: it would have to be
+    // created under that same working directory to be nameable relatively, and
+    // creating/removing one there changes the directory's mtime, which is how
+    // `crates/e2e/build.rs` decides whether to rebuild the wasm.
+    #[test]
+    fn relative_directory() {
+        let keys = sorted_keys(scan("./src").expect("scan a relative dir"));
+        assert!(
+            keys.contains(&"/scan.rs".to_string()),
+            "expected this file among the keys scanned from ./src; got: {keys:?}"
+        );
     }
 
     #[test]

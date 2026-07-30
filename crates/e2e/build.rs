@@ -1,12 +1,32 @@
 use std::{env, path::Path, path::PathBuf, process::Command};
 
 fn main() {
-    println!("cargo:rerun-if-changed=../canister/src");
-    println!("cargo:rerun-if-changed=../canister-core/src");
-    println!("cargo:rerun-if-changed=../sync-plugin/src");
-    println!("cargo:rerun-if-changed=../sync-core/src");
-    // The build recipe (profiles, targets) lives in the workspace Makefile.
+    // Every workspace crate that ends up inside either wasm, watched whole (so a
+    // crate's `Cargo.toml` counts too), because Cargo has no idea this build
+    // script produces the wasm and will not re-run it otherwise. Miss one and the
+    // suite silently keeps testing a stale `dist/*.wasm` — a change to the
+    // omitted crate looks green because it was never in the artifact. Watching
+    // more than needed costs only a no-op `make wasm`, so when in doubt add it.
+    //
+    //   canister.wasm: canister -> canister-core -> wire-types, state-hash
+    //   plugin.wasm:   sync-plugin -> sync-core -> asset-prep -> wire-types, state-hash
+    for crate_dir in [
+        "canister",
+        "canister-core",
+        "sync-plugin",
+        "sync-core",
+        "asset-prep",
+        "wire-types",
+        "state-hash",
+    ] {
+        println!("cargo:rerun-if-changed=../{crate_dir}");
+    }
+    // The build recipe (profiles, targets) lives in the workspace Makefile and
+    // root manifest; the lockfile pins the compressors whose exact output bytes
+    // a sync stores.
     println!("cargo:rerun-if-changed=../../Makefile");
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
+    println!("cargo:rerun-if-changed=../../Cargo.lock");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // crates/e2e -> crates -> workspace root
