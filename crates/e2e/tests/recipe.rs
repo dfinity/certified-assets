@@ -51,6 +51,15 @@ fn recipe_build_step() {
 /// `command -v ic-wasm` guard makes the deploy fail loudly, surfacing a clear
 /// error here rather than silently skipping. A successful deploy that still
 /// serves assets proves the injected wasm installs and runs.
+///
+/// The fixture mixes an entry carrying `visibility: public` with one that omits
+/// it, and the assertions read the sections back off the *deployed* canister —
+/// the only place the difference is observable. `visibility` decides whether
+/// ic-wasm names the custom section `icp:public <name>` or `icp:private <name>`,
+/// and the replica serves the former to anybody while gating the latter on the
+/// caller being a controller. So an anonymous read is what separates them; a
+/// controller can read either, and would notice nothing if `-v public` were
+/// silently dropped.
 #[test]
 fn recipe_metadata() {
     let tmp = setup_recipe_project("recipe-metadata");
@@ -64,6 +73,52 @@ fn recipe_metadata() {
         assets.iter().any(|a| a.key == "/index.html"),
         "expected /index.html after metadata injection; got: {assets:#?}",
     );
+
+    // The controller sees both, whatever their visibility: proof both sections
+    // were injected at all, so the anonymous checks below can't pass vacuously.
+    for (section, value) in [("build:commit", "a1b2c3d"), ("app:framework", "react")] {
+        let (ok, out) = read_metadata(project, section, None);
+        assert!(
+            ok && out.contains(value),
+            "controller read of `{section}` should yield {value:?}; got: {out}",
+        );
+    }
+
+    // `visibility: public` — readable with no identity at all.
+    let (ok, out) = read_metadata(project, "build:commit", Some("anonymous"));
+    assert!(
+        ok && out.contains("a1b2c3d"),
+        "`build:commit` is declared `visibility: public`, so an anonymous read must return \
+         it; a `-v public` lost from the recipe would land the section as icp:private and \
+         fail here while the controller read above still passed. Got: {out}",
+    );
+
+    // Omitted `visibility` — private, so the same read must be refused.
+    let (ok, out) = read_metadata(project, "app:framework", Some("anonymous"));
+    assert!(
+        !ok,
+        "`app:framework` omits `visibility`, so it must stay private (icp:private) and be \
+         unreadable anonymously. Got: {out}",
+    );
+}
+
+/// `icp canister metadata <name>` against the deployed frontend, as `identity`
+/// (the project default when `None`). Returns whether the read succeeded and its
+/// combined output — a refused read is an expected outcome here, not a test error.
+fn read_metadata(
+    project: &std::path::Path,
+    section: &str,
+    identity: Option<&str>,
+) -> (bool, String) {
+    let mut cmd = icp_cmd(project);
+    cmd.args(["canister", "metadata", "frontend", section]);
+    if let Some(identity) = identity {
+        cmd.args(["--identity", identity]);
+    }
+    let out = cmd.output().expect("run `icp canister metadata`");
+    let text =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    (out.status.success(), text)
 }
 
 /// `presync`: commands run at sync time — after the canister exists — with the

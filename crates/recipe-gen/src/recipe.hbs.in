@@ -2,7 +2,7 @@
 {{! `dir: string` Required. The single directory of built assets to synchronize. }}
 {{! `build: [string]` Optional. Commands run before sync to produce the asset directory. }}
 {{! `presync: [string]` Optional. Commands run at sync time (after the canister exists), before assets upload, with the deployed canister IDs in the environment: ICP_CLI_CID, ICP_CLI_CID_<NAME>, ICP_CLI_NETWORK, ICP_CLI_ENVIRONMENT. }}
-{{! `metadata: [{name, value}]` Optional. Pairs injected into the canister wasm via ic-wasm. }}
+{{! `metadata: [{name, value, visibility}]` Optional. Entries injected into the canister wasm via ic-wasm. `visibility` is optional, `public` or `private`; omitted means private, ic-wasm's default. }}
 
 build:
   steps:
@@ -24,7 +24,7 @@ build:
     - type: script
       commands:
         {{#each metadata}}
-        - sh -c 'ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata "{{ name }}" -d "{{ value }}" --keep-name-section'
+        - sh -c 'ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata "{{ name }}" -d "{{ value }}"{{#if visibility}} -v {{ visibility }}{{/if}} --keep-name-section'
         {{/each}}
     {{/if}}
 

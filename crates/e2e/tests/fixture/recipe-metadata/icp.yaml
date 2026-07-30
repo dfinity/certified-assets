@@ -11,5 +11,11 @@ canisters:
       configuration:
         dir: dist
         metadata:
+          # A public section (readable by anyone) and one left private (the
+          # default when `visibility` is omitted) — the mixed shape the recipe
+          # README documents.
+          - name: "build:commit"
+            value: "a1b2c3d"
+            visibility: public
           - name: "app:framework"
             value: "react"
