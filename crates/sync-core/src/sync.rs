@@ -164,13 +164,24 @@ fn diff_assets(
 /// 2. same identity hash — identity is always kept, so it is always reported;
 /// 3. the stored encoding set is *exactly* the set preparation attempts.
 ///
-/// (3) is what makes this safe without extra canister state. A missing
-/// compressed encoding is ambiguous — it could mean "compression didn't shrink
+/// (3) is what makes this safe without extra canister state, and it does two
+/// jobs. A missing compressed encoding is ambiguous — "compression didn't shrink
 /// this asset" or "an earlier deploy died mid-upload" — and the two are
-/// indistinguishable without doing the compression. Treating any mismatch as
-/// stale re-encodes those assets on every sync, but an asset whose compressed
-/// form isn't smaller than its identity form is tiny by definition, so the cost
-/// is noise.
+/// indistinguishable without doing the compression. It is also what makes a
+/// [`Compression`] mode switch converge: after a `Disabled` sync the stored set
+/// is identity-only, and only a strict comparison notices that `Enabled` now
+/// wants more. A subset rule would satisfy the first job and silently break the
+/// second.
+///
+/// The cost is that any asset whose set can't match is re-encoded on **every**
+/// sync. Usually that's noise, because the usual reason a compressed encoding
+/// wasn't kept is a file small enough that gzip's framing outweighs the saving.
+/// It is not always noise: a large, high-entropy asset with a compressible
+/// content type — natively, or via a `_headers` `Content-Type` override — also
+/// fails to shrink, and then pays full brotli on every deploy (measured: ~1.5 s
+/// per 4 MB). Removing that would take per-asset state recording which encodings
+/// were attempted, which isn't worth it for how rare the shape is — but it is a
+/// real worst case, not a rounding error.
 ///
 /// This also relies on preparation parameters being frozen within a release
 /// series: the version lock pairs *code*, but a canister upgraded in place still
@@ -2838,6 +2849,51 @@ mod tests {
         // gzip + brotli dropped for each of the two assets; identity is unchanged
         // and is not re-uploaded.
         assert_eq!(count_op(&ops, "UnsetAssetContent"), 4);
+        assert_eq!(count_op(&ops, "SetAssetContent"), 0);
+    }
+
+    /// The documented worst case of the strict encoding-set rule: an asset whose
+    /// compressed form isn't smaller keeps identity only, so its set never
+    /// matches and it is re-encoded every sync. Pinned so the doc comment on
+    /// `current_encodings` stays honest about it.
+    #[test]
+    fn asset_that_does_not_compress_is_re_encoded_every_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        // High-entropy bytes under a compressible content type: both compressors
+        // come out larger than identity, so neither is kept.
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut data = vec![0u8; 64 * 1024];
+        for b in data.iter_mut() {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            *b = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+        }
+        std::fs::write(dir.path().join("random.txt"), &data).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        let canister = canister_view(dir_str);
+        assert_eq!(
+            canister["/random.txt"].encodings.len(),
+            1,
+            "neither compressor beats identity on this content"
+        );
+
+        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let project = diff_assets(plan.assets, &canister, true).unwrap();
+
+        assert!(
+            was_encoded(&project, "/random.txt"),
+            "identity-only sets are indistinguishable from a half-finished upload, \
+             so the asset is re-encoded"
+        );
+        // The cost is CPU only — nothing is uploaded, since the bytes still match.
+        let ops = build_operations(
+            &project,
+            &canister,
+            &plan.redirect_rules,
+            &plan.redirect_rules,
+        );
         assert_eq!(count_op(&ops, "SetAssetContent"), 0);
     }
 
