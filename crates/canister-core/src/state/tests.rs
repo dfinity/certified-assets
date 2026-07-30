@@ -17,7 +17,8 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use wire_types::{
     CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments, Operation,
-    SessionId, SetAssetContentArguments, SetAssetHeadersArguments, StartSyncResult,
+    SessionId, SetAssetContentArguments, SetAssetHeadersArguments, SetPreparationCanaryArguments,
+    StartSyncResult,
 };
 
 // from ic-response-verification tests
@@ -777,6 +778,67 @@ mod hashing {
         // a recompute (no sync runs during post_upgrade_rebuild).
         let restored = upgrade(state, memory);
         assert_eq!(restored.cached_state_hash(), before);
+    }
+
+    /// The recorded compression fingerprint must outlive an upgrade, or every
+    /// patch release would look like a compressor change to the next sync and
+    /// re-upload every asset. Unset until a client records one.
+    #[test]
+    fn preparation_canary_survives_upgrade() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+
+        assert_eq!(
+            state.preparation_canary(),
+            [0u8; 32],
+            "a canister nobody has synced reports the unknown canary"
+        );
+
+        let canary = [7u8; 32];
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::SetPreparationCanary(
+                SetPreparationCanaryArguments {
+                    canary: ByteBuf::from(canary.to_vec()),
+                },
+            )],
+            &ctx,
+        );
+        assert_eq!(state.preparation_canary(), canary);
+
+        let restored = upgrade(state, memory);
+        assert_eq!(restored.preparation_canary(), canary);
+    }
+
+    /// A malformed canary is rejected rather than silently truncated — a wrong
+    /// value here would make a client trust encodings it shouldn't.
+    #[test]
+    fn preparation_canary_rejects_wrong_length() {
+        let mut state = State::new(DefaultMemoryImpl::default());
+        let ctx = mock_system_context();
+        let session_id = start_session(&mut state, &ctx);
+
+        let err = run_computation_until_completion(|progress| {
+            state.execute_operations(
+                &ExecuteOperationsArguments {
+                    session_id,
+                    operations: vec![Operation::SetPreparationCanary(
+                        SetPreparationCanaryArguments {
+                            canary: ByteBuf::from(vec![1u8; 16]),
+                        },
+                    )],
+                    is_final: true,
+                },
+                progress,
+                &ctx,
+            )
+        })
+        .expect_err("a 16-byte canary must be rejected");
+        assert!(err.contains("32 bytes"), "got: {err}");
+        assert_eq!(state.preparation_canary(), [0u8; 32]);
     }
 
     /// Drives an `asset-prep` `PreparedProject` into `state` the way a real sync

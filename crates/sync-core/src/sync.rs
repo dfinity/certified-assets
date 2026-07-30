@@ -2243,13 +2243,22 @@ mod tests {
 
     struct SyncMock {
         queue: MockQueue,
+        /// Every operation passed to `execute_operations`, in call order — so a
+        /// test can assert on what a whole sync emitted, not just how many calls
+        /// it made.
+        executed: RefCell<Vec<Operation>>,
     }
 
     impl SyncMock {
         fn new() -> Self {
             Self {
                 queue: RefCell::new(HashMap::new()),
+                executed: RefCell::new(Vec::new()),
             }
+        }
+
+        fn executed_operations(&self) -> Vec<Operation> {
+            self.executed.borrow().clone()
         }
 
         fn push_ok<R: CandidType>(&self, method: &str, value: R) {
@@ -2292,6 +2301,11 @@ mod tests {
                     Decode!(&call.arg, ChunksReqMirror).map_err(|e| e.to_string())?;
                 let ids: Vec<u64> = (0..req.chunks.len() as u64).collect();
                 return candid::encode_one(ids).map_err(|e| e.to_string());
+            }
+            if call.method == "execute_operations" {
+                let req =
+                    Decode!(&call.arg, ExecuteOperationsArguments).map_err(|e| e.to_string())?;
+                self.executed.borrow_mut().extend(req.operations);
             }
             self.queue
                 .borrow_mut()
@@ -2876,6 +2890,50 @@ mod tests {
                 "{key} must be re-encoded when the compressors may have changed"
             );
         }
+    }
+
+    /// The canary op must be the *last* operation, so it lands in the group
+    /// flagged `is_final`. A sync that dies before then must leave the old canary
+    /// in place, or the next sync would trust encodings this one never finished
+    /// writing.
+    #[test]
+    fn canary_op_is_emitted_last() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), compressible_html()).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        let mock = SyncMock::new();
+        mock.push_ok("version", wire_types::VERSION);
+        mock.push_ok("can_sync", true);
+        // An empty canister: unknown canary, so the sync records a new one.
+        mock.push_ok("preparation_canary", ByteBuf::from(vec![0u8; 32]));
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        mock.push_ok("execute_operations", None::<ByteBuf>);
+
+        sync(
+            &mock,
+            &[dir_str.to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+            Compression::Enabled,
+        )
+        .expect("sync should succeed");
+
+        let ops = mock.executed_operations();
+        assert!(
+            matches!(ops.last(), Some(Operation::SetPreparationCanary(_))),
+            "the canary must be the final operation; got: {:?}",
+            ops.last()
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, Operation::SetPreparationCanary(_)))
+                .count(),
+            1,
+            "exactly one canary op per sync"
+        );
     }
 
     #[test]
