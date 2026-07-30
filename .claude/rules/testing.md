@@ -45,7 +45,7 @@ Tests are organized around these components. Each runs independently.
 - **Location**: [`crates/e2e/`](../../crates/e2e/) — split across focused test files (e.g. `sync.rs`, `redirects.rs`, `etag.rs`, `streaming.rs`, `protection.rs`, `recipe.rs`, `state_hash.rs`)
 - **Run**: `cargo test -p e2e`
 
-E2E tests verify that the canister and plugin work correctly together through the `icp` CLI against a live local replica — deploy, re-sync, content update/deletion, serving, certification, redirects, headers, streaming/range, ETag, env cookie, upgrade persistence, access protection, and recipe resolution.
+E2E tests verify that the canister and plugin work correctly together through the `icp` CLI against a live local replica — deploy, re-sync, content update/deletion, serving, certification, redirects, headers, streaming/range, ETag, env cookie, upgrade persistence, access protection, and recipe resolution. One test also runs the `icp canister call` snippets **extracted from the committed docs** ([`protection.rs`](../../crates/e2e/tests/protection.rs)'s `documented_calls_are_accepted_by_the_canister`), so a documented call form can't drift from the canister's interface unnoticed — extend it rather than hand-copying a snippet into a new test.
 
 Each test deploys a **project**, of which there are two kinds:
 
