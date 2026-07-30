@@ -141,6 +141,13 @@ type SetRedirectRulesArguments = record {
   rules: vec RedirectRule;
 };
 
+// Record the client's compression fingerprint over the assets this sync wrote.
+// Emitted only after a sync prepared every asset from scratch, so the stored
+// value describes the whole asset set. See `preparation_canary`.
+type SetPreparationCanaryArguments = record {
+  canary: blob;
+};
+
 // A single mutation applied during a sync.
 type Operation = variant {
   CreateAsset: CreateAssetArguments;
@@ -149,6 +156,7 @@ type Operation = variant {
   DeleteAsset: DeleteAssetArguments;
   SetAssetHeaders: SetAssetHeadersArguments;
   SetRedirectRules: SetRedirectRulesArguments;
+  SetPreparationCanary: SetPreparationCanaryArguments;
 };
 
 // ───────── Sync: session ─────────
@@ -253,6 +261,13 @@ service: {
   // position to reference the chunks in SetAssetContent operations. Because the
   // mapping is positional per call, uploads may be issued concurrently.
   upload_chunks: (UploadChunksArguments) -> (vec ChunkId);
+
+  // The compression fingerprint recorded by the client that last prepared every
+  // asset (32 bytes), or 32 zero bytes if none has. A syncing client compares it
+  // against its own to decide whether the stored compressed encodings are the
+  // ones its compressors would produce — if not, it re-prepares everything
+  // rather than trusting an unchanged uncompressed hash. Opaque to the canister.
+  preparation_canary: () -> (blob) query;
 
   // Apply a group of operations. Perform all successfully, or reject.
   // The call flagged `is_final` finalizes the sync and returns the canonical

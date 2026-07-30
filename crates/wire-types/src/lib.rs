@@ -176,6 +176,16 @@ pub struct SetAssetHeadersArguments {
     pub headers: Vec<(String, String)>,
 }
 
+/// Record the client's compression fingerprint over the assets this sync wrote.
+///
+/// The canister only stores it; the meaning lives in `asset-prep::canary`. A
+/// client emits this after re-preparing *every* asset eagerly, which is what
+/// makes the stored value describe the whole asset set rather than part of it.
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
+pub struct SetPreparationCanaryArguments {
+    pub canary: ByteBuf,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub enum RulePattern {
     /// Matches a single absolute path, e.g. `/old-page`.
@@ -218,6 +228,7 @@ pub enum Operation {
     DeleteAsset(DeleteAssetArguments),
     SetAssetHeaders(SetAssetHeadersArguments),
     SetRedirectRules(SetRedirectRulesArguments),
+    SetPreparationCanary(SetPreparationCanaryArguments),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]

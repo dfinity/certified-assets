@@ -77,6 +77,17 @@ fn state_hash() -> ByteBuf {
     canister_core::state_hash()
 }
 
+// The compression fingerprint of the client that last prepared every asset (see
+// `asset-prep::canary`), or 32 zero bytes if none has. A syncing client reads it
+// to decide whether it may trust unchanged uncompressed hashes to imply
+// unchanged compressed bytes. A **query**: it only steers the client's own local
+// work, so a stale read costs at worst some redundant preparation, never
+// incorrect state — unlike `state_hash`, which a third party trusts.
+#[query]
+fn preparation_canary() -> ByteBuf {
+    canister_core::preparation_canary()
+}
+
 // Whether the calling identity may sync assets (authorized or a controller).
 // Lets a client check access up front instead of discovering it mid-sync.
 #[query]

@@ -16,6 +16,7 @@
 //! canister's stored-state hash and the verifier's `dist/`-derived hash agree by
 //! construction (the cross-implementation test pins it).
 
+pub mod canary;
 pub mod content;
 pub mod glob;
 pub mod headers;
@@ -26,8 +27,8 @@ pub mod scan;
 
 mod prepare;
 pub use prepare::{
-    MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, PreparedEncoding, PreparedProject,
-    ProjectPlan, manifest, plan_project, prepare_project, state_hash_for_dir,
+    Compression, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, PreparedEncoding,
+    PreparedProject, ProjectPlan, manifest, plan_project, prepare_project, state_hash_for_dir,
 };
 
 /// Strips a Netlify-style trailing comment from a single line of a `_redirects`

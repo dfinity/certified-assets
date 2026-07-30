@@ -9,5 +9,6 @@
 mod canister;
 mod sync;
 
+pub use asset_prep::Compression;
 pub use canister::{Call, CallType, CanisterCall};
 pub use sync::sync;

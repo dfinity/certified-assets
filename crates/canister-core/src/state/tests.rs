@@ -859,14 +859,17 @@ mod hashing {
         write("_redirects", b"/old /new 301\n");
 
         let dir_str = dir.path().to_str().unwrap();
-        let prepared = asset_prep::prepare_project(dir_str).expect("prepare project");
+        let prepared = asset_prep::prepare_project(dir_str, asset_prep::Compression::Enabled)
+            .expect("prepare project");
 
         let mut state = State::default();
         let ctx = mock_system_context();
         apply_prepared(&mut state, &ctx, &prepared);
 
         let canister_hash = state.cached_state_hash();
-        let verifier_hash = asset_prep::state_hash_for_dir(dir_str).expect("verifier hash");
+        let verifier_hash =
+            asset_prep::state_hash_for_dir(dir_str, asset_prep::Compression::Enabled)
+                .expect("verifier hash");
         assert_eq!(
             hex::encode(canister_hash),
             hex::encode(verifier_hash),

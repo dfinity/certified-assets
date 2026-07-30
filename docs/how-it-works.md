@@ -63,6 +63,20 @@ one file in a large site therefore costs one file's worth of compression, and
 re-deploying an unchanged site costs none at all. (Header and redirect changes are
 still detected for every asset — those don't depend on content.)
 
+Reusing what's already stored assumes the compressors still behave the same way, and
+that isn't something a version number can promise — compressed output isn't part of
+a library's published interface. So each sync also records a small fingerprint of how
+its compressors actually behaved. If a later deploy's fingerprint differs — a
+dependency update, a different backend — it stops trusting the shortcut and
+re-prepares every asset, restoring the canister to exactly what the new build
+produces.
+
+Compression is on for every `icp deploy`. A platform building on these crates can
+turn it off for deploys nobody browses — a preview opened once by its author — which
+removes the compression pass and uploads less, at the cost of much larger transfers
+for anyone who does visit. Switching a canister between the two needs no cleanup:
+turning compression on uploads the missing encodings, turning it off removes them.
+
 ## ETag and conditional requests
 
 Every asset is served with an `ETag` — a strong validator derived from the SHA-256

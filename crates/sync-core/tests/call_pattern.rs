@@ -21,7 +21,7 @@ use candid::{CandidType, Decode, Encode, Principal};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
-use sync_core::{Call, CanisterCall, sync};
+use sync_core::{Call, CanisterCall, Compression, sync};
 use wire_types::{AssetDetails, RedirectRule, UploadChunksArguments};
 
 // Wire-compatible mirrors of the response types defined privately in
@@ -111,10 +111,13 @@ impl CanisterCall for RecordingMock {
                 let ids: Vec<u64> = (0..req.chunks.len() as u64).collect();
                 Encode!(&ids)
             }
-            "execute_operations" => Encode!(&()),
+            "execute_operations" => Encode!(&None::<serde_bytes::ByteBuf>),
             // The test drives sync() in direct mode, which checks can_sync up
             // front; report the identity as allowed so it proceeds.
             "can_sync" => Encode!(&true),
+            // An empty canister has no recorded compression fingerprint, so
+            // report the "unknown" value — every asset is new here anyway.
+            "preparation_canary" => Encode!(&serde_bytes::ByteBuf::from(vec![0u8; 32])),
             other => panic!("RecordingMock: unexpected method '{other}'"),
         }
         .map_err(|e| e.to_string())
@@ -145,7 +148,13 @@ fn run_scenario(label: &str, count: usize, size_bytes: usize) -> CallFingerprint
 
     let mock = RecordingMock::new();
     let started = std::time::Instant::now();
-    let result = sync(&mock, &dirs, &Principal::anonymous().to_text(), None);
+    let result = sync(
+        &mock,
+        &dirs,
+        &Principal::anonymous().to_text(),
+        None,
+        Compression::Enabled,
+    );
     let elapsed = started.elapsed();
     result.expect("sync failed");
 
@@ -196,13 +205,14 @@ fn many_tiny_files() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
                 ("start_sync", 1),
                 ("upload_chunks", 1),
                 ("execute_operations", 5),
             ],
-            1_160_809,
+            1_160_920,
         ),
     );
 }
@@ -217,13 +227,14 @@ fn many_small_files() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
                 ("start_sync", 1),
                 ("upload_chunks", 1),
                 ("execute_operations", 1),
             ],
-            528_149,
+            528_204,
         ),
     );
 }
@@ -237,13 +248,14 @@ fn few_medium_files() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
                 ("start_sync", 1),
                 ("upload_chunks", 12),
                 ("execute_operations", 1),
             ],
-            20_976_522,
+            20_976_577,
         ),
     );
 }
@@ -258,13 +270,14 @@ fn one_huge_file() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
                 ("start_sync", 1),
                 ("upload_chunks", 28),
                 ("execute_operations", 1),
             ],
-            52_433_888,
+            52_433_943,
         ),
     );
 }

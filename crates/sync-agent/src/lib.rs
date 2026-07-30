@@ -19,6 +19,8 @@ use futures::stream::{self, StreamExt};
 use ic_agent::Agent;
 use sync_core::{Call, CallType, CanisterCall};
 
+pub use sync_core::Compression;
+
 /// A `sync-core` transport backed by a live `ic-agent`.
 ///
 /// `dispatch` (single call) blocks on the agent; `dispatch_batch` runs the
@@ -87,11 +89,24 @@ pub struct SyncOpts {
     /// Maximum number of update calls in flight at once. Defaults, via
     /// [`SyncOpts::default`], to 16 — matching the legacy `dfx` uploader's cap.
     pub max_in_flight: usize,
+    /// Whether to store compressed encodings alongside the uncompressed copy.
+    /// Defaults to [`Compression::Enabled`], the canonical preparation.
+    ///
+    /// This is the seam for a platform that deploys builds nobody browses —
+    /// previews, drafts, CI artifacts — where [`Compression::Disabled`] removes
+    /// the compression pass entirely and uploads ~20–25% fewer bytes. It is
+    /// deliberately not reachable from `icp deploy`: the saving goes to whoever
+    /// runs the deploy while the 5–6× larger transfers go to whoever visits the
+    /// site, so it is only a sound trade when the deployer knows nobody will.
+    pub compression: Compression,
 }
 
 impl Default for SyncOpts {
     fn default() -> Self {
-        Self { max_in_flight: 16 }
+        Self {
+            max_in_flight: 16,
+            compression: Compression::default(),
+        }
     }
 }
 
@@ -118,7 +133,7 @@ pub async fn sync(
             max_in_flight: opts.max_in_flight.max(1),
         };
         // Native clients call the canister directly, so no proxy id.
-        sync_core::sync(&call, &[dir], &identity, None)
+        sync_core::sync(&call, &[dir], &identity, None, opts.compression)
     })
     .await
     .map_err(|e| anyhow::anyhow!("sync task panicked: {e}"))?

@@ -128,6 +128,18 @@ pub fn state_hash() -> ByteBuf {
     STATE.with_borrow(|s| ByteBuf::from(s.cached_state_hash().to_vec()))
 }
 
+/// The compression fingerprint of the client that last prepared every asset (see
+/// `asset-prep::canary`), or 32 zero bytes if no client has recorded one.
+///
+/// A syncing client reads this to decide whether the compressed encodings stored
+/// here are the ones its own compressors would produce. If they differ — a
+/// dependency bump, a different DEFLATE backend, a different target — it must
+/// re-prepare every asset instead of trusting an unchanged uncompressed hash to
+/// imply unchanged compressed bytes. The canister assigns the bytes no meaning.
+pub fn preparation_canary() -> ByteBuf {
+    STATE.with_borrow(|s| ByteBuf::from(s.preparation_canary().to_vec()))
+}
+
 pub fn http_request(req: HttpRequest) -> HttpResponse {
     if req.certificate_version != Some(2) {
         trap("Only support V2 certification");

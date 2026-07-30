@@ -93,9 +93,17 @@ async fn sync_timed(
         .await
         .expect("fetch_root_key (local replica)");
     let started = Instant::now();
-    let summary = sync(Arc::new(agent), canister, dir, SyncOpts { max_in_flight })
-        .await
-        .expect("sync failed");
+    let summary = sync(
+        Arc::new(agent),
+        canister,
+        dir,
+        SyncOpts {
+            max_in_flight,
+            ..SyncOpts::default()
+        },
+    )
+    .await
+    .expect("sync failed");
     let elapsed = started.elapsed();
     println!("  max_in_flight={max_in_flight}: {elapsed:?}\n  {summary}");
     elapsed

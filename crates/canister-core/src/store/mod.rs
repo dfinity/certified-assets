@@ -89,6 +89,12 @@ const NEXT_CONTENT_ID_MEMORY: MemoryId = MemoryId::new(31);
 /// final sync. Its own cell so the frequent counter bumps don't touch it.
 const STATE_HASH_MEMORY: MemoryId = MemoryId::new(40);
 
+// 50–59 — provenance about the client that wrote the current state.
+/// The compression fingerprint reported by the last client that prepared every
+/// asset (`PreparationCanary`). A region unused by earlier builds, so a canister
+/// upgraded in place reads the default — see the field's doc.
+const PREPARATION_CANARY_MEMORY: MemoryId = MemoryId::new(50);
+
 // Two newtypes with no domain module of their own: they exist only to give a
 // storage-internal value a `Storable` impl (the orphan rule forbids implementing
 // it on the bare `BTreeSet`/`[u8; 32]`), so they live here in the storage layer.
@@ -104,6 +110,16 @@ pub struct AuthorizedSet(pub BTreeSet<Principal>);
 /// first sync. Its own fixed 32-byte cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct StateHash(pub [u8; 32]);
+
+/// The syncing client's **compression fingerprint** (see `asset-prep::canary`),
+/// recorded by the last sync that prepared every asset from scratch. The
+/// canister attaches no meaning to the bytes; it stores and reports them so a
+/// client can tell whether the compressed encodings on this canister are the
+/// ones its own compressors would produce. `[0; 32]` means unknown — the value a
+/// canister upgraded from a build without this cell reports, which makes clients
+/// re-prepare everything and write a real one. Its own fixed 32-byte cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PreparationCanary(pub [u8; 32]);
 
 /// Per-chunk certification data — the value type of the `chunk_certs` map below,
 /// keyed by the same [`ContentChunkKey`] as the content chunk (that key lives with
@@ -170,6 +186,13 @@ pub struct Store {
     /// and returned verbatim by the public `state_hash` endpoint. `[0; 32]`
     /// until the first sync finalizes.
     state_hash: StableCell<StateHash, Mem>,
+
+    // Provenance.
+    /// The syncing client's compression fingerprint, as of the last sync that
+    /// prepared every asset. `[0; 32]` means "unknown" — which is what a
+    /// canister upgraded from a build without this cell reports, and what makes
+    /// a client fall back to preparing everything.
+    preparation_canary: StableCell<PreparationCanary, Mem>,
 }
 
 impl Store {
@@ -203,6 +226,11 @@ impl Store {
             next_content_id: StableCell::init(mm.get(NEXT_CONTENT_ID_MEMORY), 0),
             // Derived cache.
             state_hash: StableCell::init(mm.get(STATE_HASH_MEMORY), StateHash::default()),
+            // Provenance.
+            preparation_canary: StableCell::init(
+                mm.get(PREPARATION_CANARY_MEMORY),
+                PreparationCanary::default(),
+            ),
         }
     }
 
@@ -372,6 +400,18 @@ impl Store {
         self.state_hash.set(StateHash(hash));
     }
 
+    /// The compression fingerprint recorded by the last client that prepared
+    /// every asset; `[0; 32]` if none ever did (fresh canister, or one upgraded
+    /// from a build predating this cell).
+    pub fn preparation_canary(&self) -> [u8; 32] {
+        self.preparation_canary.get().0
+    }
+
+    /// Records the syncing client's compression fingerprint.
+    pub fn set_preparation_canary(&mut self, canary: [u8; 32]) {
+        self.preparation_canary.set(PreparationCanary(canary));
+    }
+
     // ---- redirect rules ----
 
     /// The redirect-rule list in match order. Returns the `StableCell`'s cached
@@ -484,6 +524,29 @@ impl Storable for StateHash {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&bytes);
         Self(hash)
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 32,
+        is_fixed_size: true,
+    };
+}
+
+// Same fixed 32-byte encoding as `StateHash`; kept as a distinct type so the two
+// cells can never be swapped by mistake.
+impl Storable for PreparationCanary {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.to_vec())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let mut canary = [0u8; 32];
+        canary.copy_from_slice(&bytes);
+        Self(canary)
     }
 
     const BOUND: Bound = Bound::Bounded {

@@ -197,6 +197,16 @@ impl State {
                         Ok(())
                     }
                     Operation::SetAssetHeaders(arg) => self.set_asset_headers(arg.clone()),
+                    Operation::SetPreparationCanary(arg) => match arg.canary.as_ref().try_into() {
+                        Ok(canary) => {
+                            self.set_preparation_canary(canary);
+                            Ok(())
+                        }
+                        Err(_) => Err(format!(
+                            "preparation canary must be 32 bytes, got {}",
+                            arg.canary.len()
+                        )),
+                    },
                     Operation::SetRedirectRules(arg) => {
                         // Validate every rule before mutating state so a single
                         // bad rule fails the whole op with no partial update.

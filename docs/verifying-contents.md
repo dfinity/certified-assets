@@ -42,8 +42,15 @@ that produce the served directory).
 
    ```sh
    state-hash ./dist
-   # 8150a65e854b9bbb…  (64 hex chars)
+   # compressed    8150a65e854b9bbb…  (64 hex chars)
+   # uncompressed  3f0c1d92ab77e410…
    ```
+
+   Two hashes, because a deploy either stores compressed encodings alongside the
+   uncompressed copy or doesn't, and the same directory hashes differently either
+   way. `icp deploy` always produces the `compressed` form; the `uncompressed`
+   form comes from a platform that deployed with compression turned off (see
+   [how it works](how-it-works.md)). A canister matches exactly one of the two.
 
 3. **Read the canister's hash.** `state_hash` is a public, unguarded method — and
    an *update* call, so the reply is consensus-backed and trustworthy:
@@ -53,9 +60,9 @@ that produce the served directory).
    # (blob "\81\50\a6\5e…")
    ```
 
-4. **Compare.** If the two hashes are equal, the canister serves exactly the build
-   you reproduced from source. If they differ, the served content, headers, or
-   redirects do not match that source.
+4. **Compare.** If the canister's hash equals either of the two you computed, it
+   serves exactly the build you reproduced from source. If it matches neither, the
+   served content, headers, or redirects do not match that source.
 
 The deploy also prints a hash in the `icp deploy` / sync result (`canister reports
 state hash <hex>`). That value comes back from the canister on the call that
@@ -70,8 +77,12 @@ The hash is bound to how content is prepared, so a verifier must use a
 parameters baked into the hash:
 
 - **Compression** — gzip at `flate2`'s default level; brotli at quality 11,
-  window 22. Compressed encodings are not reproducible by an independent
-  reimplementation, so the verifier reuses this project's preparation code.
+  window 22, **as produced by the exact compressor builds this version links**.
+  RFC 7932 and RFC 1951 specify *decoders*, so those settings don't determine the
+  bytes: a different encoder — or a different version of the same one — may emit
+  a different valid stream. That is why the verifier reuses this project's
+  preparation code rather than reimplementing it, and why the `uncompressed`
+  hash, which involves no compressor at all, is the more durable of the two.
 - **Chunk boundary** — `MAX_CHUNK_SIZE` (1,900,000 bytes). Per-chunk hashes for
   large assets depend on where chunks split.
 - **Byte format** — a versioned, length-prefixed, domain-separated SHA-256
