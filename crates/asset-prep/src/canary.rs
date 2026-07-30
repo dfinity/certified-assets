@@ -152,6 +152,23 @@ mod tests {
         assert_eq!(fingerprint().unwrap(), fingerprint().unwrap());
     }
 
+    /// The fingerprint value itself, pinned — the CI half of the pair. A drift
+    /// here means the next deploy against any existing canister re-prepares and
+    /// re-uploads every asset, and every published state hash stops matching.
+    /// That is a legitimate thing to do, but not by accident: see the guidance
+    /// on the golden vectors in `content.rs`, which say *which* compressor moved.
+    #[test]
+    fn fingerprint_is_pinned() {
+        assert_eq!(
+            fingerprint().unwrap(),
+            [
+                245, 226, 54, 136, 144, 3, 34, 211, 233, 170, 231, 7, 236, 41, 240, 14, 77, 42,
+                176, 104, 40, 40, 127, 55, 244, 101, 113, 73, 212, 101, 239, 247,
+            ],
+            "compression fingerprint drifted"
+        );
+    }
+
     /// ...and it is actually sensitive to compressor output, not just to the
     /// constants folded in around it.
     #[test]

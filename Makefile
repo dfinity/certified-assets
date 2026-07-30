@@ -40,13 +40,16 @@ wasm: canister plugin
 # Recipes are phony on purpose: cargo already does incremental freshness
 # tracking, so we always invoke it (cheap when nothing changed) and let it decide
 # whether a rebuild is needed, then copy the result into dist/.
+#
+# `--locked` because the shipped wasms embed the compressors whose output bytes
+# every deployed canister stores; a silently-updated lock would change them.
 canister:
-	cargo build -p canister --target $(CANISTER_TARGET) --profile $(CANISTER_PROFILE)
+	cargo build --locked -p canister --target $(CANISTER_TARGET) --profile $(CANISTER_PROFILE)
 	@mkdir -p $(DIST)
 	cp $(CANISTER_OUT) $(DIST)/canister.wasm
 
 plugin:
-	cargo build -p sync-plugin --target $(PLUGIN_TARGET) --profile $(PLUGIN_PROFILE)
+	cargo build --locked -p sync-plugin --target $(PLUGIN_TARGET) --profile $(PLUGIN_PROFILE)
 	@mkdir -p $(DIST)
 	cp $(PLUGIN_OUT) $(DIST)/plugin.wasm
 

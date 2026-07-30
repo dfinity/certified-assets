@@ -77,10 +77,15 @@ jobs:
           exit 1
         env:
           ICP_CLI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # `--locked` everywhere: the committed Cargo.lock is what pins the
+      # compressor builds whose output bytes end up in deployed canisters and in
+      # `state_hash` (see the golden vectors in `asset-prep`). Without it a stale
+      # lock is silently updated in CI, so a run could test different bytes than
+      # a developer did. With it, that fails the build instead.
       - name: Run tests
         run: | # nextest doesn't run doctests, so those stay on `cargo test --doc`
-          cargo nextest run --all-targets --no-fail-fast
-          cargo test --doc
+          cargo nextest run --locked --all-targets --no-fail-fast
+          cargo test --locked --doc
 
   fmt:
     name: cargo fmt
@@ -110,7 +115,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
       - name: Run clippy
         run: |
-          cargo clippy --tests --benches --keep-going -- -D warnings
+          cargo clippy --locked --tests --benches --keep-going -- -D warnings
 
   benchmark:
     name: canbench

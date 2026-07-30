@@ -314,6 +314,32 @@ pub fn http_post_form(
         .unwrap_or_else(|e| panic!("POST {url} failed: {e}"))
 }
 
+/// Call `state_hash` on the `frontend` canister and return the 32-byte digest it
+/// reports over its stored state.
+pub fn canister_state_hash(project: &Path) -> [u8; 32] {
+    let stdout = icp_cmd(project)
+        .args([
+            "canister",
+            "call",
+            "frontend",
+            "state_hash",
+            "()",
+            "-o",
+            "hex",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let hex_str = String::from_utf8_lossy(&stdout);
+    let bytes = hex::decode(hex_str.trim()).expect("failed to decode hex response");
+    let (hash,) = candid::decode_args::<(serde_bytes::ByteBuf,)>(&bytes)
+        .expect("failed to decode candid response");
+    <[u8; 32]>::try_from(hash.as_ref()).expect("state_hash must be 32 bytes")
+}
+
 /// Call `get_asset_details` on the `frontend` canister and return all asset details.
 pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
     let stdout = icp_cmd(project)
