@@ -26,7 +26,7 @@ canisters:
 | dir | string | Yes | The single directory of built assets to synchronize to the canister | - |
 | build | array | No | Shell commands run before sync to produce the asset directory (e.g. `npm run build`) | [] |
 | presync | array | No | Shell commands run at sync time (after the canister exists), with the deployed canister IDs in the environment — see [Pre-sync environment](#pre-sync-environment) | [] |
-| metadata | array | No | Name/value pairs injected into the canister wasm via `ic-wasm` | [] |
+| metadata | array | No | Entries injected into the canister wasm via `ic-wasm`. Each takes `name`, `value`, and an optional `visibility` of `public` or `private` (omitted means private) | [] |
 
 > The sync plugin owns the canister's full URL space and accepts **exactly one** asset directory, so `dir` is a single string rather than a list.
 
@@ -66,6 +66,9 @@ canisters:
         metadata:
           - name: "frontend:framework"
             value: "react"
+          - name: "build:commit"
+            value: "a1b2c3d"
+            visibility: public
 ```
 
 ### With a pre-sync build that needs canister IDs

@@ -1,0 +1,6 @@
+# Sits next to the *nested* preopen root (`src/frontend/dist/`), which the plugin
+# reads by relative path. A missing file means "no rules", so a path that failed
+# to resolve here would be silently ignored rather than reported — the test
+# fetches /old to prove the rule was actually loaded.
+
+/old   /index.html   301

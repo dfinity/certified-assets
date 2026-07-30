@@ -259,6 +259,20 @@ mod tests {
         );
     }
 
+    /// The `ic-wasm metadata` commands a metadata list renders to, in order.
+    fn injection_commands(rendered: &Rendered) -> Vec<String> {
+        rendered
+            .build
+            .steps
+            .last()
+            .and_then(|s| s.get("commands"))
+            .and_then(Value::as_sequence)
+            .expect("metadata renders a trailing injection script")
+            .iter()
+            .map(|c| c.as_str().expect("command is a string").to_string())
+            .collect()
+    }
+
     #[test]
     fn local_with_metadata() {
         let cfg =
@@ -269,15 +283,50 @@ mod tests {
         // ic-wasm availability check, pre-built canister, then the injection script.
         let types: Vec<&str> = r.build.steps.iter().map(step_type).collect();
         assert_eq!(types, vec!["script", "pre-built", "script"]);
-        // The injection command carries the name/value pair.
-        let inject = r.build.steps[2]
-            .get("commands")
-            .and_then(Value::as_sequence)
-            .unwrap()[0]
-            .as_str()
-            .unwrap();
-        assert!(inject.contains("app:framework"), "got: {inject}");
-        assert!(inject.contains("react"), "got: {inject}");
+        // Pinned in full, not just `contains`: this is the exact command line
+        // ic-wasm receives, and an entry that leaves `visibility` out must render
+        // byte-for-byte what it did before the field existed — including under
+        // the strict mode icp-cli renders with, where a template that referenced
+        // a missing field would fail outright.
+        assert_eq!(
+            injection_commands(&r),
+            vec![
+                r#"sh -c 'ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata "app:framework" -d "react" --keep-name-section'"#
+            ],
+        );
+    }
+
+    /// `visibility` (optional, `public` | `private`) reaches ic-wasm as `-v`.
+    /// Mixed with an entry that omits it, since that is the shape the README
+    /// documents and the one where a template slip would show up as a stray flag
+    /// or a lost `--keep-name-section`.
+    #[test]
+    fn local_with_metadata_visibility() {
+        let cfg = serde_yaml::from_str(
+            r"
+dir: dist
+metadata:
+  - name: build:commit
+    value: a1b2c3d
+    visibility: public
+  - name: build:secret
+    value: hidden
+    visibility: private
+  - name: app:framework
+    value: react
+",
+        )
+        .unwrap();
+        let out = render_with_config(&local(), cfg).unwrap();
+        let r = parse(&out);
+        assert_eq!(
+            injection_commands(&r),
+            vec![
+                r#"sh -c 'ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata "build:commit" -d "a1b2c3d" -v public --keep-name-section'"#,
+                r#"sh -c 'ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata "build:secret" -d "hidden" -v private --keep-name-section'"#,
+                r#"sh -c 'ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata "app:framework" -d "react" --keep-name-section'"#,
+            ],
+        );
     }
 
     #[test]

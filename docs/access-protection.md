@@ -26,7 +26,8 @@ icp deploy
 icp canister call frontend enable_protection '("/login.html")'
 
 # 3. Mint a credential. Here, a chosen "password" valid for ~1 year.
-icp canister call frontend issue_token '("owner", 31536000 : nat32, opt "my-passphrase")'
+icp canister call frontend issue_token \
+  '(record { label = "owner"; ttl_secs = 31536000 : nat32; value = opt "my-passphrase" })'
 ```
 
 That's it — `https://<canister-id>.icp0.io/` now redirects strangers to
@@ -40,11 +41,14 @@ That's it — `https://<canister-id>.icp0.io/` now redirects strangers to
 
 | Method | Call | Effect |
 |---|---|---|
-| Issue | `issue_token '("<label>", <ttl_secs> : nat32, opt "<value>")'` | Mints a token and **returns its value**. Omit the `opt "<value>"` (pass `null`) to get a high-entropy random token instead of a chosen passphrase. |
+| Issue | `issue_token '(record { label = "<label>"; ttl_secs = <secs> : nat32; value = opt "<value>" })'` | Mints a token and **returns its value**. Pass `value = null` (or leave the field out) to get a high-entropy random token instead of a chosen passphrase. |
 | Revoke | `revoke_token '("<label>")'` | Removes every token with that label — **live**, so the next request bearing it is rejected. |
-| List | `list_tokens` | Returns `{ label; expires_at }` for every live token (controller-only). |
-| Status | `check_protection_status` | `Disabled`, `Enabled`, or `EnabledLoginPageMissing` (controller-only). |
-| Disable | `disable_protection` | Turns the gate off and drops all tokens. |
+| List | `list_tokens '()'` | Returns `{ label; expires_at }` for every live token (controller-only). |
+| Status | `check_protection_status '()'` | `Disabled`, `Enabled`, or `EnabledLoginPageMissing` (controller-only). |
+| Disable | `disable_protection '()'` | Turns the gate off and drops all tokens. |
+
+Always pass the argument explicitly — `'()'` for the methods that take none. Given no
+argument, `icp canister call` opens an interactive prompt instead of sending an empty one.
 
 Each token has its **own expiry** and is **individually revocable** — revoking one
 leaked share doesn't disturb anyone else. Expired tokens are rejected immediately

@@ -110,8 +110,8 @@ only over real HTTPS, so verify those against a deployed `https://<id>.icp0.io`.
 | `enable_protection '("/login.html")'` | Turn the gate on, naming your login page. |
 | `issue_token '(record { label = "..."; ttl_secs = N : nat32; value = opt "..." })'` | Mint a token (pass `null` for `value` to get a random one); returns its value. |
 | `revoke_token '("<label>")'` | Kill a token immediately (live on the next request). |
-| `list_tokens` | List live tokens — `{ label; expires_at }` (controller-only). |
-| `check_protection_status` | `Disabled`, `Enabled`, or `EnabledLoginPageMissing`. |
+| `list_tokens '()'` | List live tokens — `{ label; expires_at }` (controller-only). |
+| `check_protection_status '()'` | `Disabled`, `Enabled`, or `EnabledLoginPageMissing`. |
 | `disable_protection '()'` | Turn the gate off and drop all tokens. |
 
 See [`docs/access-protection.md`](../../docs/access-protection.md) for the full

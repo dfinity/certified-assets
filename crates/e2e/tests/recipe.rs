@@ -51,6 +51,22 @@ fn recipe_build_step() {
 /// `command -v ic-wasm` guard makes the deploy fail loudly, surfacing a clear
 /// error here rather than silently skipping. A successful deploy that still
 /// serves assets proves the injected wasm installs and runs.
+///
+/// The fixture mixes an entry carrying `visibility: public` with one that omits
+/// it, and the assertions check both halves: that each section reached the
+/// installed canister with its value, and that `visibility` decided the section's
+/// *name* — ic-wasm writes `icp:public <name>` or `icp:private <name>`, and only
+/// the prefix distinguishes a dropped `-v public` from a working one.
+///
+/// The prefix is read off the built artifact, not the replica, because the
+/// replica cannot tell us: it serves a public section to anyone and a private one
+/// to controllers, so separating them needs a *non-controller* read — and there
+/// is no identity a test can rely on for that. A fresh icp-cli install has only
+/// the built-in `anonymous` identity and deploys as it, which makes anonymous the
+/// canister's controller and every section readable (that is exactly how CI
+/// runs); a developer machine with a real default identity behaves the opposite
+/// way. So the visibility half asks ic-wasm instead, which needs no identity at
+/// all.
 #[test]
 fn recipe_metadata() {
     let tmp = setup_recipe_project("recipe-metadata");
@@ -64,6 +80,73 @@ fn recipe_metadata() {
         assets.iter().any(|a| a.key == "/index.html"),
         "expected /index.html after metadata injection; got: {assets:#?}",
     );
+
+    // Both sections reached the *installed* canister, values intact. The deployer
+    // is the canister's controller either way, so this read needs no identity
+    // choice — and it means the visibility check below can't pass vacuously on a
+    // wasm whose sections never made it onto the replica.
+    for (section, value) in [("build:commit", "a1b2c3d"), ("app:framework", "react")] {
+        let out = icp_cmd(project)
+            .args(["canister", "metadata", "frontend", section])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let out = String::from_utf8_lossy(&out);
+        assert!(
+            out.contains(value),
+            "read of `{section}` should yield {value:?}; got: {out}",
+        );
+    }
+
+    // And `visibility` landed each one in the right section namespace.
+    let sections = wasm_metadata_sections(project);
+    assert!(
+        sections.contains(&"icp:public build:commit".to_string()),
+        "`build:commit` declares `visibility: public`, so ic-wasm must have written \
+         `icp:public build:commit`; a `-v public` lost from the recipe template would \
+         leave it icp:private. Sections: {sections:#?}",
+    );
+    assert!(
+        sections.contains(&"icp:private app:framework".to_string()),
+        "`app:framework` omits `visibility`, so it must stay in ic-wasm's default \
+         private namespace. Sections: {sections:#?}",
+    );
+}
+
+/// The metadata section names — each `icp:public <name>` or `icp:private <name>` —
+/// of the wasm `icp build` produced for the `frontend` canister.
+///
+/// Reaches into icp-cli's build cache: `icp build` has no `--output`, and the
+/// visibility prefix exists nowhere else observable (see the note on the caller).
+/// That path is an icp-cli implementation detail, so this fails with an explicit
+/// message if it moves — a version bump that relocates the artifact means
+/// updating this helper, not that the recipe broke.
+fn wasm_metadata_sections(project: &std::path::Path) -> Vec<String> {
+    let artifact = project.join(".icp/cache/artifacts/frontend");
+    assert!(
+        artifact.is_file(),
+        "no built wasm at {} — icp-cli's build-cache layout changed; find the new path \
+         (`icp build` still has no --output flag) and update this helper",
+        artifact.display(),
+    );
+    let out = std::process::Command::new("ic-wasm")
+        .arg(&artifact)
+        .arg("metadata")
+        .output()
+        .expect("run `ic-wasm <wasm> metadata` (ic-wasm is required by this test)");
+    assert!(
+        out.status.success(),
+        "ic-wasm failed to list metadata: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `presync`: commands run at sync time — after the canister exists — with the

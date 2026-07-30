@@ -122,3 +122,144 @@ fn protected_app_gates_unauthenticated_requests() {
     // Sanity: same canister throughout.
     assert!(!frontend_canister_id(project).is_empty());
 }
+
+/// The management methods a user reaches for are only ever *documented*, never
+/// called by the tests above under the form the docs print. That gap shipped a
+/// broken quick start (#116): `issue_token` was written with three positional
+/// arguments instead of the single `IssueTokenArgs` record, in a copy-pasteable
+/// `sh` block *and* in the reference table, while this file called it correctly
+/// by hand. So: run what the docs actually say.
+///
+/// Every `<method> '<candid>'` pair in the committed markdown is extracted and
+/// sent to the deployed canister. A rejected snippet fails this test — the CLI
+/// exits non-zero whether the mismatch is caught locally against the canister's
+/// candid interface or by the canister trapping on decode.
+///
+/// Each snippet is judged on its own candid form: `issue_token` is the one call
+/// the canister refuses while the gate is off, so the gate is re-enabled before
+/// each of those rather than depending on where `disable_protection` happens to
+/// sit in the document. Whether the documented *sequence* works is what
+/// `protected_app_gates_unauthenticated_requests` above covers.
+#[test]
+fn documented_calls_are_accepted_by_the_canister() {
+    let tmp = setup_example("access-protection");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    // crates/e2e -> crates -> repo root. Read the committed docs, not the copy's,
+    // so this guards the files a reader lands on.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crates/e2e/ must have a repo root two levels up");
+
+    let mut covered = std::collections::BTreeSet::new();
+    for source in [
+        "docs/access-protection.md",
+        "examples/access-protection/README.md",
+    ] {
+        let markdown =
+            std::fs::read_to_string(repo.join(source)).unwrap_or_else(|e| panic!("{source}: {e}"));
+        for (method, args) in documented_calls(&markdown) {
+            if method == "issue_token" {
+                call(project, "enable_protection", "(\"/login.html\")");
+            }
+            // Printed first so a failure below is attributed to a document.
+            eprintln!("{source}: icp canister call frontend {method} '{args}'");
+            call(project, &method, &args);
+            covered.insert(method);
+        }
+    }
+
+    // Guards the extraction itself: a reformatted table that stopped matching
+    // would otherwise let this test pass while checking nothing.
+    assert_eq!(
+        covered.into_iter().collect::<Vec<_>>(),
+        {
+            let mut all = METHODS.to_vec();
+            all.sort_unstable();
+            all
+        },
+        "the docs must show a runnable form of every management method",
+    );
+}
+
+/// The management surface `docs/access-protection.md` and the example's README
+/// document. Both files list all of them.
+const METHODS: [&str; 6] = [
+    "enable_protection",
+    "disable_protection",
+    "issue_token",
+    "revoke_token",
+    "list_tokens",
+    "check_protection_status",
+];
+
+/// Reference forms are written with placeholders; fill in concrete values so the
+/// snippet can be sent as-is. A placeholder left unfilled fails the test rather
+/// than skipping the snippet — a new spelling belongs here, not in a hole in the
+/// coverage.
+const PLACEHOLDERS: [(&str, &str); 5] = [
+    ("<label>", "doc-label"),
+    ("<value>", "doc-secret"),
+    ("<secs>", "3600"),
+    ("= N :", "= 3600 :"),
+    ("...", "doc"),
+];
+
+/// Extracts every documented `(method, candid-args)` pair from `markdown`, in
+/// document order — the same shape whether it sits in a fenced `icp canister call
+/// frontend …` line or in a reference-table cell, so both stay checked.
+fn documented_calls(markdown: &str) -> Vec<(String, String)> {
+    // A shell line continued with `\` puts the method and its argument on
+    // different source lines (the quick start does); glue those back together.
+    let text = markdown
+        .split("\\\n")
+        .fold(String::new(), |mut acc, piece| {
+            if acc.is_empty() {
+                acc.push_str(piece);
+            } else {
+                acc.push_str(piece.trim_start());
+            }
+            acc
+        });
+
+    let mut calls: Vec<(usize, String, String)> = Vec::new();
+    for method in METHODS {
+        let mut from = 0;
+        while let Some(offset) = text[from..].find(method) {
+            let start = from + offset;
+            from = start + method.len();
+            // Reject a name embedded in a longer identifier, and require the
+            // argument to follow immediately — prose like "the `issue_token`
+            // call" documents nothing runnable.
+            let preceded_by_ident = text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let rest = &text[from..];
+            if preceded_by_ident || !rest.starts_with(" '") {
+                continue;
+            }
+            let Some(end) = rest[2..].find('\'') else {
+                continue;
+            };
+            let mut args = rest[2..2 + end].to_string();
+            for (placeholder, value) in PLACEHOLDERS {
+                args = args.replace(placeholder, value);
+            }
+            assert!(
+                !args.contains('<') && !args.contains("..."),
+                "unfilled placeholder in `{method} '{args}'` — add it to PLACEHOLDERS",
+            );
+            calls.push((start, method.to_string(), args));
+        }
+    }
+    calls.sort_by_key(|(offset, _, _)| *offset);
+    calls
+        .into_iter()
+        .map(|(_, method, args)| (method, args))
+        .collect()
+}
