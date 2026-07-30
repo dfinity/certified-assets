@@ -22,16 +22,33 @@
 //! (The future plugin bench will do the same, sweeping the icp-cli runtime's
 //! batch-import cap over {1, N}.)
 //!
-//! # Why this is safe to gate on
+//! # Why this is safe to gate on, and how the margin was chosen
 //!
 //! It asserts a *ratio* between two runs done back-to-back in one test, on one
-//! machine, so machine-to-machine speed and CI load cancel out. The dominant
-//! cost — the artificial delay — is a replica-side wait, not client compute, so
-//! it doesn't shrink under CPU contention (which would only inflate the serial
-//! run more, never the concurrent one). The assertion keeps a wide margin below
-//! the observed ratio, so it trips on a real regression — uploads silently
-//! serialized — not on noise. If it ever does flake on a runner, re-add
-//! `#[ignore]` rather than widening the margin into meaninglessness.
+//! machine. That was expected to cancel out machine speed and CI load; measured,
+//! it does not. Observed for identical code:
+//!
+//! | Machine | serial | concurrent | ratio |
+//! |---|---|---|---|
+//! | local (Apple silicon) | 9.81s | 3.79s | 2.59× |
+//! | CI macos-15 | 12.71s | 9.01s | 1.41× |
+//!
+//! The delay *is* a replica-side wait that survives CPU contention, but it is
+//! not the whole cost: the concurrent run also pays real transfer and polling
+//! for ~13 MB, and on a loaded runner that floor dominates (9s of the macOS
+//! run). So the ratio itself is machine-dependent, and a threshold inside the
+//! observed spread flakes by construction — an earlier 1.5× did.
+//!
+//! Hence **1.2×**, which is chosen against the failure this guards: uploads
+//! silently serialized drives the ratio to ~1.0, so a 20% floor still trips on
+//! it while clearing the worst observed run by a comfortable margin. Raising
+//! `artificial-delay-ms` was considered instead and rejected — it lifts the mean
+//! without touching the macOS transfer floor, and taxes every run. Shrinking the
+//! payload isn't available either: each file must exceed half the 1.9 MB chunk
+//! budget or files share upload calls and the call count collapses.
+//!
+//! If it flakes again at 1.2×, re-add `#[ignore]` rather than widening further —
+//! below ~1.2 this stops distinguishing "concurrent" from "serial" at all.
 //!
 //! # Running
 //!
@@ -157,14 +174,14 @@ fn native_transport_concurrency_speedup() {
         "\nserial (1) {serial:?}  vs  concurrent ({MAX_IN_FLIGHT}) {concurrent:?}  →  {speedup:.2}× faster"
     );
 
-    // Concurrency should be well clear of serial. We don't assert a specific
-    // multiple — the fixed sequential calls (start_sync, execute_operations) and
-    // real transfer/polling put a floor on the concurrent run, so the local
-    // ratio is a "trend", not the full round-trip speedup (that shows on
-    // mainnet). Require a solid margin so the guard trips on a real regression
-    // (e.g. uploads accidentally serialized) but not on machine-to-machine noise.
+    // Concurrency should be clear of serial. We don't assert a specific multiple
+    // — the fixed sequential calls (start_sync, execute_operations) and real
+    // transfer/polling put a floor on the concurrent run, so the local ratio is a
+    // "trend", not the full round-trip speedup (that shows on mainnet). The 1.2×
+    // floor is measured, not guessed: see "how the margin was chosen" above
+    // before changing it.
     assert!(
-        serial.as_secs_f64() > concurrent.as_secs_f64() * 1.5,
+        serial.as_secs_f64() > concurrent.as_secs_f64() * 1.2,
         "expected concurrent uploads clearly faster than serial, \
          got serial={serial:?} concurrent={concurrent:?}"
     );
