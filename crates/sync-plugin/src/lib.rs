@@ -9,7 +9,7 @@ wit_bindgen::generate!({
 });
 use crate::icp::sync_plugin::types as ty;
 
-use sync_core::{Call, CallType, CanisterCall, Compression, sync};
+use sync_core::{Call, CallType, CanisterCall, Compressors, sync};
 
 struct WasiCall;
 
@@ -44,17 +44,18 @@ impl Guest for Plugin {
             "sync plugin: starting for canister {} (environment: {})",
             input.canister_id, input.environment
         );
-        // Always the canonical preparation. Turning compression off is a
-        // deploy-time trade a *platform* makes for builds nobody browses (see
-        // `asset-prep::Compression`); every `icp deploy` serves real visitors, so
-        // the plugin never offers the choice — the cost would land on them, not
-        // on whoever typed the command.
+        // Always the canonical registry — gzip + brotli q11. Cheaper compressors
+        // are a deploy-time trade a *platform* makes for builds it knows nobody
+        // browses (see `asset-prep::Compressors`); every `icp deploy` serves real
+        // visitors, so the plugin never offers the choice — the cost would land on
+        // them, not on whoever typed the command. It is also what keeps every
+        // `icp deploy` reproducible by the stock `state-hash` verifier.
         let summary = sync(
             &WasiCall,
             &input.dirs,
             &input.identity_principal,
             input.proxy_canister_id.as_deref(),
-            Compression::Enabled,
+            &Compressors::canonical(),
         )?;
         eprintln!("{summary}");
         Ok(())

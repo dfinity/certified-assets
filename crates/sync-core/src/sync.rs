@@ -13,7 +13,7 @@ use crate::canister::{
     list_all_redirect_rules, preparation_canary, start_sync, version,
 };
 use asset_prep::{
-    Compression, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, ProjectPlan,
+    Compressors, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, ProjectPlan,
     plan_project,
 };
 use wire_types::{
@@ -152,11 +152,13 @@ fn diff_assets(
 /// The canister's encodings for `planned`, when the canister already holds
 /// exactly the content preparation would produce — so encoding can be skipped.
 ///
-/// Sound because compression is deterministic: for a given build of
-/// `asset-prep`, every compressed encoding is a pure function of the identity
-/// bytes. So if the canister holds the same identity hash under the same
-/// `content_type`, its compressed encodings are byte-identical to the ones we
-/// would spend brotli time recomputing.
+/// Sound because a compressor is required to be a pure function of its input
+/// (the contract on `asset_prep::Compressors`), so every compressed encoding is
+/// a pure function of the identity bytes. If the canister holds the same identity
+/// hash under the same `content_type`, its compressed encodings are
+/// byte-identical to the ones we would spend brotli time recomputing — provided
+/// the compressors themselves haven't changed, which is what the canary check in
+/// [`sync`] establishes before any of this runs.
 ///
 /// Three things must line up, and the third is deliberately strict:
 ///
@@ -168,10 +170,10 @@ fn diff_assets(
 /// jobs. A missing compressed encoding is ambiguous — "compression didn't shrink
 /// this asset" or "an earlier deploy died mid-upload" — and the two are
 /// indistinguishable without doing the compression. It is also what makes a
-/// [`Compression`] mode switch converge: after a `Disabled` sync the stored set
-/// is identity-only, and only a strict comparison notices that `Enabled` now
-/// wants more. A subset rule would satisfy the first job and silently break the
-/// second.
+/// change in which compressors are set converge: after a sync with no brotli the
+/// stored set has no brotli, and only a strict comparison notices that a registry
+/// which sets it now wants more. A subset rule would satisfy the first job and
+/// silently break the second.
 ///
 /// The cost is that any asset whose set can't match is re-encoded on **every**
 /// sync. Usually that's noise, because the usual reason a compressed encoding
@@ -298,7 +300,7 @@ pub fn sync<C: CanisterCall>(
     dirs: &[String],
     identity_principal: &str,
     proxy_canister_id: Option<&str>,
-    compression: Compression,
+    compressors: &Compressors,
 ) -> Result<String, String> {
     // The assets plugin owns the URL space of its canister: every key starts at
     // `/`, `_redirects` lives at the project root, and the canister has no
@@ -350,10 +352,10 @@ pub fn sync<C: CanisterCall>(
     // `state-hash-cli` verifier (see `asset-prep`); the expensive half —
     // gzip/brotli — is deferred to `diff_assets`, which runs it only for assets
     // the canister doesn't already hold.
-    let plan = plan_project(dir, compression)?;
+    let plan = plan_project(dir, compressors)?;
     println!("planned {} asset(s) from {dir}", plan.assets.len());
-    if compression == Compression::Disabled {
-        println!("compression disabled: storing uncompressed content only");
+    if compressors.is_empty() {
+        println!("no compressors set: storing uncompressed content only");
     }
     println!(
         "{} redirect rule(s) (incl. synthesised)",
@@ -376,23 +378,19 @@ pub fn sync<C: CanisterCall>(
         canister_rules.len()
     );
 
-    // Reusing a stored encoding rests on it being byte-identical to what this
-    // build would produce, which holds only while the compressors behave the
-    // same. Compare fingerprints; a mismatch (or an "unknown" canary, i.e. a
-    // fresh canister or one upgraded from a build predating it) means prepare
-    // everything and record the new fingerprint below.
+    // Reusing a stored encoding rests on it being byte-identical to what *these*
+    // compressors would produce — and they are the caller's, so they can differ
+    // simply because a different program ran the last sync, quite apart from a
+    // dependency bump. Compare fingerprints; a mismatch (or an "unknown" canary,
+    // i.e. a fresh canister or one upgraded from a build predating it) means
+    // prepare everything and record the new fingerprint below.
     //
-    // With compression disabled none of that applies: no compressor touches the
-    // stored bytes, so an unchanged uncompressed hash is all the evidence reuse
-    // needs, and there is no fingerprint worth computing or recording.
-    let local_canary = match compression {
-        Compression::Enabled => Some(asset_prep::canary::fingerprint()?),
-        Compression::Disabled => None,
-    };
-    let compressors_agree = match local_canary {
-        Some(local) => preparation_canary(canister)? == Some(local),
-        None => true,
-    };
+    // Computed unconditionally, including for an empty registry: its fingerprint
+    // is well-defined (no compressor runs, but the presence mask and preparation
+    // constants are folded in), so changing compressors is one comparison in every
+    // direction rather than a special case per mode.
+    let local_canary = asset_prep::canary::fingerprint(compressors)?;
+    let compressors_agree = preparation_canary(canister)? == Some(local_canary);
     if !compressors_agree {
         println!("compression fingerprint differs from the canister's; preparing every asset");
     }
@@ -409,10 +407,10 @@ pub fn sync<C: CanisterCall>(
     // rides in the `is_final` group: a sync that dies partway leaves the old
     // canary in place, and the next one re-prepares everything, as it must.
     let record_canary = |mut ops: Vec<Operation>| {
-        if let Some(local) = local_canary.filter(|_| !compressors_agree) {
+        if !compressors_agree {
             ops.push(Operation::SetPreparationCanary(
                 SetPreparationCanaryArguments {
-                    canary: ByteBuf::from(local.to_vec()),
+                    canary: ByteBuf::from(local_canary.to_vec()),
                 },
             ));
         }
@@ -913,7 +911,7 @@ mod tests {
     /// project's `_headers`. Lets the short-circuit tests assert "a second sync of
     /// a 404-augmented project is a no-op" without hard-coding the page.
     fn branded_404_canister_asset(dir: &str) -> AssetDetails {
-        let prepared = asset_prep::prepare_project(dir, asset_prep::Compression::Enabled)
+        let prepared = asset_prep::prepare_project(dir, &asset_prep::Compressors::canonical())
             .expect("prepare project");
         let asset = prepared
             .assets
@@ -1903,7 +1901,7 @@ mod tests {
             &[dir.path().to_str().unwrap().to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         );
         // No start_sync / execute_operations programmed — if sync reached them
         // SyncMock would panic with "no programmed response".
@@ -1951,7 +1949,7 @@ mod tests {
             &[dir.path().to_str().unwrap().to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         );
         assert!(result.is_ok(), "expected success, got: {result:?}");
     }
@@ -2289,14 +2287,18 @@ mod tests {
         }
     }
 
-    /// Programs the canary query with *this build's own* fingerprint — i.e. the
-    /// canister's stored encodings came from compressors that behave like ours,
-    /// which is the normal case and the one where reuse is allowed. Tests that
-    /// want the mismatch path program a different value themselves.
+    /// Programs the canary query with the canonical registry's fingerprint — i.e.
+    /// the canister's stored encodings came from the same compressors the test
+    /// syncs with, which is the normal case and the one where reuse is allowed.
+    /// Tests that want the mismatch path program a different value themselves.
     fn push_matching_canary(mock: &SyncMock) {
         mock.push_ok(
             "preparation_canary",
-            ByteBuf::from(asset_prep::canary::fingerprint().unwrap().to_vec()),
+            ByteBuf::from(
+                asset_prep::canary::fingerprint(&Compressors::canonical())
+                    .unwrap()
+                    .to_vec(),
+            ),
         );
     }
 
@@ -2374,7 +2376,7 @@ mod tests {
             &[],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         )
         .unwrap_err();
         assert!(
@@ -2391,7 +2393,7 @@ mod tests {
             &["dist-a".to_string(), "dist-b".to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         )
         .unwrap_err();
         assert!(err.contains("got 2"), "got: {err}");
@@ -2420,9 +2422,10 @@ mod tests {
         // html-handling rules and the `/*` catch-all; the canister must already
         // hold all of it for the short-circuit to fire. The exact stored rules
         // are whatever `prepare_project` produces (3xx headers already resolved).
-        let canister_rules = asset_prep::prepare_project(dir_str, asset_prep::Compression::Enabled)
-            .unwrap()
-            .redirect_rules;
+        let canister_rules =
+            asset_prep::prepare_project(dir_str, &asset_prep::Compressors::canonical())
+                .unwrap()
+                .redirect_rules;
 
         let mock = SyncMock::new();
         mock.push_ok("version", wire_types::VERSION);
@@ -2453,7 +2456,7 @@ mod tests {
             &[dir.path().to_str().unwrap().to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         );
         // No start_sync / execute_operations programmed — would panic if reached.
         assert!(result.is_ok(), "expected success, got: {result:?}");
@@ -2486,7 +2489,7 @@ mod tests {
             &[dir.path().to_str().unwrap().to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         );
         assert!(result.is_ok(), "expected success, got: {result:?}");
     }
@@ -2599,7 +2602,7 @@ mod tests {
             &[dir.path().to_str().unwrap().to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         );
         // No start_sync / execute_operations programmed — would panic if reached.
         assert!(result.is_ok(), "expected success, got: {result:?}");
@@ -2630,7 +2633,7 @@ mod tests {
             &[dir.path().to_str().unwrap().to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         );
 
         let err = result.unwrap_err();
@@ -2658,7 +2661,7 @@ mod tests {
             &[dir.path().to_str().unwrap().to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         )
         .unwrap_err();
         assert!(err.contains("not authorized"), "got: {err}");
@@ -2681,7 +2684,7 @@ mod tests {
     /// The `AssetDetails` map the canister would report after a full sync of
     /// `dir` — i.e. what the diff sees on a re-deploy of an unchanged project.
     fn canister_view(dir: &str) -> HashMap<String, AssetDetails> {
-        asset_prep::prepare_project(dir, asset_prep::Compression::Enabled)
+        asset_prep::prepare_project(dir, &asset_prep::Compressors::canonical())
             .expect("prepare project")
             .assets
             .into_iter()
@@ -2719,7 +2722,7 @@ mod tests {
         // "compression didn't help" one.
         assert_eq!(canister["/index.html"].encodings.len(), 3);
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         for key in project.keys() {
@@ -2751,7 +2754,7 @@ mod tests {
         )
         .unwrap();
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         assert!(
@@ -2777,7 +2780,7 @@ mod tests {
         let canister = canister_view(dir_str);
         std::fs::write(dir.path().join("index.html"), b"<h1>new</h1>").unwrap();
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         assert!(was_encoded(&project, "/index.html"));
@@ -2810,7 +2813,7 @@ mod tests {
             .encodings
             .retain(|e| e.encoding != Encoding::Brotli);
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         assert!(was_encoded(&project, "/index.html"));
@@ -2837,7 +2840,7 @@ mod tests {
         let canister = canister_view(dir_str);
         assert_eq!(canister["/index.html"].encodings.len(), 3);
 
-        let plan = plan_project(dir_str, Compression::Disabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::none()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         let ops = build_operations(
@@ -2879,7 +2882,7 @@ mod tests {
             "neither compressor beats identity on this content"
         );
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         assert!(
@@ -2910,7 +2913,7 @@ mod tests {
             details.encodings.retain(|e| e.encoding.is_identity());
         }
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         let ops = build_operations(
@@ -2930,7 +2933,7 @@ mod tests {
         let dir_str = dir.path().to_str().unwrap();
 
         let canister = canister_view(dir_str);
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
 
         // Same inputs, same canister — only the compressor agreement differs.
         let trusted = diff_assets(plan.assets, &canister, true).unwrap();
@@ -2938,7 +2941,7 @@ mod tests {
             assert!(!was_encoded(&trusted, key));
         }
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let untrusted = diff_assets(plan.assets, &canister, false).unwrap();
         for key in untrusted.keys() {
             assert!(
@@ -2973,7 +2976,7 @@ mod tests {
             &[dir_str.to_string()],
             &Principal::anonymous().to_text(),
             None,
-            Compression::Enabled,
+            &Compressors::canonical(),
         )
         .expect("sync should succeed");
 
@@ -3002,7 +3005,7 @@ mod tests {
         let dir_str = dir.path().to_str().unwrap();
 
         let canister = canister_view(dir_str);
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, false).unwrap();
 
         let ops = build_operations(
@@ -3015,6 +3018,69 @@ mod tests {
         assert_eq!(count_op(&ops, "CreateAsset"), 0);
     }
 
+    /// The case only the canary can catch, and the reason it is consulted before
+    /// the per-asset diff at all.
+    ///
+    /// A registry that keeps both slots but tunes a compressor — brotli q9 instead
+    /// of q11, say — produces the *same encoding set* over the *same identity
+    /// bytes*, so every per-asset check in `current_encodings` passes and the diff
+    /// would happily keep the canister's q11 bytes. Mixed q11/q9 state matching no
+    /// registry's state hash, with nothing anywhere reporting a problem. What
+    /// prevents it is the fingerprint differing, which drops `compressors_agree`
+    /// and re-prepares everything.
+    #[test]
+    fn retuned_compressor_is_caught_only_by_the_canary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), compressible_html()).unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        // The canister holds a canonical (q11) sync.
+        let canister = canister_view(dir_str);
+
+        // Stands in for a differently-tuned brotli: same slot, deterministic,
+        // smaller than identity (so it is kept), different bytes from q11. Only
+        // those three properties matter here, and using a stand-in keeps this
+        // crate free of any compressor dependency — which is the point of
+        // injecting them.
+        let retuned = Compressors {
+            gzip: Compressors::canonical().gzip,
+            br: Some(std::sync::Arc::new(|bytes: &[u8]| {
+                Ok(bytes[..bytes.len() / 2].to_vec())
+            })),
+        };
+
+        // The fingerprints differ — this is the only signal available, since the
+        // encoding set and identity hash are identical.
+        assert_ne!(
+            asset_prep::canary::fingerprint(&retuned).unwrap(),
+            asset_prep::canary::fingerprint(&Compressors::canonical()).unwrap(),
+        );
+
+        // With the mismatch honoured, every asset is re-encoded...
+        let plan = plan_project(dir_str, &retuned).unwrap();
+        let project = diff_assets(plan.assets, &canister, false).unwrap();
+        assert!(was_encoded(&project, "/index.html"));
+
+        // ...and the new bytes really do differ, so this is a re-upload and not
+        // just wasted CPU: the diff must emit content for the brotli encoding.
+        let ops = build_operations(
+            &project,
+            &canister,
+            &plan.redirect_rules,
+            &plan.redirect_rules,
+        );
+        assert!(
+            count_op(&ops, "SetAssetContent") > 0,
+            "retuned brotli must replace the stored encoding"
+        );
+
+        // The trap this guards: had the canary agreed, the q11 bytes would have
+        // been adopted untouched and nothing would have been uploaded.
+        let plan = plan_project(dir_str, &retuned).unwrap();
+        let reused = diff_assets(plan.assets, &canister, true).unwrap();
+        assert!(!was_encoded(&reused, "/index.html"));
+    }
+
     #[test]
     fn content_type_drift_forces_re_encode() {
         let dir = tempfile::tempdir().unwrap();
@@ -3024,7 +3090,7 @@ mod tests {
         let mut canister = canister_view(dir_str);
         canister.get_mut("/index.html").unwrap().content_type = "text/plain".to_string();
 
-        let plan = plan_project(dir_str, Compression::Enabled).unwrap();
+        let plan = plan_project(dir_str, &Compressors::canonical()).unwrap();
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         assert!(was_encoded(&project, "/index.html"));

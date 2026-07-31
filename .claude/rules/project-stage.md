@@ -25,9 +25,9 @@ The compatibility contract is the one the release machinery already encodes — 
   fields (`dir`, `build`, `presync`, `metadata`) live in users' committed project
   files. Renaming or removing one breaks those projects — treat the recipe schema like
   any other released API.
-- **Changing asset preparation is expensive, not unsafe.** The compressor settings
-  (gzip level, brotli quality/window), the compressor *implementations* (a `brotli`
-  or `flate2` bump, or a different `flate2` backend selected by feature
+- **Changing asset preparation is expensive, not unsafe.** `Compressors::canonical()`
+  (gzip level, brotli quality/window), the compressor *implementations* behind it (a
+  `brotli` or `flate2` bump, or a different `flate2` backend selected by feature
   unification), and `MAX_CHUNK_SIZE` all change the bytes a sync stores. Nothing
   needs freezing to stay correct: `asset-prep`'s compression canary detects a change
   and makes the next sync re-prepare and re-upload every asset, and the
@@ -35,6 +35,18 @@ The compatibility contract is the one the release machinery already encodes — 
   already version-scoped. But each change costs every deployed canister one full
   re-upload and invalidates previously-published state hashes, so make it
   deliberately — ideally on a series bump — rather than as a drive-by `cargo update`.
+  The same applies to the canary's own input or fold: changing either forces the
+  same full re-upload everywhere.
+- **The compressors themselves are the *caller's* choice, and only the canonical
+  registry is ours to keep stable.** `asset-prep::Compressors` is injected by
+  whoever drives the sync; `sync-plugin` always injects
+  `Compressors::canonical()`, which is what makes every `icp deploy` reproducible
+  by `state-hash-cli`. A native embedder (e.g. Caffeine via `sync-agent`) may
+  supply its own — cheaper brotli, no gzip, none at all — and owns the
+  consequences: its canisters match no `state-hash` line, and its functions must be
+  pure or the sync re-uploads everything every time. Don't add modes, profiles, or
+  quality knobs on top of this seam; the point of the injection is that we curate
+  exactly one registry.
 
 Two things do **not** change:
 

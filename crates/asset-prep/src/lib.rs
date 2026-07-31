@@ -15,8 +15,14 @@
 //! Because both sides build the canonical manifest from this one code path, the
 //! canister's stored-state hash and the verifier's `dist/`-derived hash agree by
 //! construction (the cross-implementation test pins it).
+//!
+//! The one thing this crate does *not* decide is how content is compressed: the
+//! caller supplies a [`Compressors`] registry. Both callers above inject
+//! [`Compressors::canonical`], which is what makes their hashes comparable; a
+//! platform embedding `sync-agent` may inject its own.
 
 pub mod canary;
+pub mod compressors;
 pub mod content;
 pub mod glob;
 pub mod headers;
@@ -25,10 +31,12 @@ pub mod not_found;
 pub mod redirects;
 pub mod scan;
 
+pub use compressors::{CompressFn, Compressors};
+
 mod prepare;
 pub use prepare::{
-    Compression, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, PreparedEncoding,
-    PreparedProject, ProjectPlan, manifest, plan_project, prepare_project, state_hash_for_dir,
+    MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, PreparedEncoding, PreparedProject,
+    ProjectPlan, manifest, plan_project, prepare_project, state_hash_for_dir,
 };
 
 /// Strips a Netlify-style trailing comment from a single line of a `_redirects`

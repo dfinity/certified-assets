@@ -27,7 +27,7 @@ fn verifier_hash_matches_canister_after_deploy() {
     let dist = dist.to_str().expect("dist path is utf-8");
 
     // `icp deploy` always uses the canonical (compressed) preparation.
-    let verifier_hash = asset_prep::state_hash_for_dir(dist, asset_prep::Compression::Enabled)
+    let verifier_hash = asset_prep::state_hash_for_dir(dist, &asset_prep::Compressors::canonical())
         .expect("compute state hash from dist");
 
     assert_eq!(
@@ -57,7 +57,7 @@ fn verifier_hash_still_matches_after_a_partial_redeploy() {
 
     let dist = project.join("dist");
     let dist = dist.to_str().expect("dist path is utf-8");
-    let verifier_hash = asset_prep::state_hash_for_dir(dist, asset_prep::Compression::Enabled)
+    let verifier_hash = asset_prep::state_hash_for_dir(dist, &asset_prep::Compressors::canonical())
         .expect("compute state hash from dist");
 
     assert_eq!(

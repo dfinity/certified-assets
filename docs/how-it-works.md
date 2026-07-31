@@ -67,15 +67,19 @@ Reusing what's already stored assumes the compressors still behave the same way,
 that isn't something a version number can promise — compressed output isn't part of
 a library's published interface. So each sync also records a small fingerprint of how
 its compressors actually behaved. If a later deploy's fingerprint differs — a
-dependency update, a different backend — it stops trusting the shortcut and
-re-prepares every asset, restoring the canister to exactly what the new build
-produces.
+dependency update, a different backend, or a deploy that simply used different
+compressors — it stops trusting the shortcut and re-prepares every asset, restoring
+the canister to exactly what the new build produces.
 
-Compression is on for every `icp deploy`. A platform building on these crates can
-turn it off for deploys nobody browses — a preview opened once by its author — which
-removes the compression pass and uploads less, at the cost of much larger transfers
-for anyone who does visit. Switching a canister between the two needs no cleanup:
-turning compression on uploads the missing encodings, turning it off removes them.
+Every `icp deploy` uses the same compressors: gzip at its default level and Brotli at
+quality 11, the settings the `state-hash` verifier reproduces. A platform building on
+these crates supplies its own — it can tune Brotli down for short-lived preview
+canisters, drop gzip, or store nothing but the uncompressed copy for deploys nobody
+browses. That is a trade only the deploying platform can make: it keeps the saved
+seconds while the larger transfers go to whoever visits the site. Changing them needs
+no cleanup — the fingerprint above catches it, and the next sync re-prepares the
+canister to match — but a canister prepared with anything other than the standard
+settings won't match what `state-hash` computes.
 
 ## ETag and conditional requests
 

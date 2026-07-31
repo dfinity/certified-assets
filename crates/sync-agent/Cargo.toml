@@ -11,8 +11,16 @@ publish.workspace = true
 # Kept out of `sync-core` so that crate stays lean and WASI-free; this is what a
 # native client (e.g. the Caffeine uploader) depends on to run uploads
 # concurrently.
+
+# Passthrough for the canonical compressor registry. On by default, which is what
+# makes `SyncOpts::default()` exist; a client injecting its own compressors can
+# set `default-features = false` and link neither `brotli` nor `flate2`.
+[features]
+default = ["canonical-compressors"]
+canonical-compressors = ["sync-core/canonical-compressors"]
+
 [dependencies]
-sync-core = { path = "../sync-core" }
+sync-core = { path = "../sync-core", default-features = false }
 candid.workspace = true
 anyhow.workspace = true
 ic-agent.workspace = true
