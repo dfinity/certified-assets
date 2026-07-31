@@ -13,11 +13,20 @@ publish.workspace = true
 # the standalone `state-hash-cli` verifier (which depends on this, NOT sync-core,
 # to keep its trusted surface small).
 
+# Compressors are injected by the caller (see `src/compressors.rs`), so the
+# compressor crates are only needed for `Compressors::canonical()` — the registry
+# `sync-plugin` and `state-hash-cli` inject. On by default so those two, and every
+# test that names canonical output, work out of the box; a native embedder that
+# brings its own compressors can set `default-features = false` and link neither.
+[features]
+default = ["canonical-compressors"]
+canonical-compressors = ["dep:brotli", "dep:flate2"]
+
 [dependencies]
 wire-types = { path = "../wire-types" }
 state-hash = { path = "../state-hash" }
-brotli.workspace = true
-flate2.workspace = true
+brotli = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 http.workspace = true
 mime.workspace = true
 mime_guess.workspace = true

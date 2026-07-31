@@ -1,12 +1,13 @@
-//! Loading and encoding asset content.
+//! Loading asset content and deciding whether it is worth compressing.
 //!
-//! Mirrors `ic-asset`'s `asset/content.rs` and `asset/content_encoder.rs`.
+//! *How* content is compressed is not here — it comes from the caller's
+//! [`Compressors`](crate::compressors::Compressors) registry. This module only
+//! reads bytes, resolves a media type, and answers whether a compressor should be
+//! offered the asset at all.
 
 use mime::Mime;
 use sha2::{Digest, Sha256};
-use std::io::Write;
 use std::path::Path;
-use wire_types::Encoding;
 
 #[derive(Clone, Debug)]
 pub struct Content {
@@ -23,35 +24,6 @@ impl Content {
         Ok(Content { data, media_type })
     }
 
-    pub fn encode(&self, encoding: Encoding) -> Result<Content, String> {
-        match encoding {
-            Encoding::Identity => Ok(self.clone()),
-            Encoding::Gzip => {
-                let mut e =
-                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-                e.write_all(&self.data).map_err(|e| format!("gzip: {e}"))?;
-                let data = e.finish().map_err(|e| format!("gzip finish: {e}"))?;
-                Ok(Content {
-                    data,
-                    media_type: self.media_type.clone(),
-                })
-            }
-            Encoding::Brotli => {
-                let mut compressed = Vec::new();
-                {
-                    let mut w = brotli::CompressorWriter::new(&mut compressed, 4096, 11, 22);
-                    w.write_all(&self.data)
-                        .map_err(|e| format!("brotli: {e}"))?;
-                    w.flush().map_err(|e| format!("brotli flush: {e}"))?;
-                }
-                Ok(Content {
-                    data: compressed,
-                    media_type: self.media_type.clone(),
-                })
-            }
-        }
-    }
-
     pub fn sha256(&self) -> Vec<u8> {
         Sha256::digest(&self.data).to_vec()
     }
@@ -59,9 +31,13 @@ impl Content {
 
 /// Whether content of this media type is worth compressing.
 ///
-/// We deliberately support a small, curated set of encodings (Identity, Gzip,
-/// Brotli) rather than the full IANA list — trading a little bandwidth for
-/// implementation simplicity and bounded canister storage. Compressible:
+/// This is the *policy* half of encoding selection and stays fixed here; the
+/// caller chooses which compressors exist, not which media types they apply to.
+/// A compressible asset is offered to every compressor the caller set; whether
+/// the result is kept is decided afterwards by a size check against identity —
+/// see `PlannedAsset::encode`.
+///
+/// Compressible:
 /// - all `text/*` (html, css, plain, markdown, csv, …);
 /// - JavaScript and WebAssembly;
 /// - structured types with a `+json` / `+xml` suffix — this one rule catches
@@ -72,7 +48,7 @@ impl Content {
 /// Already-compressed formats are left alone: images/audio/video, archives, and
 /// `font/woff` + `font/woff2` (which embed their own compression — `woff2` is
 /// itself Brotli, so re-compressing only wastes space and CPU).
-fn is_compressible(media_type: &Mime) -> bool {
+pub fn is_compressible(media_type: &Mime) -> bool {
     let ty = media_type.type_();
     let subtype = media_type.subtype();
 
@@ -93,38 +69,15 @@ fn is_compressible(media_type: &Mime) -> bool {
         || matches!(subtype.as_str(), "wasm" | "vnd.ms-fontobject")
 }
 
-/// The encodings to *attempt* for a given media type: every compressible asset
-/// gets Brotli and Gzip alongside the always-present uncompressed Identity copy;
-/// everything else is stored as Identity only. Whether a produced compressed
-/// encoding is actually kept is decided afterwards by a size check against
-/// Identity — see `prepare_content_asset`.
-pub fn encoders_for(media_type: &Mime) -> Vec<Encoding> {
-    if is_compressible(media_type) {
-        vec![Encoding::Identity, Encoding::Gzip, Encoding::Brotli]
-    } else {
-        vec![Encoding::Identity]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
 
-    fn content(data: &[u8]) -> Content {
-        Content {
-            data: data.to_vec(),
-            media_type: mime::TEXT_PLAIN,
-        }
-    }
-
-    // --- is_compressible / encoders_for ---
+    // --- is_compressible ---
 
     fn mime_of(s: &str) -> Mime {
         s.parse().unwrap()
     }
-
-    const ALL_THREE: [Encoding; 3] = [Encoding::Identity, Encoding::Gzip, Encoding::Brotli];
 
     #[test]
     fn compressible_types() {
@@ -147,9 +100,7 @@ mod tests {
             "font/otf",
             "application/vnd.ms-fontobject",
         ] {
-            let m = mime_of(s);
-            assert!(is_compressible(&m), "{s} should be compressible");
-            assert_eq!(encoders_for(&m), ALL_THREE.to_vec(), "{s}");
+            assert!(is_compressible(&mime_of(s)), "{s} should be compressible");
         }
     }
 
@@ -166,114 +117,21 @@ mod tests {
             "application/zip",
             "application/octet-stream",
         ] {
-            let m = mime_of(s);
-            assert!(!is_compressible(&m), "{s} should NOT be compressible");
-            assert_eq!(encoders_for(&m), vec![Encoding::Identity], "{s}");
-        }
-    }
-
-    // --- encode ---
-
-    #[test]
-    fn encode_identity_passthrough() {
-        let c = content(b"hello world");
-        let out = c.encode(Encoding::Identity).unwrap();
-        assert_eq!(out.data, b"hello world");
-    }
-
-    #[test]
-    fn encode_gzip_round_trip() {
-        use flate2::read::GzDecoder;
-
-        let original = b"hello gzip world, hello gzip world";
-        let c = content(original);
-        let compressed = c.encode(Encoding::Gzip).unwrap();
-
-        let mut decoder = GzDecoder::new(compressed.data.as_slice());
-        let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed).unwrap();
-        assert_eq!(decompressed, original);
-    }
-
-    #[test]
-    fn encode_brotli_round_trip() {
-        let original = b"hello brotli world, hello brotli world";
-        let c = content(original);
-        let compressed = c.encode(Encoding::Brotli).unwrap();
-
-        let mut decompressed = Vec::new();
-        brotli::Decompressor::new(compressed.data.as_slice(), 4096)
-            .read_to_end(&mut decompressed)
-            .unwrap();
-        assert_eq!(decompressed, original);
-    }
-
-    // --- golden vectors ---
-    //
-    // The compressors' *output bytes*, pinned. Nothing in the compressor crates
-    // promises these: compressed output isn't part of a published API, so a
-    // semver-compatible bump may re-tune heuristics, and `flate2`'s DEFLATE
-    // bytes depend on which backend feature unification selected. RFC 1951 and
-    // RFC 7932 don't settle it either — they specify decoders.
-    //
-    // Changing these bytes is legal but expensive: every deployed canister
-    // re-uploads every compressible asset on its next sync, and every
-    // previously-published state hash stops matching. So this fires at PR time,
-    // before anything ships. The canary (`crate::canary`) covers the other
-    // window — a *deploy* whose compressors differ from the canister's,
-    // including builds CI never sees.
-    //
-    // **If this fails**: something changed how we compress. Check for a
-    // dependency bump (`brotli`, `flate2`, `miniz_oxide`), a `flate2` backend
-    // feature pulled in by another crate, or an edit to `encode` above. If the
-    // change is intended, update the goldens here and in
-    // `canary::fingerprint_is_pinned`, and expect the re-uploads.
-
-    /// A fixed input with enough structure for both compressors to make real
-    /// choices — a uniform run would survive almost any heuristic change.
-    fn golden_input() -> Vec<u8> {
-        let mut out = Vec::new();
-        for i in 0..256 {
-            out.extend_from_slice(
-                format!("line {i}: the quick brown fox jumps over it\n").as_bytes(),
+            assert!(
+                !is_compressible(&mime_of(s)),
+                "{s} should NOT be compressible"
             );
         }
-        out
-    }
-
-    fn digest_of(data: &[u8]) -> [u8; 32] {
-        Sha256::digest(data).into()
-    }
-
-    #[test]
-    fn gzip_output_is_pinned() {
-        let encoded = content(&golden_input()).encode(Encoding::Gzip).unwrap();
-        assert_eq!(encoded.data.len(), 730, "gzip output length drifted");
-        assert_eq!(
-            digest_of(&encoded.data),
-            [
-                53, 21, 232, 48, 211, 165, 56, 190, 113, 46, 204, 53, 164, 16, 135, 245, 158, 67,
-                167, 35, 218, 133, 12, 150, 25, 243, 215, 140, 95, 197, 49, 211,
-            ],
-            "gzip output bytes drifted"
-        );
-    }
-
-    #[test]
-    fn brotli_output_is_pinned() {
-        let encoded = content(&golden_input()).encode(Encoding::Brotli).unwrap();
-        assert_eq!(encoded.data.len(), 353, "brotli output length drifted");
-        assert_eq!(
-            digest_of(&encoded.data),
-            [
-                212, 217, 148, 219, 167, 195, 250, 83, 46, 171, 21, 217, 14, 42, 139, 156, 216,
-                254, 76, 185, 100, 97, 88, 156, 47, 215, 255, 52, 180, 230, 245, 5,
-            ],
-            "brotli output bytes drifted"
-        );
     }
 
     // --- sha256 ---
+
+    fn content(data: &[u8]) -> Content {
+        Content {
+            data: data.to_vec(),
+            media_type: mime::TEXT_PLAIN,
+        }
+    }
 
     #[test]
     fn sha256_deterministic() {

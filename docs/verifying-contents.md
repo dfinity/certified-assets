@@ -42,15 +42,15 @@ that produce the served directory).
 
    ```sh
    state-hash ./dist
-   # compressed    8150a65e854b9bbb…  (64 hex chars)
-   # uncompressed  3f0c1d92ab77e410…
+   # 8150a65e854b9bbb…  (64 hex chars, and nothing else)
    ```
 
-   Two hashes, because a deploy either stores compressed encodings alongside the
-   uncompressed copy or doesn't, and the same directory hashes differently either
-   way. `icp deploy` always produces the `compressed` form; the `uncompressed`
-   form comes from a platform that deployed with compression turned off (see
-   [how it works](how-it-works.md)). A canister matches exactly one of the two.
+   This is the hash of the preparation `icp deploy` produces. A platform building
+   on these crates supplies its own compressors (see
+   [how it works](how-it-works.md)) — a lower Brotli quality to make short-lived
+   preview deploys cheaper, say, or none at all — and its canisters won't match
+   this value. Verifying those is between that platform and its users; the tool
+   deliberately doesn't guess at which settings someone else might have used.
 
 3. **Read the canister's hash.** `state_hash` is a public, unguarded method — and
    an *update* call, so the reply is consensus-backed and trustworthy:
@@ -60,9 +60,16 @@ that produce the served directory).
    # (blob "\81\50\a6\5e…")
    ```
 
-4. **Compare.** If the canister's hash equals either of the two you computed, it
-   serves exactly the build you reproduced from source. If it matches neither, the
-   served content, headers, or redirects do not match that source.
+4. **Compare.** If the canister's hash equals the one you computed, it serves
+   exactly the build you reproduced from source. If it doesn't, either the served
+   content, headers, or redirects do not match that source — or it was deployed
+   with compressors this tool doesn't know about (see step 2).
+
+   A match needs no further checking of *how* the canister was synced. The hash
+   covers every stored encoding by its own hash, so matching it means the canister
+   holds exactly the bytes this tool prepared — which is what "prepared with the
+   standard compressors" means. There is no separate step, and nothing to take on
+   the operator's word.
 
 The deploy also prints a hash in the `icp deploy` / sync result (`canister reports
 state hash <hex>`). That value comes back from the canister on the call that
@@ -81,8 +88,11 @@ parameters baked into the hash:
   RFC 7932 and RFC 1951 specify *decoders*, so those settings don't determine the
   bytes: a different encoder — or a different version of the same one — may emit
   a different valid stream. That is why the verifier reuses this project's
-  preparation code rather than reimplementing it, and why the `uncompressed`
-  hash, which involves no compressor at all, is the more durable of the two.
+  preparation code rather than reimplementing it, and why a matching version
+  matters more here than for anything else in this list. These are the settings
+  `sync-plugin` injects, so they are the settings behind every `icp deploy`; a
+  program embedding `sync-agent` supplies its own compressors and owns its own
+  verification story.
 - **Chunk boundary** — `MAX_CHUNK_SIZE` (1,900,000 bytes). Per-chunk hashes for
   large assets depend on where chunks split.
 - **Byte format** — a versioned, length-prefixed, domain-separated SHA-256

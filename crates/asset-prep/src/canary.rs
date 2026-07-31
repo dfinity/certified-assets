@@ -1,38 +1,51 @@
-//! A fingerprint of *how this build compresses*, used to make lazy encoding safe.
+//! A fingerprint of *how a sync compresses*, used to make lazy encoding safe.
 //!
 //! `sync-core` skips encoding an asset whose uncompressed hash the canister
 //! already holds, inferring that the stored compressed encodings are the ones
-//! this build would produce. That inference is only sound while the compressors
-//! behave identically — and nothing guarantees they will. Compressed output is
-//! not part of a crate's API surface, so a semver-compatible `brotli` bump may
-//! legally re-tune its heuristics; `flate2`'s DEFLATE bytes depend on which
-//! backend feature unification selected; and neither is fixed by a
-//! specification (RFC 7932 and RFC 1951 define *decoders*).
+//! this sync's compressors would produce. That inference is only sound while the
+//! compressors behave identically — and nothing guarantees they will. The
+//! compressors are supplied by the caller (see [`Compressors`]), so they can
+//! change simply because a different program ran the sync; and even for a fixed
+//! registry, compressed output is not part of a crate's API surface, so a
+//! semver-compatible `brotli` bump may legally re-tune its heuristics,
+//! `flate2`'s DEFLATE bytes depend on which backend feature unification
+//! selected, and neither is fixed by a specification (RFC 7932 and RFC 1951
+//! define *decoders*).
 //!
-//! So instead of freezing those dependencies by convention and hoping nobody
-//! bumps them, the sync records what its compressors actually did. The canary is
-//! the hash of a frozen input compressed by *this* build; the canister stores the
-//! value written alongside its assets. A mismatch means "the compressors moved",
-//! and the sync falls back to re-preparing everything eagerly — which is exactly
-//! the pre-lazy-encoding behaviour, so the canister re-converges on its own.
+//! So instead of pinning that down by convention and hoping, the sync records
+//! what its compressors actually did. The canary is the hash of a frozen input
+//! run through the registry in use; the canister stores the value written
+//! alongside its assets. A mismatch means "the compressors moved", and the sync
+//! falls back to re-preparing everything eagerly — which is exactly the
+//! pre-lazy-encoding behaviour, so the canister re-converges on its own.
+//!
+//! Because it fingerprints *what the injected functions produce*, it needs no
+//! knowledge of them: swapping brotli's quality, dropping gzip, or supplying a
+//! different crate entirely all show up here, and each costs one full re-upload
+//! and nothing more.
 //!
 //! **This is detection, not proof.** Compressor behaviour is a function over all
 //! inputs and the canary samples it at one point, so a change that alters real
-//! bundles but not this input would slip through. [`INPUT`] is therefore built
+//! bundles but not this input would slip through. [`input`] is therefore built
 //! from deliberately varied material — long repeats, prose, structured text and
 //! incompressible noise — to exercise as many encoder decision paths as a few
 //! kilobytes can. What it catches reliably is what actually happens in practice:
-//! a version bump or a backend swap, both of which change essentially every
-//! output. A miss leaves the sync exactly where it would be with no canary at
-//! all, so this can only reduce the exposure, never add to it.
+//! a version bump, a backend swap, or a parameter change, all of which change
+//! essentially every output. A miss leaves the sync exactly where it would be
+//! with no canary at all, so this can only reduce the exposure, never add to it.
 //!
-//! [`INPUT`] is frozen: changing it changes every canister's canary and forces
+//! It also assumes each compressor is **pure** — the contract stated in
+//! [`Compressors`]. A non-deterministic one yields a fresh fingerprint every
+//! deploy, which costs a full re-upload each time but never stores wrong bytes.
+//!
+//! [`input`] is frozen: changing it changes every canister's canary and forces
 //! one full re-upload each. `input_is_frozen` guards it in CI.
+//!
+//! [`Compressors`]: crate::compressors::Compressors
 
 use sha2::{Digest, Sha256};
-use wire_types::Encoding;
 
-use crate::content::Content;
+use crate::compressors::Compressors;
 use crate::prepare::MAX_CHUNK_SIZE;
 
 /// Size of the canary input. Big enough to cross the encoders' internal block
@@ -84,28 +97,28 @@ fn input() -> Vec<u8> {
     out
 }
 
-/// This build's compression fingerprint: the hash of the frozen input under
-/// every compressor, folded together with the preparation constants that shape
-/// the stored form.
+/// This registry's compression fingerprint: the hash of the frozen input under
+/// every compressor it sets, folded together with which slots are set and the
+/// preparation constants that shape the stored form.
 ///
-/// Deliberately routed through [`Content::encode`] — the same call real assets
-/// take — so any change to how we compress is reflected here, not just changes
-/// in the underlying crates. `MAX_CHUNK_SIZE` is folded in because it decides
-/// the chunk layout a skipped asset's manifest entry depends on.
-pub fn fingerprint() -> Result<[u8; 32], String> {
-    let content = Content {
-        data: input(),
-        media_type: mime::APPLICATION_OCTET_STREAM,
-    };
+/// Deliberately routed through the caller's own functions — the same calls real
+/// assets take — so any change in how a sync compresses is reflected here.
+/// `MAX_CHUNK_SIZE` is folded in because it decides the chunk layout a skipped
+/// asset's manifest entry depends on, and the presence mask because an absent
+/// compressor must be structurally distinct from any bytes a present one could
+/// produce.
+pub fn fingerprint(compressors: &Compressors) -> Result<[u8; 32], String> {
+    let data = input();
 
     let mut hasher = Sha256::new();
-    hasher.update(b"certified-assets preparation canary v1");
+    hasher.update(b"certified-assets preparation canary v2");
     hasher.update((MAX_CHUNK_SIZE as u64).to_le_bytes());
-    for encoding in [Encoding::Gzip, Encoding::Brotli] {
-        let encoded = content.encode(encoding)?;
+    hasher.update([compressors.presence_bits()]);
+    for (encoding, compress) in compressors.present() {
+        let encoded = compress(&data)?;
         hasher.update(encoding.label().as_bytes());
-        hasher.update((encoded.data.len() as u64).to_le_bytes());
-        hasher.update(Sha256::digest(&encoded.data));
+        hasher.update((encoded.len() as u64).to_le_bytes());
+        hasher.update(Sha256::digest(&encoded));
     }
     Ok(hasher.finalize().into())
 }
@@ -145,46 +158,128 @@ mod tests {
         }
     }
 
-    /// The whole point: the fingerprint is stable for a fixed build, so an
+    /// An empty registry still has a well-defined fingerprint — no compressor
+    /// runs, but the preparation constants and the empty presence mask are folded
+    /// in, so switching away from it is detected like any other change.
+    #[test]
+    fn empty_registry_has_a_fingerprint() {
+        let none = Compressors::none();
+        assert_eq!(fingerprint(&none).unwrap(), fingerprint(&none).unwrap());
+    }
+}
+
+#[cfg(all(test, feature = "canonical-compressors"))]
+mod canonical_tests {
+    use super::*;
+    use crate::compressors::CompressFn;
+    use std::io::Write;
+    use std::sync::Arc;
+
+    /// The whole point: the fingerprint is stable for a fixed registry, so an
     /// unchanged toolchain never triggers a spurious re-upload.
     #[test]
     fn fingerprint_is_deterministic() {
-        assert_eq!(fingerprint().unwrap(), fingerprint().unwrap());
-    }
-
-    /// The fingerprint value itself, pinned — the CI half of the pair. A drift
-    /// here means the next deploy against any existing canister re-prepares and
-    /// re-uploads every asset, and every published state hash stops matching.
-    /// That is a legitimate thing to do, but not by accident: see the guidance
-    /// on the golden vectors in `content.rs`, which say *which* compressor moved.
-    #[test]
-    fn fingerprint_is_pinned() {
+        let canonical = Compressors::canonical();
         assert_eq!(
-            fingerprint().unwrap(),
-            [
-                245, 226, 54, 136, 144, 3, 34, 211, 233, 170, 231, 7, 236, 41, 240, 14, 77, 42,
-                176, 104, 40, 40, 127, 55, 244, 101, 113, 73, 212, 101, 239, 247,
-            ],
-            "compression fingerprint drifted"
+            fingerprint(&canonical).unwrap(),
+            fingerprint(&canonical).unwrap()
         );
     }
 
-    /// ...and it is actually sensitive to compressor output, not just to the
-    /// constants folded in around it.
+    /// The canonical registry's fingerprint value, pinned — the CI half of the
+    /// pair. A drift here means the next deploy against any existing canister
+    /// re-prepares and re-uploads every asset, and every published state hash
+    /// stops matching. That is a legitimate thing to do, but not by accident: see
+    /// the guidance on the golden vectors in `compressors.rs`, which say *which*
+    /// compressor moved.
+    #[test]
+    fn canonical_fingerprint_is_pinned() {
+        assert_eq!(
+            fingerprint(&Compressors::canonical()).unwrap(),
+            [
+                81, 121, 116, 25, 223, 32, 50, 163, 167, 90, 92, 196, 140, 74, 43, 211, 72, 62,
+                202, 218, 160, 199, 84, 130, 111, 120, 88, 162, 240, 68, 13, 18,
+            ],
+            "canonical compression fingerprint drifted"
+        );
+    }
+
+    fn brotli_at(quality: u32) -> CompressFn {
+        Arc::new(move |bytes: &[u8]| {
+            let mut out = Vec::new();
+            {
+                let mut w = brotli::CompressorWriter::new(&mut out, 4096, quality, 22);
+                w.write_all(bytes).map_err(|e| format!("brotli: {e}"))?;
+                w.flush().map_err(|e| format!("brotli flush: {e}"))?;
+            }
+            Ok(out)
+        })
+    }
+
+    /// The property the whole design rests on: a registry that produces
+    /// different bytes has a different fingerprint, so the sync re-prepares
+    /// instead of trusting stale stored encodings. Covers every axis a caller
+    /// can move — parameters, dropping a slot, and dropping both.
+    #[test]
+    fn different_registries_have_different_fingerprints() {
+        let canonical = Compressors::canonical();
+        let fp = |c: &Compressors| fingerprint(c).unwrap();
+
+        let tuned_quality = Compressors {
+            gzip: canonical.gzip.clone(),
+            br: Some(brotli_at(9)),
+        };
+        let no_gzip = Compressors {
+            gzip: None,
+            br: canonical.br.clone(),
+        };
+        let no_brotli = Compressors {
+            gzip: canonical.gzip.clone(),
+            br: None,
+        };
+
+        let all = [
+            ("canonical", fp(&canonical)),
+            ("brotli q9", fp(&tuned_quality)),
+            ("no gzip", fp(&no_gzip)),
+            ("no brotli", fp(&no_brotli)),
+            ("none", fp(&Compressors::none())),
+        ];
+        for (i, (label_a, a)) in all.iter().enumerate() {
+            for (label_b, b) in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "{label_a} and {label_b} must not collide");
+            }
+        }
+    }
+
+    /// ...and the fingerprint tracks the compressors' *output*, not just the
+    /// constants folded in around them: a registry whose functions differ only
+    /// in what they return still fingerprints differently.
     #[test]
     fn fingerprint_tracks_compressed_bytes() {
-        let content = Content {
-            data: input(),
-            media_type: mime::APPLICATION_OCTET_STREAM,
+        let same_slots_different_bytes = Compressors {
+            gzip: Compressors::canonical().gzip,
+            br: Some(Arc::new(|_: &[u8]| Ok(b"not really brotli".to_vec()))),
         };
-        let brotli = content.encode(Encoding::Brotli).unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(Sha256::digest(&brotli.data));
-        let independent: [u8; 32] = hasher.finalize().into();
-        // Not equal (different domain), but if brotli output were ignored the
-        // fingerprint could not depend on it at all — this asserts the encode
-        // path runs and produces bytes to hash.
-        assert!(!brotli.data.is_empty());
-        assert_ne!(fingerprint().unwrap(), independent);
+        assert_eq!(
+            same_slots_different_bytes.presence_bits(),
+            Compressors::canonical().presence_bits(),
+            "this test is only meaningful if the presence masks match"
+        );
+        assert_ne!(
+            fingerprint(&same_slots_different_bytes).unwrap(),
+            fingerprint(&Compressors::canonical()).unwrap()
+        );
+    }
+
+    /// A compressor that fails propagates its error rather than silently
+    /// fingerprinting as something else.
+    #[test]
+    fn compressor_error_propagates() {
+        let broken = Compressors {
+            gzip: Some(Arc::new(|_: &[u8]| Err("boom".to_string()))),
+            br: None,
+        };
+        assert_eq!(fingerprint(&broken), Err("boom".to_string()));
     }
 }

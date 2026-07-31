@@ -11,7 +11,9 @@ Tests are organized around these components. Each runs independently.
 
 **Add tests here when** you change how files are discovered, how MIME/encodings are chosen, how `_headers`/`_redirects` parse, how html-handling/404 rules are synthesised, or how content is chunked/hashed into a manifest.
 
-**Golden vectors live here** ([`content.rs`](../../crates/asset-prep/src/content.rs), [`canary.rs`](../../crates/asset-prep/src/canary.rs)): the compressors' output bytes and the canary fingerprint are pinned, because nothing in semver protects them and a drift silently costs every deployed canister a full re-upload. A failure there is a signal, not a nuisance — read the guidance above the vectors before updating them.
+**Golden vectors live here** ([`compressors.rs`](../../crates/asset-prep/src/compressors.rs), [`canary.rs`](../../crates/asset-prep/src/canary.rs)): the canonical compressors' output bytes and the canonical canary fingerprint are pinned, because nothing in semver protects them and a drift silently costs every deployed canister a full re-upload. A failure there is a signal, not a nuisance — read the guidance above the vectors before updating them.
+
+Compressors are **injected**, not fixed by the crate ([`compressors.rs`](../../crates/asset-prep/src/compressors.rs)), so tests that prepare anything need a registry to prepare with and are gated on the default `canonical-compressors` feature. `cargo build -p asset-prep --no-default-features` must still compile — that is the configuration a native embedder bringing its own compressors builds.
 
 ## State hash (`state-hash`)
 

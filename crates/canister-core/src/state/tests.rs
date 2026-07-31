@@ -921,7 +921,7 @@ mod hashing {
         write("_redirects", b"/old /new 301\n");
 
         let dir_str = dir.path().to_str().unwrap();
-        let prepared = asset_prep::prepare_project(dir_str, asset_prep::Compression::Enabled)
+        let prepared = asset_prep::prepare_project(dir_str, &asset_prep::Compressors::canonical())
             .expect("prepare project");
 
         let mut state = State::default();
@@ -930,7 +930,7 @@ mod hashing {
 
         let canister_hash = state.cached_state_hash();
         let verifier_hash =
-            asset_prep::state_hash_for_dir(dir_str, asset_prep::Compression::Enabled)
+            asset_prep::state_hash_for_dir(dir_str, &asset_prep::Compressors::canonical())
                 .expect("verifier hash");
         assert_eq!(
             hex::encode(canister_hash),

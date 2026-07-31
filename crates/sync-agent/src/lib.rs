@@ -19,7 +19,7 @@ use futures::stream::{self, StreamExt};
 use ic_agent::Agent;
 use sync_core::{Call, CallType, CanisterCall};
 
-pub use sync_core::Compression;
+pub use sync_core::{CompressFn, Compressors};
 
 /// A `sync-core` transport backed by a live `ic-agent`.
 ///
@@ -89,23 +89,33 @@ pub struct SyncOpts {
     /// Maximum number of update calls in flight at once. Defaults, via
     /// [`SyncOpts::default`], to 16 — matching the legacy `dfx` uploader's cap.
     pub max_in_flight: usize,
-    /// Whether to store compressed encodings alongside the uncompressed copy.
-    /// Defaults to [`Compression::Enabled`], the canonical preparation.
+    /// The compressors to store alongside the always-kept uncompressed copy.
     ///
-    /// This is the seam for a platform that deploys builds nobody browses —
-    /// previews, drafts, CI artifacts — where [`Compression::Disabled`] removes
-    /// the compression pass entirely and uploads ~20–25% fewer bytes. It is
-    /// deliberately not reachable from `icp deploy`: the saving goes to whoever
-    /// runs the deploy while the 5–6× larger transfers go to whoever visits the
-    /// site, so it is only a sound trade when the deployer knows nobody will.
-    pub compression: Compression,
+    /// This is the seam for a platform whose deploy profile differs from
+    /// `icp deploy`'s: tune brotli down for short-lived preview canisters, drop
+    /// gzip, or use [`Compressors::none`] for builds nobody browses. `icp deploy`
+    /// always injects [`Compressors::canonical`] — the saving from anything
+    /// cheaper goes to whoever runs the deploy while the larger transfers go to
+    /// whoever visits the site, so only a caller who knows both sides should pick.
+    ///
+    /// Whatever is set here must be **pure and deterministic**; see the contract
+    /// on [`Compressors`]. Changing it is free of bookkeeping — the sync detects
+    /// it and re-prepares the canister once — but a canister prepared with
+    /// anything other than the canonical registry cannot be verified with the
+    /// stock `state-hash` tool.
+    pub compressors: Compressors,
 }
 
+/// Defaults to [`Compressors::canonical`] — the same preparation `icp deploy`
+/// produces. Only available with the `canonical-compressors` feature (on by
+/// default); without it there is no registry to default *to*, so construct
+/// [`SyncOpts`] field by field.
+#[cfg(feature = "canonical-compressors")]
 impl Default for SyncOpts {
     fn default() -> Self {
         Self {
             max_in_flight: 16,
-            compression: Compression::default(),
+            compressors: Compressors::canonical(),
         }
     }
 }
@@ -133,7 +143,7 @@ pub async fn sync(
             max_in_flight: opts.max_in_flight.max(1),
         };
         // Native clients call the canister directly, so no proxy id.
-        sync_core::sync(&call, &[dir], &identity, None, opts.compression)
+        sync_core::sync(&call, &[dir], &identity, None, &opts.compressors)
     })
     .await
     .map_err(|e| anyhow::anyhow!("sync task panicked: {e}"))?

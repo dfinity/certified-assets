@@ -21,7 +21,7 @@ use candid::{CandidType, Decode, Encode, Principal};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
-use sync_core::{Call, CanisterCall, Compression, sync};
+use sync_core::{Call, CanisterCall, Compressors, sync};
 use wire_types::{AssetDetails, RedirectRule, UploadChunksArguments};
 
 // Wire-compatible mirrors of the response types defined privately in
@@ -153,7 +153,7 @@ fn run_scenario(label: &str, count: usize, size_bytes: usize) -> CallFingerprint
         &dirs,
         &Principal::anonymous().to_text(),
         None,
-        Compression::Enabled,
+        &Compressors::canonical(),
     );
     let elapsed = started.elapsed();
     result.expect("sync failed");

@@ -11,9 +11,17 @@ publish.workspace = true
 # `asset-prep`, shared with the offline verifier. sync-core keeps only the
 # canister-call orchestration (diff, upload, execute, auth), so its dependency
 # set is small.
+
+# Passthrough for `asset-prep`'s canonical compressor registry: on by default so
+# `sync-plugin` and the tests get `Compressors::canonical()`, off for a native
+# embedder that injects its own and wants neither compressor crate linked.
+[features]
+default = ["canonical-compressors"]
+canonical-compressors = ["asset-prep/canonical-compressors"]
+
 [dependencies]
 wire-types = { path = "../wire-types" }
-asset-prep = { path = "../asset-prep" }
+asset-prep = { path = "../asset-prep", default-features = false }
 candid.workspace = true
 hex.workspace = true
 serde.workspace = true

@@ -8,8 +8,9 @@
 //! 1. [`plan_project`] — scan, parse `_redirects`/`_headers`, synthesise rules,
 //!    load each asset and hash its *uncompressed* bytes. Cheap: a read and a
 //!    SHA-256 per file.
-//! 2. [`PlannedAsset::encode`] — gzip + brotli, chunk, hash. Expensive: brotli
-//!    q11 dominates a deploy's local cost.
+//! 2. [`PlannedAsset::encode`] — run the caller's [`Compressors`], chunk, hash.
+//!    Expensive: with the canonical registry, brotli q11 dominates a deploy's
+//!    local cost.
 //!
 //! Splitting them lets `sync-core` encode only the assets the canister doesn't
 //! already hold (see its `sync()`); [`prepare_project`] is the eager wrapper
@@ -24,7 +25,8 @@ use std::path::Path;
 
 use wire_types::{Encoding, RedirectRule, RulePattern};
 
-use crate::content::{Content, encoders_for};
+use crate::compressors::Compressors;
+use crate::content::{Content, is_compressible};
 use crate::headers::{self, HEADERS_FILENAME, HeaderRule};
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::{self, AssetSource};
@@ -78,35 +80,6 @@ pub struct PreparedProject {
     pub redirect_rules: Vec<RedirectRule>,
 }
 
-/// Whether a sync stores compressed encodings alongside the uncompressed copy.
-///
-/// A deploy-time choice, not a project setting: the same `dist/` is a valid
-/// input either way, and which one is right depends on what the deploy is *for*.
-/// The cost is asymmetric and lands on different people — compressing costs the
-/// deployer seconds, and not compressing costs every visitor a 5–6× larger text
-/// transfer for as long as the deploy is live.
-///
-/// [`Compression::Enabled`] is therefore the default everywhere, and the only
-/// mode `icp deploy` uses. [`Compression::Disabled`] exists for a platform that
-/// deploys throwaway builds nobody browses — a preview a developer opens once —
-/// where it removes the compression pass entirely *and* uploads ~20–25% fewer
-/// bytes, since only one copy of each asset goes over the wire.
-///
-/// Switching a canister between modes is safe and needs no bookkeeping: the diff
-/// derives the desired encoding set from the mode, so enabling compresses and
-/// uploads the missing encodings, and disabling unsets them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Compression {
-    /// Store gzip and brotli alongside identity, where they save bytes. The
-    /// canonical preparation, and the one `docs/verifying-contents.md` describes.
-    #[default]
-    Enabled,
-    /// Store only the uncompressed copy. No compressor runs, so preparation is
-    /// just reading and hashing — and nothing about the stored bytes depends on
-    /// a compressor implementation.
-    Disabled,
-}
-
 /// One asset discovered in `dist/`: loaded, its media type and headers
 /// resolved, and its **uncompressed** bytes hashed — but not yet encoded.
 ///
@@ -115,7 +88,8 @@ pub enum Compression {
 /// this exact content (same `content_type`, same `identity_sha256`, same
 /// encoding set) can skip [`encode`](PlannedAsset::encode) entirely, because
 /// every compressed encoding is a pure function of the identity bytes for a
-/// given build of this crate.
+/// given set of compressors (see [`Compressors`]'s purity contract, and
+/// [`crate::canary`] for how a caller detects that the set changed).
 #[derive(Clone, Debug)]
 pub struct PlannedAsset {
     pub key: String,
@@ -130,20 +104,21 @@ pub struct PlannedAsset {
     pub identity_len: u64,
     /// Loaded bytes + resolved media type, consumed by `encode`.
     content: Content,
-    /// Whether compressed encodings are wanted at all; fixed by the plan.
-    compression: Compression,
+    /// The compressors to run over it; fixed by the plan.
+    compressors: Compressors,
 }
 
 impl PlannedAsset {
-    /// The encodings preparation will *attempt* for this asset: Identity plus,
-    /// for compressible media types under [`Compression::Enabled`], Gzip and
-    /// Brotli. Whether a compressed encoding is actually kept is decided by the
-    /// size check in [`encode`](PlannedAsset::encode).
+    /// The encodings preparation will *attempt* for this asset: Identity, plus
+    /// one per compressor the caller set — but only for compressible media types.
+    /// Whether a compressed encoding is actually kept is decided by the size
+    /// check in [`encode`](PlannedAsset::encode).
     pub fn attempted_encodings(&self) -> Vec<Encoding> {
-        match self.compression {
-            Compression::Enabled => encoders_for(&self.content.media_type),
-            Compression::Disabled => vec![Encoding::Identity],
+        let mut encodings = vec![Encoding::Identity];
+        if is_compressible(&self.content.media_type) {
+            encodings.extend(self.compressors.present().map(|(encoding, _)| encoding));
         }
+        encodings
     }
 
     /// Whether any encoding will be stored as more than one chunk. Used to
@@ -156,20 +131,27 @@ impl PlannedAsset {
         self.identity_len > MAX_CHUNK_SIZE as u64
     }
 
-    /// The expensive half of preparation: encode each attempted encoding, keep a
-    /// compressed one only when it actually saves bytes, then chunk and hash
-    /// every kept encoding.
+    /// The expensive half of preparation: run each attempted encoding's
+    /// compressor, keep a compressed result only when it actually saves bytes,
+    /// then chunk and hash every kept encoding.
     pub fn encode(self) -> Result<PreparedAsset, String> {
         let mut encodings = Vec::new();
         for encoding in self.attempted_encodings() {
-            let encoded = self.content.encode(encoding)?;
+            // Identity is stored as-is; every other attempted encoding has a
+            // compressor, since `attempted_encodings` derives the set from them.
+            let data = match self.compressors.for_encoding(encoding) {
+                Some(compress) => compress(&self.content.data)?,
+                None => self.content.data.clone(),
+            };
             // Identity is always kept. A compressed encoding is only kept if it
             // actually saves bytes vs identity — otherwise storing it just wastes
-            // canister space.
-            if !encoding.is_identity() && encoded.data.len() >= self.content.data.len() {
+            // canister space. This also keeps identity the longest kept encoding,
+            // which `is_multichunk` relies on, whatever a caller's compressor
+            // returns.
+            if !encoding.is_identity() && data.len() >= self.content.data.len() {
                 continue;
             }
-            encodings.push(prepare_encoding(encoding, encoded.data));
+            encodings.push(prepare_encoding(encoding, data));
         }
 
         Ok(PreparedAsset {
@@ -196,11 +178,11 @@ pub struct ProjectPlan {
 /// uploads. `sync-core` uses the two phases separately so it can skip encoding
 /// assets the canister already holds; the `state-hash-cli` verifier calls this,
 /// since reproducing the manifest requires every encoding.
-pub fn prepare_project(dir: &str, compression: Compression) -> Result<PreparedProject, String> {
+pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedProject, String> {
     let ProjectPlan {
         assets,
         redirect_rules,
-    } = plan_project(dir, compression)?;
+    } = plan_project(dir, compressors)?;
 
     let assets = assets
         .into_iter()
@@ -220,7 +202,7 @@ pub fn prepare_project(dir: &str, compression: Compression) -> Result<PreparedPr
 /// Everything except encoding. Errors carry file paths / line numbers so
 /// misconfigurations are caught before any canister round-trip — and before any
 /// compression work.
-pub fn plan_project(dir: &str, compression: Compression) -> Result<ProjectPlan, String> {
+pub fn plan_project(dir: &str, compressors: &Compressors) -> Result<ProjectPlan, String> {
     let sources = scan::scan(dir)?;
     let user_rules = load_redirect_rules(dir)?;
 
@@ -246,10 +228,10 @@ pub fn plan_project(dir: &str, compression: Compression) -> Result<ProjectPlan, 
 
     let mut assets = Vec::with_capacity(sources.len() + 1);
     for source in sources {
-        assets.push(plan_asset(source, &header_rules, compression)?);
+        assets.push(plan_asset(source, &header_rules, compressors)?);
     }
     if not_found_plan.inject_branded_asset {
-        assets.push(plan_branded_404(&header_rules, compression)?);
+        assets.push(plan_branded_404(&header_rules, compressors)?);
     }
 
     // 3xx rules synthesize their own response (no target asset to inherit
@@ -266,7 +248,7 @@ pub fn plan_project(dir: &str, compression: Compression) -> Result<ProjectPlan, 
 fn plan_asset(
     source: AssetSource,
     header_rules: &[HeaderRule],
-    compression: Compression,
+    compressors: &Compressors,
 ) -> Result<PlannedAsset, String> {
     let mut content = Content::load(&source.path)?;
     // Apply a per-glob `Content-Type` override from `_headers` before deciding
@@ -279,7 +261,7 @@ fn plan_asset(
         source.key,
         content,
         header_rules,
-        compression,
+        compressors,
     ))
 }
 
@@ -289,7 +271,7 @@ fn plan_asset(
 /// `text/html`); its per-asset headers are still resolved from `_headers`.
 fn plan_branded_404(
     header_rules: &[HeaderRule],
-    compression: Compression,
+    compressors: &Compressors,
 ) -> Result<PlannedAsset, String> {
     let content = Content {
         data: not_found::DEFAULT_404_HTML.as_bytes().to_vec(),
@@ -301,7 +283,7 @@ fn plan_branded_404(
         not_found::ROOT_404_KEY.to_string(),
         content,
         header_rules,
-        compression,
+        compressors,
     ))
 }
 
@@ -311,7 +293,7 @@ fn plan_content_asset(
     key: String,
     content: Content,
     header_rules: &[HeaderRule],
-    compression: Compression,
+    compressors: &Compressors,
 ) -> PlannedAsset {
     PlannedAsset {
         content_type: content.media_type.to_string(),
@@ -320,7 +302,7 @@ fn plan_content_asset(
         identity_len: content.data.len() as u64,
         key,
         content,
-        compression,
+        compressors: compressors.clone(),
     }
 }
 
@@ -459,24 +441,30 @@ pub fn manifest(prepared: &PreparedProject) -> state_hash::Manifest {
     }
 }
 
-/// Convenience for the verifier: prepare `dir` under `compression` and return the
+/// Convenience for the verifier: prepare `dir` with `compressors` and return the
 /// resulting canonical state hash — the value to compare against a canister's
 /// `state_hash()`.
 ///
-/// The mode is an input because it changes the stored state, and therefore the
-/// hash: a canister deployed with [`Compression::Disabled`] holds only identity
+/// The registry is an input because it changes the stored state, and therefore
+/// the hash: a canister deployed with [`Compressors::none`] holds only identity
 /// encodings and hashes differently from the same `dist/` deployed with
-/// compression on. A verifier who doesn't know which was used can compute both
-/// and see which matches.
-pub fn state_hash_for_dir(dir: &str, compression: Compression) -> Result<[u8; 32], String> {
-    let prepared = prepare_project(dir, compression)?;
+/// compression on — and a canister deployed with compressors of its own matches
+/// neither. A verifier who doesn't know which was used can compute the ones they
+/// can reproduce and see whether any matches.
+pub fn state_hash_for_dir(dir: &str, compressors: &Compressors) -> Result<[u8; 32], String> {
+    let prepared = prepare_project(dir, compressors)?;
     Ok(manifest(&prepared).digest())
 }
 
-#[cfg(test)]
+// Preparation tests need compressors to prepare *with*, and the canonical
+// registry is the one whose output the assertions can name. `--no-default-features`
+// therefore compiles the crate but skips these.
+#[cfg(all(test, feature = "canonical-compressors"))]
 mod tests {
     use super::*;
+    use crate::compressors::CompressFn;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn write(dir: &TempDir, rel: &str, bytes: &[u8]) {
@@ -494,7 +482,7 @@ mod tests {
     #[test]
     fn empty_dir_injects_branded_404_and_catchall() {
         let dir = tempfile::tempdir().unwrap();
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         // A project shipping no root `404.html` gets the branded default injected
         // plus the `/* -> /404.html 404` catch-all (see `not_found`).
         assert_eq!(prepared.assets.len(), 1);
@@ -511,7 +499,7 @@ mod tests {
     fn ships_own_404_is_not_overridden() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "404.html", b"<h1>my 404</h1>");
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         // The user's own /404.html is used; no branded duplicate.
         let count_404 = prepared
             .assets
@@ -531,7 +519,7 @@ mod tests {
     fn single_html_asset_is_prepared_with_identity_encoding() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "index.html", b"<!DOCTYPE html><html></html>");
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
 
         let index = prepared
             .assets
@@ -558,7 +546,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A tiny PNG-typed file: not compressible, so identity only.
         write(&dir, "logo.png", &[0u8; 16]);
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         let logo = prepared
             .assets
             .iter()
@@ -573,10 +561,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "index.html", b"<!DOCTYPE html><h1>hi</h1>");
         write(&dir, "style.css", b"body{color:red}");
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         // The convenience helper equals manifest(&prepared).digest().
         assert_eq!(
-            state_hash_for_dir(&dir_str(&dir), Compression::Enabled).unwrap(),
+            state_hash_for_dir(&dir_str(&dir), &Compressors::canonical()).unwrap(),
             manifest(&prepared).digest()
         );
     }
@@ -593,14 +581,14 @@ mod tests {
 
     /// `PlannedAsset::is_multichunk` must agree with the encoded truth, since
     /// `sync-core` trusts it for assets it never encodes. `.bin` keeps this fast:
-    /// octet-stream is incompressible, so no brotli pass runs on the big file.
+    /// octet-stream is incompressible, so no compressor runs on the big file.
     #[test]
     fn planned_multichunk_matches_encoded_chunk_count() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "big.bin", &vec![0u8; MAX_CHUNK_SIZE + 1]);
         write(&dir, "small.bin", &vec![0u8; MAX_CHUNK_SIZE]);
 
-        let plan = plan_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let plan = plan_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         for planned in plan.assets {
             let expected = planned.is_multichunk();
             let prepared = planned.encode().unwrap();
@@ -613,16 +601,16 @@ mod tests {
         }
     }
 
-    // --- compression mode ---
+    // --- compressor registry ---
 
     #[test]
-    fn disabled_compression_keeps_only_identity() {
+    fn empty_registry_keeps_only_identity() {
         let dir = tempfile::tempdir().unwrap();
         // Repetitive enough that both compressors would beat identity, so the
         // absent encodings are a decision and not a size check.
         write(&dir, "index.html", "<p>hello</p>".repeat(200).as_bytes());
 
-        let prepared = prepare_project(&dir_str(&dir), Compression::Disabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::none()).unwrap();
         for asset in &prepared.assets {
             assert_eq!(
                 asset
@@ -636,23 +624,23 @@ mod tests {
             );
         }
 
-        let compressed = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let compressed = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         assert!(
             compressed.assets.iter().any(|a| a.encodings.len() > 1),
             "the same project with compression on must keep more encodings"
         );
     }
 
-    /// Identity content is identical either way — the mode only decides what is
-    /// stored *alongside* it. This is what makes flipping modes converge without
-    /// re-uploading unchanged uncompressed bytes.
+    /// Identity content is identical whatever the registry — it only decides what
+    /// is stored *alongside* it. This is what makes changing compressors converge
+    /// without re-uploading unchanged uncompressed bytes.
     #[test]
-    fn compression_mode_does_not_change_identity_content() {
+    fn registry_does_not_change_identity_content() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "index.html", b"<!DOCTYPE html><h1>hi</h1>");
 
-        let identity_of = |compression| {
-            let prepared = prepare_project(&dir_str(&dir), compression).unwrap();
+        let identity_of = |compressors: &Compressors| {
+            let prepared = prepare_project(&dir_str(&dir), compressors).unwrap();
             prepared
                 .assets
                 .iter()
@@ -667,20 +655,21 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            identity_of(Compression::Enabled),
-            identity_of(Compression::Disabled)
+            identity_of(&Compressors::canonical()),
+            identity_of(&Compressors::none())
         );
     }
 
-    /// The two modes must hash differently, or `state-hash`'s two-line output
-    /// couldn't tell a verifier which one a canister was deployed with.
+    /// The registry is part of what the state hash covers, which is why
+    /// `state-hash-cli` can only speak for the canonical one: a canister prepared
+    /// with different compressors is a different hash, not a near-miss.
     #[test]
-    fn compression_mode_changes_the_state_hash() {
+    fn registry_changes_the_state_hash() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "index.html", "<p>hello</p>".repeat(200).as_bytes());
         assert_ne!(
-            state_hash_for_dir(&dir_str(&dir), Compression::Enabled).unwrap(),
-            state_hash_for_dir(&dir_str(&dir), Compression::Disabled).unwrap()
+            state_hash_for_dir(&dir_str(&dir), &Compressors::canonical()).unwrap(),
+            state_hash_for_dir(&dir_str(&dir), &Compressors::none()).unwrap()
         );
     }
 
@@ -694,8 +683,8 @@ mod tests {
         write(&dir, "logo.png", &[0u8; 16]);
         write(&dir, "_headers", b"/*\n  X-Frame-Options: DENY\n");
 
-        let plan = plan_project(&dir_str(&dir), Compression::Enabled).unwrap();
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let plan = plan_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         assert_eq!(plan.redirect_rules, prepared.redirect_rules);
         assert_eq!(plan.assets.len(), prepared.assets.len());
 
@@ -712,18 +701,74 @@ mod tests {
             assert_eq!(planned.identity_sha256, identity.sha256);
             assert_eq!(planned.identity_len, identity.content_len);
 
-            let mut attempted = planned.attempted_encodings();
-            attempted.sort_by_key(|e| e.label());
-            assert_eq!(attempted, encoders_for_sorted(&planned.content_type));
+            let compressible = is_compressible(&planned.content_type.parse().unwrap());
+            assert_eq!(
+                planned.attempted_encodings(),
+                if compressible {
+                    vec![Encoding::Identity, Encoding::Gzip, Encoding::Brotli]
+                } else {
+                    vec![Encoding::Identity]
+                },
+                "attempted set for {}",
+                planned.key
+            );
         }
     }
 
-    /// The encoding set `encoders_for` attempts, by media type, sorted — mirrors
-    /// the rule under test without reaching into `content`'s private state.
-    fn encoders_for_sorted(content_type: &str) -> Vec<Encoding> {
-        let mut encs = crate::content::encoders_for(&content_type.parse().unwrap());
-        encs.sort_by_key(|e| e.label());
-        encs
+    /// The attempted set is the intersection of "this media type is worth
+    /// compressing" and "the caller set this compressor" — the rule `sync-core`
+    /// diffs the canister's stored encoding set against.
+    #[test]
+    fn attempted_encodings_follow_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<h1>hi</h1>");
+        write(&dir, "logo.png", &[0u8; 16]);
+
+        let canonical = Compressors::canonical();
+        let cases = [
+            (
+                Compressors::canonical(),
+                vec![Encoding::Identity, Encoding::Gzip, Encoding::Brotli],
+            ),
+            (
+                Compressors {
+                    gzip: None,
+                    br: canonical.br.clone(),
+                },
+                vec![Encoding::Identity, Encoding::Brotli],
+            ),
+            (
+                Compressors {
+                    gzip: canonical.gzip.clone(),
+                    br: None,
+                },
+                vec![Encoding::Identity, Encoding::Gzip],
+            ),
+            (Compressors::none(), vec![Encoding::Identity]),
+        ];
+
+        for (compressors, expected_for_html) in cases {
+            let plan = plan_project(&dir_str(&dir), &compressors).unwrap();
+            let attempted = |key: &str| {
+                plan.assets
+                    .iter()
+                    .find(|a| a.key == key)
+                    .unwrap()
+                    .attempted_encodings()
+            };
+            assert_eq!(
+                attempted("/index.html"),
+                expected_for_html,
+                "html under {compressors:?}"
+            );
+            // An incompressible media type is offered to no compressor, whatever
+            // the registry holds.
+            assert_eq!(
+                attempted("/logo.png"),
+                vec![Encoding::Identity],
+                "png under {compressors:?}"
+            );
+        }
     }
 
     fn encodings_of(prepared: &PreparedProject, key: &str) -> Vec<Encoding> {
@@ -746,7 +791,7 @@ mod tests {
         // keep-if-smaller guard drops gzip (identity is always kept).
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "blob.txt", &(0u8..=255u8).collect::<Vec<u8>>());
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         let encs = encodings_of(&prepared, "/blob.txt");
         assert!(encs.contains(&Encoding::Identity), "identity always kept");
         assert!(
@@ -765,11 +810,66 @@ mod tests {
             "style.css",
             "body { color: red; }\n".repeat(500).as_bytes(),
         );
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         assert_eq!(
             encodings_of(&prepared, "/style.css"),
             vec![Encoding::Identity, Encoding::Gzip, Encoding::Brotli]
         );
+    }
+
+    /// A caller's compressor is subject to the same keep-if-smaller rule as the
+    /// canonical ones. This is what keeps identity the longest kept encoding —
+    /// the invariant `is_multichunk` reads off `identity_len` alone — no matter
+    /// what an injected function returns.
+    #[test]
+    fn caller_compressor_that_grows_content_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<h1>hi</h1>");
+
+        let bloat: CompressFn = Arc::new(|bytes: &[u8]| {
+            let mut out = bytes.to_vec();
+            out.extend_from_slice(&[0u8; 64]);
+            Ok(out)
+        });
+        let prepared = prepare_project(
+            &dir_str(&dir),
+            &Compressors {
+                gzip: Some(bloat),
+                br: None,
+            },
+        )
+        .unwrap();
+
+        for asset in &prepared.assets {
+            assert_eq!(
+                asset
+                    .encodings
+                    .iter()
+                    .map(|e| e.encoding)
+                    .collect::<Vec<_>>(),
+                vec![Encoding::Identity],
+                "{} should keep only identity",
+                asset.key
+            );
+        }
+    }
+
+    /// A failing compressor fails the preparation rather than silently storing
+    /// fewer encodings than the plan attempted.
+    #[test]
+    fn caller_compressor_error_fails_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<h1>hi</h1>");
+
+        let err = prepare_project(
+            &dir_str(&dir),
+            &Compressors {
+                gzip: Some(Arc::new(|_: &[u8]| Err("no thanks".to_string()))),
+                br: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, "no thanks");
     }
 
     #[test]
@@ -785,7 +885,7 @@ mod tests {
             b"/old /new 301\n/page /target.html 200\n",
         );
         write(&dir, "_headers", b"/*\n  X-Robots-Tag: noindex\n");
-        let prepared = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
 
         let r301 = prepared
             .redirect_rules
@@ -822,7 +922,7 @@ mod tests {
                 .as_ref(),
         );
 
-        let without = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let without = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         let did = without.assets.iter().find(|a| a.key == "/ic.did").unwrap();
         assert_eq!(did.content_type, "application/octet-stream");
         assert_eq!(encodings_of(&without, "/ic.did"), vec![Encoding::Identity]);
@@ -832,7 +932,7 @@ mod tests {
             "_headers",
             b"/*.did\n  Content-Type: text/plain; charset=utf-8\n",
         );
-        let with = prepare_project(&dir_str(&dir), Compression::Enabled).unwrap();
+        let with = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
         let did = with.assets.iter().find(|a| a.key == "/ic.did").unwrap();
         assert_eq!(did.content_type, "text/plain; charset=utf-8");
         assert!(encodings_of(&with, "/ic.did").contains(&Encoding::Gzip));
