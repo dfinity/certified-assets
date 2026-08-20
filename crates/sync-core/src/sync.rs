@@ -2514,6 +2514,54 @@ mod tests {
     }
 
     #[test]
+    fn sync_uses_the_explicit_content_type_in_create_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".well-known")).unwrap();
+        std::fs::write(
+            dir.path().join(".well-known/ic-architecture"),
+            br#"{"version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let mock = SyncMock::new();
+        mock.push_ok("version", wire_types::VERSION);
+        mock.push_ok("can_sync", true);
+        push_matching_canary(&mock);
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        mock.push_ok("execute_operations", ());
+
+        let content_types = ContentTypeOverrides::from([(
+            "/.well-known/ic-architecture".to_string(),
+            "application/json".parse().unwrap(),
+        )]);
+        sync_with_content_types(
+            &mock,
+            &[dir.path().to_str().unwrap().to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+            &Compressors::none(),
+            &content_types,
+        )
+        .unwrap();
+
+        let manifest = mock
+            .executed_operations()
+            .into_iter()
+            .find_map(|operation| match operation {
+                Operation::CreateAsset(arguments)
+                    if arguments.key == "/.well-known/ic-architecture" =>
+                {
+                    Some(arguments)
+                }
+                _ => None,
+            })
+            .expect("CreateAsset for the architecture manifest");
+        assert_eq!(manifest.content_type, "application/json");
+    }
+
+    #[test]
     fn synthesised_rules_win_over_user_rule_at_same_from() {
         // Synthesised rules are emitted **before** the user's `_redirects` —
         // synth must come first so html-handling Exact rules don't get
