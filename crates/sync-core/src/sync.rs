@@ -13,8 +13,8 @@ use crate::canister::{
     list_all_redirect_rules, preparation_canary, start_sync, version,
 };
 use asset_prep::{
-    Compressors, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, ProjectPlan,
-    plan_project,
+    Compressors, ContentTypeOverrides, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk,
+    ProjectPlan, plan_project_with_content_types,
 };
 use wire_types::{
     AssetDetails, ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding,
@@ -302,6 +302,25 @@ pub fn sync<C: CanisterCall>(
     proxy_canister_id: Option<&str>,
     compressors: &Compressors,
 ) -> Result<String, String> {
+    sync_with_content_types(
+        canister,
+        dirs,
+        identity_principal,
+        proxy_canister_id,
+        compressors,
+        &ContentTypeOverrides::new(),
+    )
+}
+
+/// Syncs assets while applying caller-declared media types by exact asset key.
+pub fn sync_with_content_types<C: CanisterCall>(
+    canister: &C,
+    dirs: &[String],
+    identity_principal: &str,
+    proxy_canister_id: Option<&str>,
+    compressors: &Compressors,
+    content_types: &ContentTypeOverrides,
+) -> Result<String, String> {
     // The assets plugin owns the URL space of its canister: every key starts at
     // `/`, `_redirects` lives at the project root, and the canister has no
     // notion of "merge two trees together". Multiple input directories would
@@ -352,7 +371,7 @@ pub fn sync<C: CanisterCall>(
     // `state-hash-cli` verifier (see `asset-prep`); the expensive half —
     // gzip/brotli — is deferred to `diff_assets`, which runs it only for assets
     // the canister doesn't already hold.
-    let plan = plan_project(dir, compressors)?;
+    let plan = plan_project_with_content_types(dir, compressors, content_types)?;
     println!("planned {} asset(s) from {dir}", plan.assets.len());
     if compressors.is_empty() {
         println!("no compressors set: storing uncompressed content only");
@@ -896,7 +915,7 @@ fn update_headers(
 mod tests {
     use super::*;
     use crate::{Call, CanisterCall};
-    use asset_prep::not_found;
+    use asset_prep::{not_found, plan_project};
     use candid::{CandidType, Decode, Principal};
     use sha2::{Digest, Sha256};
     use std::cell::RefCell;

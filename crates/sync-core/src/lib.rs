@@ -9,6 +9,6 @@
 mod canister;
 mod sync;
 
-pub use asset_prep::{CompressFn, Compressors};
+pub use asset_prep::{CompressFn, Compressors, ContentTypeOverrides};
 pub use canister::{Call, CallType, CanisterCall};
-pub use sync::sync;
+pub use sync::{sync, sync_with_content_types};

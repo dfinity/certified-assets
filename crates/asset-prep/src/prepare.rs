@@ -20,7 +20,9 @@
 //! the canister's stored-state hash and the verifier's `dist/`-derived hash
 //! agree by construction.
 
+use mime::Mime;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::Path;
 
 use wire_types::{Encoding, RedirectRule, RulePattern};
@@ -37,6 +39,12 @@ use crate::{html_handling, not_found};
 /// it, so a verifier must use a `state-hash-cli` built with this same value.
 /// Stays safely under the canister's ~2 MB ingress message limit.
 pub const MAX_CHUNK_SIZE: usize = 1_900_000;
+
+/// Exact asset keys mapped to caller-declared media types.
+///
+/// These declarations take precedence over both extension inference and
+/// `_headers` `Content-Type` rules.
+pub type ContentTypeOverrides = HashMap<String, Mime>;
 
 /// One chunk of a prepared encoding: its length and SHA-256 (folded into the
 /// state hash for multi-chunk encodings) plus the bytes themselves (consumed by
@@ -179,10 +187,20 @@ pub struct ProjectPlan {
 /// assets the canister already holds; the `state-hash-cli` verifier calls this,
 /// since reproducing the manifest requires every encoding.
 pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedProject, String> {
+    prepare_project_with_content_types(dir, compressors, &ContentTypeOverrides::new())
+}
+
+/// Prepares a project while applying caller-declared media types by exact asset
+/// key.
+pub fn prepare_project_with_content_types(
+    dir: &str,
+    compressors: &Compressors,
+    content_types: &ContentTypeOverrides,
+) -> Result<PreparedProject, String> {
     let ProjectPlan {
         assets,
         redirect_rules,
-    } = plan_project(dir, compressors)?;
+    } = plan_project_with_content_types(dir, compressors, content_types)?;
 
     let assets = assets
         .into_iter()
@@ -203,6 +221,16 @@ pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedP
 /// misconfigurations are caught before any canister round-trip — and before any
 /// compression work.
 pub fn plan_project(dir: &str, compressors: &Compressors) -> Result<ProjectPlan, String> {
+    plan_project_with_content_types(dir, compressors, &ContentTypeOverrides::new())
+}
+
+/// Plans a project while applying caller-declared media types by exact asset
+/// key.
+pub fn plan_project_with_content_types(
+    dir: &str,
+    compressors: &Compressors,
+    content_types: &ContentTypeOverrides,
+) -> Result<ProjectPlan, String> {
     let sources = scan::scan(dir)?;
     let user_rules = load_redirect_rules(dir)?;
 
@@ -228,7 +256,12 @@ pub fn plan_project(dir: &str, compressors: &Compressors) -> Result<ProjectPlan,
 
     let mut assets = Vec::with_capacity(sources.len() + 1);
     for source in sources {
-        assets.push(plan_asset(source, &header_rules, compressors)?);
+        assets.push(plan_asset(
+            source,
+            &header_rules,
+            content_types,
+            compressors,
+        )?);
     }
     if not_found_plan.inject_branded_asset {
         assets.push(plan_branded_404(&header_rules, compressors)?);
@@ -248,6 +281,7 @@ pub fn plan_project(dir: &str, compressors: &Compressors) -> Result<ProjectPlan,
 fn plan_asset(
     source: AssetSource,
     header_rules: &[HeaderRule],
+    content_types: &ContentTypeOverrides,
     compressors: &Compressors,
 ) -> Result<PlannedAsset, String> {
     let mut content = Content::load(&source.path)?;
@@ -256,6 +290,9 @@ fn plan_asset(
     // then picks up gzip and the correct certified `Content-Type`).
     if let Some(override_mime) = headers::content_type_for(&source.key, header_rules) {
         content.media_type = override_mime;
+    }
+    if let Some(override_mime) = content_types.get(&source.key) {
+        content.media_type = override_mime.clone();
     }
     Ok(plan_content_asset(
         source.key,
@@ -539,6 +576,42 @@ mod tests {
             let total: u64 = enc.chunks.iter().map(|c| c.len as u64).sum();
             assert_eq!(enc.content_len, total);
         }
+    }
+
+    #[test]
+    fn caller_content_type_overrides_inference_and_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir,
+            ".well-known/ic-architecture",
+            br#"{"version":"1.0.0"}"#,
+        );
+        write(
+            &dir,
+            "_headers",
+            b"/.well-known/ic-architecture\n  Content-Type: text/plain\n",
+        );
+        let content_types = ContentTypeOverrides::from([(
+            "/.well-known/ic-architecture".to_string(),
+            "application/json".parse().unwrap(),
+        )]);
+
+        let prepared = prepare_project_with_content_types(
+            &dir_str(&dir),
+            &Compressors::none(),
+            &content_types,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared
+                .assets
+                .iter()
+                .find(|asset| asset.key == "/.well-known/ic-architecture")
+                .unwrap()
+                .content_type,
+            "application/json"
+        );
     }
 
     #[test]

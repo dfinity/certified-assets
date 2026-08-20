@@ -35,8 +35,10 @@ pub use compressors::{CompressFn, Compressors};
 
 mod prepare;
 pub use prepare::{
-    MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, PreparedEncoding, PreparedProject,
-    ProjectPlan, manifest, plan_project, prepare_project, state_hash_for_dir,
+    ContentTypeOverrides, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk,
+    PreparedEncoding, PreparedProject, ProjectPlan, manifest, plan_project,
+    plan_project_with_content_types, prepare_project, prepare_project_with_content_types,
+    state_hash_for_dir,
 };
 
 /// Strips a Netlify-style trailing comment from a single line of a `_redirects`
