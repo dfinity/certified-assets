@@ -181,6 +181,14 @@ makes), unauthorized visitors can't pull your content. But:
   token values are stored hashed; a low-entropy chosen passphrase is still
   brute-forceable, like any password hash.)
 - TLS terminates at the boundary node, which sees the cookie in clear.
+- The gate itself runs canister-side, so it holds on every hostname, but its
+  *response* is only verified if the visitor's gateway verifies. Over a
+  [`raw` URL](how-it-works.md#the-raw-hosts-skip-verification) the redirect and the
+  login page arrive unchecked, so a non-verifying gateway could substitute a
+  fabricated login form and harvest tokens. Send people to a verifying gateway. (The
+  access cookie is host-only, so a `raw` host is a separate cookie jar: a session on
+  the certified host isn't carried there, and signing in on `raw` means handing the
+  token to whatever served that page.)
 - There is **no brute-force protection, lockout, or rate-limiting**: login attempts
   are unbilled, untracked queries. The deterrent is high-entropy random tokens.
 

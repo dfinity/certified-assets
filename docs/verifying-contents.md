@@ -25,12 +25,14 @@ that number is only a deploy self-consistency check.
   hashes for large multi-chunk assets);
 - the redirect rules, in match order.
 
-These are exactly the hashes the canister already stores and the HTTP gateway
-certifies end-to-end. To match the hash while serving forged content, an attacker
-would need the certified hashes to equal the real build's, and the gateway forces
-served bytes to those hashes. So a matching hash means matching served content.
+These are exactly the hashes the canister already stores and certifies end-to-end. To
+match the hash while serving forged content, an attacker would need the certified
+hashes to equal the real build's, and a verifying gateway forces served bytes to those
+hashes. So a matching hash means matching served content, for any visitor whose
+gateway checks the proof (see
+[who verifies the certificate](how-it-works.md#who-verifies-the-certificate)).
 
-**Not covered:** raw content bytes are folded in as their certified hashes, never
+**Not covered:** asset content bytes are folded in as their certified hashes, never
 re-hashed; and permissions / authorization state are out of scope (they don't
 affect *what* is served, only *who may sync*).
 
@@ -114,9 +116,12 @@ changed these parameters would silently invalidate every deployed canister's has
 Certification and the state hash are complementary:
 
 - **Certification** (always on) proves *each response* matches what the canister
-  committed to, verified by the gateway on every request.
+  committed to, checked by the visitor's gateway on every request.
 - **The state hash** proves *what the canister committed to* matches a known
   source build, verified by you, once, out of band.
 
 Together they chain trust from your source code all the way to the bytes in a
-visitor's browser.
+visitor's browser. The last link in that chain is the visitor's gateway: over a
+[`raw` URL](how-it-works.md#the-raw-hosts-skip-verification) nobody checks the proof,
+so the state hash still says what the canister committed to but no longer guarantees
+that a visitor received it.
