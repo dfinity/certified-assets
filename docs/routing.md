@@ -1,8 +1,13 @@
-# Routing & clean URLs
+---
+title: "Routing and clean URLs"
+description: "How request paths resolve to files, clean URLs, trailing slashes, 404 handling, and single-page apps"
+sidebar:
+  order: 2
+---
 
-This page explains how an incoming request path resolves to one of your files —
-the automatic clean-URL behavior you get out of the box, and how unmatched paths
-are handled. For *changing* where paths go, see [Redirects & rewrites](redirects.md);
+This page explains how an incoming request path resolves to one of your files: the
+automatic clean-URL behavior you get out of the box, and how unmatched paths are
+handled. For *changing* where paths go, see [Redirects & rewrites](redirects.md);
 for attaching headers to paths, see [Custom headers](headers.md).
 
 ## How a path resolves
@@ -11,7 +16,7 @@ For each request, the canister resolves the path in this order:
 
 1. **An exact file match.** A file in your directory is served directly. `dist/app.js`
    answers a request for `/app.js`.
-2. **A routing rule.** If no file matches the path verbatim, the rules apply — the
+2. **A routing rule.** If no file matches the path verbatim, the rules apply: the
    automatic clean-URL rules below, then your own [`_redirects`](redirects.md), in
    that order. The first matching rule wins.
 3. **The not-found fallback.** If nothing matches, the request resolves to the
@@ -22,7 +27,7 @@ Every one of these outcomes is a *certified* response.
 ## Clean URLs
 
 You don't link to `.html` files. The canister automatically maps each HTML file to a
-clean, extension-less URL and treats that as its **canonical** address — following
+clean, extension-less URL and treats that as its **canonical** address, following
 [Cloudflare's `auto-trailing-slash` conventions](https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/).
 
 | Your file | Canonical URL | Also handled |
@@ -36,7 +41,7 @@ has exactly one address that search engines and visitors land on.
 
 ### A note on `.html` URLs
 
-Requesting the underlying file directly — e.g. `/about.html` — currently serves the
+Requesting the underlying file directly (e.g. `/about.html`) currently serves the
 file with a `200` rather than redirecting to the canonical `/about`. A file always
 takes precedence over a routing rule at the same path, and `/about.html` *is* a file.
 This is harmless for most sites; if you need strict canonicalization (one URL only),
@@ -56,8 +61,8 @@ Every request must resolve to a certified response, so there is always a `404` p
 
 ## Single-page apps (SPA)
 
-If your app does client-side routing — React Router, Vue Router, SvelteKit in SPA
-mode, or a hand-rolled `history.pushState` router — the server has to answer *every*
+If your app does client-side routing (React Router, Vue Router, SvelteKit in SPA
+mode, or a hand-rolled `history.pushState` router), the server has to answer *every*
 URL with the app shell so the router can take over. Add one rule to
 [`_redirects`](redirects.md):
 
@@ -71,7 +76,8 @@ contents are served at the requested URL with no visible redirect, so
 in-app navigation. Every one of those responses is certified, including the ones at
 paths that have no file behind them.
 
-See the [`spa` example](../examples/spa/) for a complete, runnable project.
+See the [`spa` example](https://github.com/dfinity/certified-assets/tree/main/examples/spa)
+for a complete, runnable project.
 
 ### What the `/*` rule changes
 
@@ -84,8 +90,8 @@ See the [`spa` example](../examples/spa/) for a complete, runnable project.
   `fetch()` for missing JSON gets HTML it can't parse, and a missing script fails with
   a confusing MIME-type error instead of a plain 404.
 
-  Give your build output an honest 404 by scoping a rule to it *above* the catch-all
-  — rules are matched in file order:
+  Give your build output an honest 404 by scoping a rule to it *above* the
+  catch-all; rules are matched in file order:
 
   ```
   /assets/*  /404.html  404
@@ -109,7 +115,7 @@ See the [`spa` example](../examples/spa/) for a complete, runnable project.
 
 - **Link assets with absolute paths.** Use `/assets/app.js`, not `assets/app.js`. A
   relative URL resolves against the *client route*, so at `/dashboard/settings` the
-  browser would request `/dashboard/settings/assets/app.js` — which the `/*` rule
+  browser would request `/dashboard/settings/assets/app.js`, which the `/*` rule
   answers with the HTML shell.
 - **Put shell headers on the file, not the route.** [`_headers`](headers.md) patterns
   match the file, and a rewrite reuses its target's headers, so a
@@ -119,6 +125,6 @@ See the [`spa` example](../examples/spa/) for a complete, runnable project.
 
 ## See also
 
-- [Redirects & rewrites](redirects.md) — send one path to another, or serve one
+- [Redirects & rewrites](redirects.md): send one path to another, or serve one
   file's contents at a different URL.
-- [Custom headers](headers.md) — attach cache-control, CSP, and other headers to paths.
+- [Custom headers](headers.md): attach cache-control, CSP, and other headers to paths.

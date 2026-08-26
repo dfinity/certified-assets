@@ -1,16 +1,21 @@
-# Access protection (private apps)
+---
+title: "Access protection"
+description: "Put a login page in front of a private or preview site with revocable, expiring access tokens"
+sidebar:
+  order: 6
+---
 
 By default every deployed app is public. **Access protection** puts a login screen
 in front of it: unauthenticated visitors get a certified redirect to your login
 page (or a `401` for non-page assets) instead of your content. It's meant to
-**deter casual/public access** to in-progress or preview work — not to provide
+**deter casual/public access** to in-progress or preview work, not to provide
 confidentiality against a determined attacker (see [Threat model](#threat-model)).
 
 Access is a set of **labeled tokens**. The cookie *is* the token: a visitor presents
 a token, the canister sets it as a cookie, and every request re-validates that cookie
 against the token store. A classic single "password" is just one long-lived token.
 
-When protection is off, the app is **completely unchanged** — no gate, no extra
+When protection is off, the app is **completely unchanged**: no gate, no extra
 headers, no cost difference. Everything below applies only once you enable it.
 
 ## Quick start
@@ -30,7 +35,7 @@ icp canister call frontend issue_token \
   '(record { label = "owner"; ttl_secs = 31536000 : nat32; value = opt "my-passphrase" })'
 ```
 
-That's it — `https://<canister-id>.icp0.io/` now redirects strangers to
+That's it: `https://<canister-id>.icp0.io/` now redirects strangers to
 `/login.html`, and visitors who present `my-passphrase` get in.
 
 > **Enable before the first sync for a brand-new private app.** Enabling on an empty
@@ -42,29 +47,29 @@ That's it — `https://<canister-id>.icp0.io/` now redirects strangers to
 | Method | Call | Effect |
 |---|---|---|
 | Issue | `issue_token '(record { label = "<label>"; ttl_secs = <secs> : nat32; value = opt "<value>" })'` | Mints a token and **returns its value**. Pass `value = null` (or leave the field out) to get a high-entropy random token instead of a chosen passphrase. |
-| Revoke | `revoke_token '("<label>")'` | Removes every token with that label — **live**, so the next request bearing it is rejected. |
+| Revoke | `revoke_token '("<label>")'` | Removes every token with that label. Takes effect **live**, so the next request bearing it is rejected. |
 | List | `list_tokens '()'` | Returns `{ label; expires_at }` for every live token (controller-only). |
 | Status | `check_protection_status '()'` | `Disabled`, `Enabled`, or `EnabledLoginPageMissing` (controller-only). |
 | Disable | `disable_protection '()'` | Turns the gate off and drops all tokens. |
 
-Always pass the argument explicitly — `'()'` for the methods that take none. Given no
+Always pass the argument explicitly (`'()'` for the methods that take none). Given no
 argument, `icp canister call` opens an interactive prompt instead of sending an empty one.
 
-Each token has its **own expiry** and is **individually revocable** — revoking one
+Each token has its **own expiry** and is **individually revocable**: revoking one
 leaked share doesn't disturb anyone else. Expired tokens are rejected immediately
 whether or not they've been swept, and are garbage-collected as new ones are issued.
 
 **Random vs. chosen value.** A random token (omit the chosen value) is unguessable
 and never transits the subnet in readable form. A chosen passphrase is typeable but
 brute-forceable, and is visible to node operators in the block that carries the
-`issue_token` call — acceptable under the threat model, but prefer random tokens for
-share links.
+`issue_token` call. That is acceptable under the threat model, but prefer random
+tokens for share links.
 
 ## The login page
 
 The login page is **your own asset**, synced in `dist/` and named when you
 `enable_protection`. The canister serves it certified like any other page; it is the
-**only gate-exempt path**, so it must be **fully self-contained** — inline its CSS and
+**only gate-exempt path**, so it must be **fully self-contained**: inline its CSS and
 JS, and use `data:` URIs for images. Any external subresource it referenced would
 itself be gated and fail to load for a logged-out visitor.
 
@@ -105,7 +110,7 @@ A minimal page that does both:
 
 | Request | Response |
 |---|---|
-| An HTML page (or any path with no exact asset — SPA routes, 404s) | Certified `307 → <login_page>` |
+| An HTML page (or any path with no exact asset, such as SPA routes and 404s) | Certified `307 → <login_page>` |
 | A non-HTML asset (JS/CSS/image/JSON) | Certified `401` (a redirect would hand a `<script>` the wrong content type) |
 | The login page itself | Always served (gate-exempt) |
 
@@ -116,12 +121,12 @@ cookie-blind boundary cache can never replay one visitor's response to another.
 
 `check_protection_status` reports one of:
 
-- **`Disabled`** — public app.
-- **`Enabled`** — gate on, login page present.
-- **`EnabledLoginPageMissing`** — gate on, but the named login-page asset isn't
+- **`Disabled`**: public app.
+- **`Enabled`**: gate on, login page present.
+- **`EnabledLoginPageMissing`**: gate on, but the named login-page asset isn't
   synced. The app **stays protected** (no content is served); requests redirect to a
-  page that 404s until you sync it. It **self-heals** to `Enabled` once the page lands
-  — no need to re-enable.
+  page that 404s until you sync it. It **self-heals** to `Enabled` once the page
+  lands, with no need to re-enable.
 
 The gate **fails closed**: a sync that removes the login page, or enabling before the
 first sync, never exposes content.
@@ -136,27 +141,27 @@ store, so a token replayed against another canister isn't in *its* store.
 
 The canister serves **response-only** certified responses: the HTTP gateway (and any
 verifier) checks that each response is an *authentic, certified* response for the
-requested path — but **not** which of several certified responses the canister chose to
-return. Choosing one is ordinary application logic.
+requested path, but **not** which of several certified responses the canister chose
+to return. Choosing one is ordinary application logic.
 
 That is the same mechanism the canister already uses to serve more than one response
-per URL — different content encodings, `200` vs `304`, `206` range responses, and the
+per URL: different content encodings, `200` vs `304`, `206` range responses, and the
 redirect/rewrite rules that serve one asset's body under another path. Access
 protection has the same shape: under every protected path the canister certifies
-**both** the asset's normal responses **and** a certified *unauthenticated sibling* —
-the `307 → <login_page>` (HTML pages) or the `401` (other types). At serve time it
-reads the `certified_assets_access` cookie and returns the sibling when it's missing or
-invalid, the real asset when it's valid — each one independently verified by the
+**both** the asset's normal responses **and** a certified *unauthenticated sibling*,
+either the `307 → <login_page>` (HTML pages) or the `401` (other types). At serve time
+it reads the `certified_assets_access` cookie and returns the sibling when it's missing
+or invalid, the real asset when it's valid; each one is independently verified by the
 gateway. The login page's path additionally carries the certified `302 + Set-Cookie`
 redeem (one per token) and the `401` re-prompt, so a login `POST` is honored only
 because its outcome is certified too.
 
 **Why not certify the request?** Doing so would let the canister prove *which* request
-it answered, but request certification hashes the whole `Cookie` header verbatim — it
-can't match on a single *named* cookie. Nor would it fire: the canister sets its own
+it answered, but request certification hashes the whole `Cookie` header verbatim, so
+it can't match on a single *named* cookie. Nor would it fire: the canister sets its own
 `ic_env` cookie on HTML responses, so a browser always sends
 `Cookie: ic_env=…; certified_assets_access=…`, never a bare value. Picking one cookie
-out of many is necessarily app-side logic — hence response-only.
+out of many is necessarily app-side logic, hence response-only.
 
 **The caveat this creates.** Because the cookie→response choice is uncertified app
 logic, *which* response a request receives is **not** covered by the certificate. An
@@ -168,16 +173,16 @@ and it sets up the trust boundary the threat model below makes precise.
 ## Threat model
 
 This is **access gating, not confidentiality.** Under the IC's honest-replica /
-honest-boundary-node assumption — the same assumption all query serving already makes
-— unauthorized visitors can't pull your content. But:
+honest-boundary-node assumption (the same assumption all query serving already
+makes), unauthorized visitors can't pull your content. But:
 
 - Asset bytes and the token store live in replicated canister state, so a **node
   operator can read both**. Protection does not hide content from operators. (Random
   token values are stored hashed; a low-entropy chosen passphrase is still
   brute-forceable, like any password hash.)
 - TLS terminates at the boundary node, which sees the cookie in clear.
-- There is **no brute-force protection, lockout, or rate-limiting** — login attempts
+- There is **no brute-force protection, lockout, or rate-limiting**: login attempts
   are unbilled, untracked queries. The deterrent is high-entropy random tokens.
 
-Use it to keep a preview or in-progress app out of public view — not to protect
+Use it to keep a preview or in-progress app out of public view, not to protect
 secrets from a determined adversary.
