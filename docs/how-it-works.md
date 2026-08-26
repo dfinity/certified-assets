@@ -69,13 +69,13 @@ it behaves identically on both hostnames: it attaches the certificate either way
 there, but the client has chosen a party that doesn't check, so it gets no better
 assurance than from an ordinary web host.
 
-**The canister can't refuse `raw` requests.** Its only clue is the `Host` header, which
-the client supplies and nothing authenticates. Matching it against `raw` would hardcode
-a hostname convention that no protocol defines: which hostnames verify and which don't
-is a property of how a particular gateway is deployed, not something the gateway
-protocol states. With gateways independently operated, self-hosted, and behind custom
-domains, such a check is wrong in both directions, since a non-verifying gateway can
-answer on any hostname and a verifying one can be named anything at all.
+**The canister can't reliably refuse `raw` requests.** Its only clue is the `Host`
+header, which the client supplies and nothing authenticates. Matching it against `raw`
+would hardcode a hostname convention that no protocol defines: which hostnames verify
+and which don't is a property of how a particular gateway is deployed, not something
+the gateway protocol states. With gateways independently operated, self-hosted, and
+behind custom domains, such a check is wrong in both directions, since a non-verifying
+gateway can answer on any hostname and a verifying one can be named anything at all.
 
 So the guidance is client-side: **link to a gateway that verifies, and treat a `raw`
 URL as a debugging tool rather than a way to serve or visit a site.** A `raw` link is
@@ -84,7 +84,7 @@ unverified.
 
 If you'd rather not trust a gateway at all, check the proof yourself: call the canister
 through an
-[agent](https://internetcomputer.org/docs/building-apps/interact-with-canisters/agents/overview)
+[agent](https://docs.internetcomputer.org/guides/canister-calls/calling-from-clients/)
 and verify the certificate in your own code, or use the
 [state hash](verifying-contents.md), whose `state_hash` call is an update and therefore
 consensus-backed.

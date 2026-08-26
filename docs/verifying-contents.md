@@ -25,11 +25,11 @@ that number is only a deploy self-consistency check.
   hashes for large multi-chunk assets);
 - the redirect rules, in match order.
 
-These are exactly the hashes the canister already stores and certifies end-to-end. To
-match the hash while serving forged content, an attacker would need the certified
-hashes to equal the real build's, and a verifying gateway forces served bytes to those
-hashes. So a matching hash means matching served content, for any visitor whose
-gateway checks the proof (see
+These are exactly the hashes the canister already stores and certifies. To match the
+hash while serving forged content, an attacker would need the certified hashes to
+equal the real build's, and a verifying gateway forces served bytes to those hashes.
+So a matching hash means matching served content, for any visitor whose gateway checks
+the proof (see
 [who verifies the certificate](how-it-works.md#who-verifies-the-certificate)).
 
 **Not covered:** asset content bytes are folded in as their certified hashes, never
