@@ -11,10 +11,14 @@ serves it over HTTP with **response certification**. You point it at your build
 directory; it uploads your files, certifies them, and serves them.
 
 Certification is what makes this different from a plain web host: every response the
-canister returns carries a cryptographic proof, and the IC's HTTP gateway verifies
+canister returns carries a cryptographic proof, and a verifying HTTP gateway checks
 that proof before handing the response to the browser. Visitors get content the
-canister has provably committed to; no boundary node or gateway can tamper with it
-in transit.
+canister has provably committed to, with nothing in between able to tamper with it in
+transit.
+
+The canister certifies every response, always. Whether that proof gets *checked*
+depends on the gateway a visitor goes through, so link to one that verifies and treat
+[`raw` URLs](how-it-works.md#the-raw-hosts-skip-verification) as a debugging tool.
 
 You configure it through [`icp-cli`](https://github.com/dfinity/icp-cli) using a
 **recipe**, which bundles a matched pair of the canister and its sync plugin. Most
@@ -110,7 +114,8 @@ and non-alphanumerics replaced by `_`, e.g. `backend` → `ICP_CLI_CID_BACKEND`)
 
 You don't have to configure any of these; they're on by default:
 
-- **Response certification.** Every response is certified and gateway-verified.
+- **Response certification.** Every response carries a proof, [checked by a verifying
+  gateway](how-it-works.md#who-verifies-the-certificate).
 - **[Clean URLs](routing.md).** `/about` serves `/about.html`, `/blog/` serves
   `/blog/index.html`, with redirects that keep one canonical URL per page.
 - **[Compression](how-it-works.md#content-encoding).** Text, JS, JSON, SVG, and

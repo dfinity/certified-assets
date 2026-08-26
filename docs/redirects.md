@@ -99,12 +99,12 @@ serves these assets.
 
 **Every response the canister can return is certified ahead of time.** During sync,
 the plugin builds a certification tree over a *finite, enumerable* set of
-`path → response` mappings, and the HTTP gateway verifies each response against that
+`path → response` mappings, and a verifying gateway checks each response against that
 tree before serving it. A `:splat` rule would construct its destination (and thus
 its response) dynamically from whatever path the visitor requested, producing
-responses that were never certified. The gateway would reject them. (The same
-constraint is why [header values](headers.md) can't use `:splat` substitution
-either.)
+responses that were never certified. The canister would have no certified response to
+serve, and a verifying gateway would reject one anyway. (The same constraint is why
+[header values](headers.md) can't use `:splat` substitution either.)
 
 Static rules (exact paths, `/*` subtrees, and fixed destinations) cover the common
 cases and stay fully certifiable, so those are what `_redirects` supports.

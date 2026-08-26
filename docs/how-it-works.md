@@ -17,17 +17,77 @@ a **certification tree**, a hash structure the canister commits to as part of it
 public state. For every path, the canister can produce a proof that "this exact
 response is what I committed to serve here."
 
-When a browser requests your site, the request goes through the Internet Computer's
-**[HTTP gateway](https://docs.internetcomputer.org/references/http-gateway-protocol-spec/)**,
-which calls the canister, receives the response *and its certificate*, and verifies
-the certificate before passing anything to the browser. A boundary node or gateway
-can't alter, inject, or swap your content without the proof failing. A plain web host
-asks you to trust the server; here the response is cryptographically tied to the
-canister's certified state.
+Serving happens in a **query**, which is answered by a single replica rather than by
+consensus. Certification is what makes that answer trustworthy: the proof chains the
+response back to state the canister committed *through* consensus, so no single replica
+can invent a response that verifies.
+
+The canister certifies **every** response it serves, and there is no way to turn that
+off. It accepts only version 2 of the certification protocol, and everything it returns
+carries a full certification expression; it never uses the gateway protocol's
+`no_certification` escape hatch. Whatever you request, the proof comes with it.
 
 This is also why [redirects](redirects.md#what-isnt-supported-dynamic-rules) and
 [headers](headers.md#reserved-headers) are constrained to what can be enumerated and
 certified ahead of time.
+
+### Who verifies the certificate
+
+A proof only helps if somebody checks it, and in a browser that somebody is the
+**[HTTP gateway](https://docs.internetcomputer.org/references/http-gateway-protocol-spec/)**.
+Three parties are involved:
+
+- The **canister** certifies every response, as above.
+- The **gateway** calls the canister, verifies the certificate, and forwards the
+  response. Its promise to the client is "I checked this proof against the canister's
+  certified state."
+- The **client** picks a gateway by pointing at its URL. A browser can't verify an IC
+  certificate on its own, so it delegates that check. **Choosing the gateway is the
+  whole trust decision.**
+
+Go through a gateway that verifies, and nothing between it and the canister can alter,
+inject, or swap your content without the proof failing. A plain web host asks you to
+trust the server; here the response is cryptographically tied to the canister's
+certified state.
+
+### The `raw` hosts skip verification
+
+Alongside their verifying hostname, gateways have long answered on a second one that
+forwards the response **without** checking the proof: `<canister-id>.raw.icp0.io`
+serves the same site as `<canister-id>.icp0.io`, unverified.
+
+That dates from certification v1, when a canister had no way to tell the gateway "this
+response is dynamic, don't try to verify it." A non-verifying hostname was the only
+escape hatch available to canisters serving content they couldn't certify ahead of
+time. Version 2 replaced it with something better: a canister now says so per response,
+in band, through the `no_certification` expression mentioned above. The `raw` hostnames
+outlived the problem they solved, and survive mainly as a debugging aid.
+
+This canister never needed the escape hatch. It is v2-only and certifies everything, so
+it behaves identically on both hostnames: it attaches the certificate either way, and on
+`raw` the gateway simply discards it. Nothing about the canister's guarantee weakens
+there, but the client has chosen a party that doesn't check, so it gets no better
+assurance than from an ordinary web host.
+
+**The canister can't reliably refuse `raw` requests.** Its only clue is the `Host`
+header, which the client supplies and nothing authenticates. Matching it against `raw`
+would hardcode a hostname convention that no protocol defines: which hostnames verify
+and which don't is a property of how a particular gateway is deployed, not something
+the gateway protocol states. With gateways independently operated, self-hosted, and
+behind custom domains, such a check is wrong in both directions, since a non-verifying
+gateway can answer on any hostname and a verifying one can be named anything at all.
+
+So the guidance is client-side: **link to a gateway that verifies, and treat a `raw`
+URL as a debugging tool rather than a way to serve or visit a site.** A `raw` link is
+copy-pasteable and gets shared, and nothing in the response tells a visitor it arrived
+unverified.
+
+If you'd rather not trust a gateway at all, check the proof yourself: call the canister
+through an
+[agent](https://docs.internetcomputer.org/guides/canister-calls/calling-from-clients/)
+and verify the certificate in your own code, or use the
+[state hash](verifying-contents.md), whose `state_hash` call is an update and therefore
+consensus-backed.
 
 ## Serving large assets
 
