@@ -1,4 +1,9 @@
-# Site files & conventions
+---
+title: "Site files and conventions"
+description: "What gets uploaded, the special _redirects and _headers files, skipped files, custom domains, and the 404 page"
+sidebar:
+  order: 5
+---
 
 This page covers what actually gets uploaded from your asset directory, the special
 files that configure behavior instead of being served, and the conventions for things
@@ -20,20 +25,20 @@ uploads only what changed, so re-deploys are fast.
 
 ## Special files
 
-Two filenames are treated as **configuration, not content** — they're read for their
+Two filenames are treated as **configuration, not content**: they're read for their
 effect and never uploaded as assets. Place them at the root of your asset directory:
 
-- [`_redirects`](redirects.md) — redirect, rewrite, and error-page rules.
-- [`_headers`](headers.md) — custom response headers.
+- [`_redirects`](redirects.md): redirect, rewrite, and error-page rules.
+- [`_headers`](headers.md): custom response headers.
 
 ## Files that are skipped
 
 To match common build-output conventions, the plugin skips:
 
-- **Dotfiles and dot-directories** — anything whose name starts with `.` (for example
+- **Dotfiles and dot-directories.** Anything whose name starts with `.` (for example
   `.DS_Store`, `.git/`, `.env`). The one exception is `.well-known/` (below), which is
   traversed normally.
-- **Symbolic links** — both file and directory symlinks are ignored; only real files
+- **Symbolic links.** Both file and directory symlinks are ignored; only real files
   are uploaded.
 
 Everything else under `dir` is fair game, so keep build artifacts you don't want
@@ -50,9 +55,9 @@ www.example.com
 ```
 
 `.well-known/` is uploaded despite the leading dot, so the file is served at
-`/.well-known/ic-domains` — which is where the Internet Computer's boundary nodes look
+`/.well-known/ic-domains`, which is where the Internet Computer's boundary nodes look
 when registering a custom domain. Registering the domain itself is an IC platform step;
-see the [custom domains documentation](https://docs.internetcomputer.org/building-apps/frontends/custom-domains/using-custom-domains)
+see the [custom domains documentation](https://docs.internetcomputer.org/guides/frontends/custom-domains/)
 for the full process.
 
 ## The 404 page

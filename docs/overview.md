@@ -1,14 +1,19 @@
-# Overview
+---
+title: "Static site overview"
+description: "Deploy a static site to a certified assets canister with the static-site recipe"
+sidebar:
+  order: 1
+---
 
-**Certified Assets** deploys a static site — a built frontend, docs, or any folder of
-files — to a canister on the [Internet Computer](https://internetcomputer.org) that
+**Certified Assets** deploys a static site (a built frontend, docs, or any folder of
+files) to a canister on the [Internet Computer](https://internetcomputer.org) that
 serves it over HTTP with **response certification**. You point it at your build
 directory; it uploads your files, certifies them, and serves them.
 
 Certification is what makes this different from a plain web host: every response the
 canister returns carries a cryptographic proof, and the IC's HTTP gateway verifies
 that proof before handing the response to the browser. Visitors get content the
-canister has provably committed to — no boundary node or gateway can tamper with it
+canister has provably committed to; no boundary node or gateway can tamper with it
 in transit.
 
 You configure it through [`icp-cli`](https://github.com/dfinity/icp-cli) using a
@@ -28,9 +33,9 @@ canisters:
         dir: dist          # the directory of files to serve
 ```
 
-Replace `<version>` with a released version (e.g. `v1.0.0`); see the
+Replace `<version>` with a released version (e.g. `v0.3.3`); see the
 [available versions](https://github.com/dfinity/icp-cli-recipes/releases?q=static-site&expanded=true).
-Pick the version here — because the recipe pins a matched canister + plugin pair,
+Pick the version here: because the recipe pins a matched canister + plugin pair,
 there is no separate canister version to choose.
 
 ### 2. Deploy
@@ -43,7 +48,7 @@ This installs the canister, then runs the sync plugin to upload and certify ever
 file in `dir`. Re-running `icp deploy` syncs again: the plugin diffs your directory
 against the canister and uploads only what changed.
 
-That's it — your site is live and certified.
+That's it: your site is live and certified.
 
 ## Configuration
 
@@ -80,7 +85,7 @@ canisters:
 
 `build` runs before the canister is created, so it can't know any canister IDs.
 When a client-side app needs to embed the ID of a canister it will call, build it
-in `presync` instead — that runs at sync time, once the IDs exist, and exports
+in `presync` instead. That runs at sync time, once the IDs exist, and exports
 them to your commands:
 
 ```yaml
@@ -97,42 +102,42 @@ canisters:
 ```
 
 The variables available to `presync`: `ICP_CLI_CID` (this canister's principal),
-`ICP_CLI_CID_<NAME>` (each project canister's principal — the name upper-cased,
-non-alphanumerics as `_`, e.g. `backend` → `ICP_CLI_CID_BACKEND`), `ICP_CLI_NETWORK`,
-and `ICP_CLI_ENVIRONMENT`.
+`ICP_CLI_CID_<NAME>` (each project canister's principal, with the name upper-cased
+and non-alphanumerics replaced by `_`, e.g. `backend` → `ICP_CLI_CID_BACKEND`),
+`ICP_CLI_NETWORK`, and `ICP_CLI_ENVIRONMENT`.
 
 ## What you get automatically
 
-You don't have to configure any of these — they're on by default:
+You don't have to configure any of these; they're on by default:
 
-- **Response certification** — every response is certified and gateway-verified.
-- **[Clean URLs](routing.md)** — `/about` serves `/about.html`, `/blog/` serves
+- **Response certification.** Every response is certified and gateway-verified.
+- **[Clean URLs](routing.md).** `/about` serves `/about.html`, `/blog/` serves
   `/blog/index.html`, with redirects that keep one canonical URL per page.
-- **[Compression](how-it-works.md#content-encoding)** — text, JS, JSON, SVG, and
+- **[Compression](how-it-works.md#content-encoding).** Text, JS, JSON, SVG, and
   wasm are stored gzip- and Brotli-compressed and negotiated per request via
   `Accept-Encoding`.
-- **[ETag / `304 Not Modified`](how-it-works.md#etag-and-conditional-requests)** —
-  each asset gets a content-hash ETag, so unchanged files aren't re-downloaded.
-- **[A default `404` page](routing.md#not-found-handling)** — a built-in, certified
+- **[ETag / `304 Not Modified`](how-it-works.md#etag-and-conditional-requests).**
+  Each asset gets a content-hash ETag, so unchanged files aren't re-downloaded.
+- **[A default `404` page](routing.md#not-found-handling).** A built-in, certified
   fallback you can replace by adding your own `/404.html`.
 
 ## Customize further
 
 When you need finer control, each topic has its own page:
 
-- **[Routing & clean URLs](routing.md)** — how request paths map to files, trailing
+- **[Routing & clean URLs](routing.md).** How request paths map to files, trailing
   slashes, and 404 handling.
-- **[Single-page apps](routing.md#single-page-apps-spa)** — the one `_redirects` rule a
+- **[Single-page apps](routing.md#single-page-apps-spa).** The one `_redirects` rule a
   client-side-routed app needs, so every URL loads (and reloads) your shell.
-- **[Redirects & rewrites](redirects.md)** — the `_redirects` file: send `/old` to
+- **[Redirects & rewrites](redirects.md).** The `_redirects` file: send `/old` to
   `/new`, serve one file at another path, set custom error pages.
-- **[Custom headers](headers.md)** — the `_headers` file: cache-control, a Content
+- **[Custom headers](headers.md).** The `_headers` file: cache-control, a Content
   Security Policy, and other security headers.
-- **[Site files & conventions](site-files.md)** — what gets uploaded, the special
+- **[Site files & conventions](site-files.md).** What gets uploaded, the special
   `_redirects`/`_headers` files, excluded files, and custom domains.
-- **[Access protection](access-protection.md)** — put a login screen in front of a
+- **[Access protection](access-protection.md).** Put a login screen in front of a
   private/preview app with revocable, expiring access tokens.
-- **[Verifying contents](verifying-contents.md)** — the canister's state hash:
-  prove to a third party that it serves exactly a known build, from source.
+- **[Verifying contents](verifying-contents.md).** The canister's state hash: prove
+  to a third party that it serves exactly a known build, from source.
 
 Curious how it works underneath? See [Under the hood](how-it-works.md).
