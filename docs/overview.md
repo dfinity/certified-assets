@@ -7,9 +7,9 @@ sidebar:
 
 Deploy a **static site** (a built frontend, docs, or any folder of files) to a
 canister on the [Internet Computer](https://internetcomputer.org) that serves it over
-HTTP with **response certification**. You point [`icp-cli`](https://cli.icp.build) at
-your build directory and run `icp deploy`: it uploads the files, and the canister
-certifies and serves them.
+HTTP with **response certification**. You point
+[`icp-cli`](https://cli.internetcomputer.org) at your build directory and run
+`icp deploy`: it uploads the files, and the canister certifies and serves them.
 
 Certification is what makes this different from a plain web host: every response the
 canister returns carries a cryptographic proof, and a verifying HTTP gateway checks
@@ -21,18 +21,18 @@ The canister certifies every response, always. Whether that proof gets *checked*
 depends on the gateway a visitor goes through, so link to one that verifies and treat
 [`raw` URLs](how-it-works.md#the-raw-hosts-skip-verification) as a debugging tool.
 
-You configure it through [`icp-cli`](https://cli.icp.build) using a **recipe**,
-`@dfinity/static-site`, which pins a matched pair of the canister and the sync plugin
-that uploads to it. Both are released from
+You configure it through [`icp-cli`](https://cli.internetcomputer.org) using a
+**recipe**, `@dfinity/static-site`, which pins a matched pair of the canister and the
+sync plugin that uploads to it. Both are released from
 [dfinity/certified-assets](https://github.com/dfinity/certified-assets), which is also
 where the Candid interface and the build artifacts live. Most sites need nothing more
 than this page.
 
 ## Get started
 
-You will need [`icp-cli`](https://cli.icp.build), and somewhere to deploy: a local
-network for a first look (`icp network start -d`), or a configured environment for a
-live one. Both are covered in the `icp-cli` docs.
+You will need [`icp-cli`](https://cli.internetcomputer.org), and somewhere to deploy:
+a local network for a first look (`icp network start -d`), or a configured environment
+for a live one. Both are covered in the `icp-cli` docs.
 
 ### 1. Reference the recipe in your `icp.yaml`
 
