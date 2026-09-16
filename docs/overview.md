@@ -1,14 +1,15 @@
 ---
-title: "Static site overview"
-description: "Deploy a static site to a certified assets canister with the static-site recipe"
+title: "Deploy a static site"
+description: "Deploy a built frontend, docs, or any folder of files to a canister that serves it over HTTP with response certification"
 sidebar:
   order: 1
 ---
 
-**Certified Assets** deploys a static site (a built frontend, docs, or any folder of
-files) to a canister on the [Internet Computer](https://internetcomputer.org) that
-serves it over HTTP with **response certification**. You point it at your build
-directory; it uploads your files, certifies them, and serves them.
+Deploy a **static site** (a built frontend, docs, or any folder of files) to a
+canister on the [Internet Computer](https://internetcomputer.org) that serves it over
+HTTP with **response certification**. You point
+[`icp-cli`](https://cli.internetcomputer.org) at your build directory and run
+`icp deploy`: it uploads the files, and the canister certifies and serves them.
 
 Certification is what makes this different from a plain web host: every response the
 canister returns carries a cryptographic proof, and a verifying HTTP gateway checks
@@ -20,11 +21,18 @@ The canister certifies every response, always. Whether that proof gets *checked*
 depends on the gateway a visitor goes through, so link to one that verifies and treat
 [`raw` URLs](how-it-works.md#the-raw-hosts-skip-verification) as a debugging tool.
 
-You configure it through [`icp-cli`](https://github.com/dfinity/icp-cli) using a
-**recipe**, which bundles a matched pair of the canister and its sync plugin. Most
-sites need nothing more than this page.
+You configure it through [`icp-cli`](https://cli.internetcomputer.org) using a
+**recipe**, `@dfinity/static-site`, which pins a matched pair of the canister and the
+sync plugin that uploads to it. Both are released from
+[dfinity/certified-assets](https://github.com/dfinity/certified-assets), which is also
+where the Candid interface and the build artifacts live. Most sites need nothing more
+than this page.
 
 ## Get started
+
+You will need [`icp-cli`](https://cli.internetcomputer.org), and somewhere to deploy:
+a local network for a first look (`icp network start -d`), or a configured environment
+for a live one. Both are covered in the `icp-cli` docs.
 
 ### 1. Reference the recipe in your `icp.yaml`
 
@@ -52,7 +60,7 @@ This installs the canister, then runs the sync plugin to upload and certify ever
 file in `dir`. Re-running `icp deploy` syncs again: the plugin diffs your directory
 against the canister and uploads only what changed.
 
-That's it: your site is live and certified.
+Open the URL `icp deploy` prints and your site is there, certified.
 
 ## Configuration
 

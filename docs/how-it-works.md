@@ -53,8 +53,8 @@ certified state.
 ### The `raw` hosts skip verification
 
 Alongside their verifying hostname, gateways have long answered on a second one that
-forwards the response **without** checking the proof: `<canister-id>.raw.icp0.io`
-serves the same site as `<canister-id>.icp0.io`, unverified.
+forwards the response **without** checking the proof: `<canister-id>.raw.icp.net`
+serves the same site as `<canister-id>.icp.net`, unverified.
 
 That dates from certification v1, when a canister had no way to tell the gateway "this
 response is dynamic, don't try to verify it." A non-verifying hostname was the only

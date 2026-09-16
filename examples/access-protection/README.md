@@ -36,7 +36,7 @@ access-protection
 
 ## Prerequisites
 
-- [icp-cli](https://cli.icp.build)
+- [icp-cli](https://cli.internetcomputer.org)
 - A Rust toolchain with the `wasm32-unknown-unknown` and `wasm32-wasip2` targets
   (to build the canister + plugin), plus `make`.
 
@@ -101,7 +101,7 @@ login page (the cookie was blocked as a third-party cookie).
 
 Only Chromium browsers can be checked this way — they resolve `*.localhost` and
 honour `Secure` cookies over local `http`. Safari and Firefox behave correctly
-only over real HTTPS, so verify those against a deployed `https://<id>.icp0.io`.
+only over real HTTPS, so verify those against a deployed `https://<id>.icp.net`.
 
 ## Managing access
 

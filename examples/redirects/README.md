@@ -40,7 +40,7 @@ redirects
 
 ## Prerequisites
 
-- [icp-cli](https://cli.icp.build)
+- [icp-cli](https://cli.internetcomputer.org)
 - A Rust toolchain with the `wasm32-unknown-unknown` and `wasm32-wasip2` targets,
   plus `make`.
 
