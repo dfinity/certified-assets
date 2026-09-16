@@ -15,13 +15,12 @@ concurrency:
   # Never cancel an in-flight publish.
   cancel-in-progress: false
 
-permissions:
-  contents: write # create the GitHub release and upload its assets
-
 jobs:
-  release:
-    name: build and publish
+  build:
+    name: build release artifacts
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -62,6 +61,35 @@ jobs:
         # wasm/candid/checksum artifact *and* generates dist/recipe.hbs (pinning
         # this tag's release URLs + the shas just produced).
         run: make recipe-release
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-artifacts
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history + all branches so the publish step can tell whether the
+          # tagged commit is on main (release provenance).
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-artifacts
+          path: dist
 
       - name: Publish GitHub release
         env:
