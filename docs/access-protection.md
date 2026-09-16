@@ -35,7 +35,7 @@ icp canister call frontend issue_token \
   '(record { label = "owner"; ttl_secs = 31536000 : nat32; value = opt "my-passphrase" })'
 ```
 
-That's it: `https://<canister-id>.icp0.io/` now redirects strangers to
+That's it: `https://<canister-id>.icp.net/` now redirects strangers to
 `/login.html`, and visitors who present `my-passphrase` get in.
 
 > **Enable before the first sync for a brand-new private app.** Enabling on an empty

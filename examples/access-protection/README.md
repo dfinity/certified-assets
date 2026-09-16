@@ -101,7 +101,7 @@ login page (the cookie was blocked as a third-party cookie).
 
 Only Chromium browsers can be checked this way — they resolve `*.localhost` and
 honour `Secure` cookies over local `http`. Safari and Firefox behave correctly
-only over real HTTPS, so verify those against a deployed `https://<id>.icp0.io`.
+only over real HTTPS, so verify those against a deployed `https://<id>.icp.net`.
 
 ## Managing access
 

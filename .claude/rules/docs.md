@@ -41,6 +41,11 @@ Anchors are load-bearing: 20 links inside `docs/` target headings in other pages
 and links that leave `docs/` are absolute GitHub URLs at `main`, because a relative
 path breaks once published.
 
+Check an external link with `curl -sI`, never `curl -sIL`: `-L` follows redirects and
+reports the destination's `200`, so a dead host that still 301s looks healthy. A link
+should resolve with no redirect. Both `building-apps/frontends/...` and
+`cli.icp.build` reached the docs this way.
+
 ## Naming: one thing, three names
 
 A reader arriving here can meet three names for what is functionally one thing, plus
