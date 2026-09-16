@@ -1,6 +1,6 @@
 ---
-title: "Static site overview"
-description: "Deploy a static site to a certified assets canister with the static-site recipe"
+title: "Deploy a static site"
+description: "Deploy a built frontend, docs, or any folder of files to a canister that serves it over HTTP with response certification"
 sidebar:
   order: 1
 ---
