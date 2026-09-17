@@ -30,6 +30,10 @@ pub(crate) struct SyncSession {
     pub id: SessionId,
     pub owner: Principal,
     pub last_activity_ns: u64,
+    /// Set while the final state hash is being computed. The session remains
+    /// active during this phase so no other sync can mutate the state being
+    /// hashed.
+    pub finalizing: bool,
 }
 
 /// Status of an incremental computation

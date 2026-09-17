@@ -40,7 +40,8 @@ impl State {
 
         if let Some(active) = &self.sync_session {
             let idle = now.saturating_sub(active.last_activity_ns);
-            let reclaimable = active.owner == owner || idle >= SYNC_IDLE_TIMEOUT_NANOS;
+            let reclaimable = !active.finalizing
+                && (active.owner == owner || idle >= SYNC_IDLE_TIMEOUT_NANOS);
             if !reclaimable {
                 return StartSyncResult::Busy {
                     owner: active.owner,
@@ -58,6 +59,7 @@ impl State {
             id: session_id,
             owner,
             last_activity_ns: now,
+            finalizing: false,
         });
 
         StartSyncResult::Started { session_id }
@@ -68,7 +70,7 @@ impl State {
     /// superseded or never started.
     fn touch_session(&mut self, session_id: SessionId, now: u64) -> Result<(), String> {
         match &mut self.sync_session {
-            Some(s) if s.id == session_id => {
+            Some(s) if s.id == session_id && !s.finalizing => {
                 s.last_activity_ns = now;
                 Ok(())
             }
@@ -122,6 +124,18 @@ impl State {
                 ComputationStatus::InProgress(initial_progress)
             }
             ExecuteOperationsProgress::ProcessingOperations { operation_index } => {
+                // Progress is supplied by the caller, so reject stale operation
+                // progress while the final hash is being computed.
+                if matches!(self.sync_session.as_ref(), Some(s) if s.finalizing) {
+                    return ComputationStatus::Error("sync is finalizing".to_string());
+                }
+
+                // Progress is caller-supplied, so reject stale operation
+                // progress while the final hash is being computed.
+                if matches!(self.sync_session.as_ref(), Some(s) if s.finalizing) {
+                    return ComputationStatus::Error("sync is finalizing".to_string());
+                }
+
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
                     // Asset ops in this call may have clobbered tree entries
@@ -134,7 +148,13 @@ impl State {
                     // last call; otherwise keep the session open for further
                     // operations and don't touch the cached hash yet.
                     if arg.is_final {
-                        self.sync_session = None;
+                        // Keep the session active and mark it finalizing until
+                        // hashing completes. Otherwise another sync (including
+                        // one from the same owner) could mutate the state while
+                        // the staged hasher is suspended between assets.
+                        if let Some(session) = &mut self.sync_session {
+                            session.finalizing = true;
+                        }
                         self.chunks.clear();
                         // Recompute the cached state hash over the now-final
                         // state, staged one asset per step.
@@ -267,6 +287,9 @@ impl State {
                 self.fold_redirect_rules(&mut hasher);
                 let hash = hasher.finish();
                 self.cache_state_hash(hash);
+                // Release the sync lock only after the hash covers the complete
+                // finalized state and has been cached.
+                self.sync_session = None;
                 ComputationStatus::Done(Some(hash))
             }
         }
