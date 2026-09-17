@@ -32,7 +32,10 @@ pub(crate) struct SyncSession {
     pub last_activity_ns: u64,
     /// Set while the final state hash is being computed. The session remains
     /// active during this phase so no other sync can mutate the state being
-    /// hashed.
+    /// hashed — not even one from the same owner, who would otherwise be
+    /// allowed to reclaim immediately. It is cleared only by the successful
+    /// finalization that set it, so the idle timeout is the sole escape from a
+    /// finalization that dies mid-flight.
     pub finalizing: bool,
 }
 
