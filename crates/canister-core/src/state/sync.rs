@@ -68,16 +68,50 @@ impl State {
             }
         }
 
+        // In by-proposal mode a *staged* batch is waiting for its proposal, and
+        // its content is what the next commit will publish. Starting another
+        // sync would prepare on top of it, so it is refused outright — commit
+        // the batch or discard it first. (This mirrors the old asset canister's
+        // "batch N is already proposed"; `discard_proposed_state` is the escape
+        // hatch when a proposal is rejected.) A batch that is *not* staged is an
+        // abandoned upload, and gets cleaned up on the ordinary reclaim rules
+        // already applied above.
+        //
+        // Reported as `Busy` because that is the only "come back later" shape
+        // `StartSyncResult` has, and it names the principal to talk to. It reads
+        // as a concurrent-deploy collision rather than "a batch is awaiting its
+        // proposal", which is imprecise but not wrong; a clearer variant is a
+        // wire change, so it belongs with the plugin's by-proposal support.
+        match self.store.prepared_batch() {
+            Some(batch) if batch.staged => {
+                return StartSyncResult::Busy {
+                    owner: batch.owner,
+                    idle_for_secs: 0,
+                };
+            }
+            Some(_) => self.discard_proposed_state(),
+            None => {}
+        }
+
         // No active sync, or we're taking over: drop any staged chunks left by
         // the previous session before starting fresh.
         self.chunks.clear();
 
-        // From here on this sync may mutate served content, so the cached hash
-        // no longer describes what the canister serves. Drop it: a sync that
-        // finalizes caches the real one again, and a sync that is abandoned
-        // leaves the canister reporting "no verifiable hash" instead of a clean
-        // hash for content it no longer serves.
-        self.invalidate_cached_state_hash();
+        if self.by_proposal() {
+            // A by-proposal sync only *prepares*: it writes content that nothing
+            // references and metadata that lives beside the live keyspace, so
+            // what the canister serves — and therefore its cached hash — stays
+            // valid and verifiable for the whole voting period. Open a batch to
+            // collect the prepare instead of invalidating anything.
+            self.open_prepared_batch(owner);
+        } else {
+            // From here on this sync may mutate served content, so the cached
+            // hash no longer describes what the canister serves. Drop it: a sync
+            // that finalizes caches the real one again, and a sync that is
+            // abandoned leaves the canister reporting "no verifiable hash"
+            // instead of a clean hash for content it no longer serves.
+            self.invalidate_cached_state_hash();
+        }
 
         let session_id = self.alloc_session_id();
         self.sync_session = Some(SyncSession {
@@ -190,8 +224,12 @@ impl State {
                     // Asset ops in this call may have clobbered tree entries
                     // that redirect rules own (any rule whose source path
                     // collides with an asset's `<$>` slot). Re-cert them so
-                    // the call ends with a consistent rule tree.
-                    self.on_redirect_rules_change();
+                    // the call ends with a consistent rule tree. A by-proposal
+                    // prepare certifies nothing and changes no live rule, so it
+                    // has nothing to repair; the commit rebuilds them instead.
+                    if !self.by_proposal() {
+                        self.on_redirect_rules_change();
+                    }
 
                     // Finalize the sync only when the caller signals this is the
                     // last call; otherwise keep the session open for further
@@ -215,8 +253,11 @@ impl State {
                         }
                         self.chunks.clear();
                         // Recompute the cached state hash over the now-final
-                        // state, staged one asset per step.
-                        let hasher = state_hash::StateHasher::begin(self.state_hash_asset_count());
+                        // state, staged one asset per step. Under a by-proposal
+                        // prepare this folds the *prospective* state — live plus
+                        // the pending overlay — producing the hash that goes in
+                        // the proposal and that the commit will install verbatim.
+                        let hasher = state_hash::StateHasher::begin(self.effective_asset_count());
                         return ComputationStatus::InProgress(
                             ExecuteOperationsProgress::HashingState {
                                 hasher,
@@ -232,7 +273,7 @@ impl State {
                 let result = match op {
                     Operation::CreateAsset(arg) => self.create_asset(arg.clone()),
                     Operation::SetAssetContent(arg) => {
-                        if !self.contains_asset(&arg.key) {
+                        if !self.effective_contains_asset(&arg.key) {
                             return ComputationStatus::Error("asset not found".to_string());
                         }
                         if arg.chunk_ids.is_empty() {
@@ -277,7 +318,11 @@ impl State {
                     Operation::SetAssetHeaders(arg) => self.set_asset_headers(arg.clone()),
                     Operation::SetPreparationCanary(arg) => match arg.canary.as_ref().try_into() {
                         Ok(canary) => {
-                            self.set_preparation_canary(canary);
+                            if self.by_proposal() {
+                                self.stage_preparation_canary(canary);
+                            } else {
+                                self.set_preparation_canary(canary);
+                            }
                             Ok(())
                         }
                         Err(_) => Err(format!(
@@ -314,7 +359,13 @@ impl State {
                                 break;
                             }
                         }
-                        validation.map(|_| self.set_redirect_rules(arg.rules.clone()))
+                        validation.map(|_| {
+                            if self.by_proposal() {
+                                self.stage_redirect_rules(arg.rules.clone());
+                            } else {
+                                self.set_redirect_rules(arg.rules.clone());
+                            }
+                        })
                     }
                 };
                 if let Err(e) = result {
@@ -340,7 +391,7 @@ impl State {
                 }
 
                 // Fold one asset per step, in key order, resuming after the last.
-                if let Some((key, asset)) = self.next_manifest_asset(&resume_after) {
+                if let Some((key, asset)) = self.next_effective_manifest_asset(&resume_after) {
                     hasher.write_asset(&asset);
                     return ComputationStatus::InProgress(
                         ExecuteOperationsProgress::HashingState {
@@ -349,11 +400,18 @@ impl State {
                         },
                     );
                 }
-                // Keyspace exhausted: fold the redirect rules, finalize, cache,
-                // and hand the hash back to the client that finalized the sync.
-                self.fold_redirect_rules(&mut hasher);
+                // Keyspace exhausted: fold the redirect rules, finalize, and hand
+                // the hash back to the client that finalized the sync.
+                self.fold_effective_redirect_rules(&mut hasher);
                 let hash = hasher.finish();
-                self.cache_state_hash(hash);
+                if self.by_proposal() {
+                    // Nothing about the live state changed, so its cached hash
+                    // stands. Record this one as what committing the batch will
+                    // produce — the number that goes in the proposal.
+                    self.stage_prepared_batch(hash, system_context.current_timestamp_ns);
+                } else {
+                    self.cache_state_hash(hash);
+                }
                 // Release the sync lock only after the hash covers the complete
                 // finalized state and has been cached. The guard above proved the
                 // session is still ours to release.

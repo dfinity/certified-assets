@@ -20,11 +20,11 @@ impl State {
     // ---- asset mutations ----
 
     pub(super) fn create_asset(&mut self, arg: CreateAssetArguments) -> Result<(), String> {
-        if self.store.contains_asset(&arg.key) {
+        if self.effective_contains_asset(&arg.key) {
             return Err("asset already exists".to_string());
         }
 
-        self.store.put_asset(
+        self.write_effective_asset(
             arg.key,
             AssetMeta {
                 content_type: arg.content_type,
@@ -46,7 +46,7 @@ impl State {
         if arg.chunk_ids.is_empty() {
             return Err("encoding must have at least one chunk".to_string());
         }
-        if !self.store.contains_asset(&arg.key) {
+        if !self.effective_contains_asset(&arg.key) {
             return Err("asset not found".to_string());
         }
 
@@ -107,13 +107,14 @@ impl State {
         };
 
         let mut meta = self
-            .store
-            .get_asset(&arg.key)
+            .effective_asset(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
-        // Free the chunks of any encoding we're replacing.
+        // Free the chunks of any encoding we're replacing. Under a by-proposal
+        // prepare, content that is still live is kept until the commit displaces
+        // it — see `State::release_displaced_content`.
         if let Some(old) = meta.encodings.get(&arg.encoding) {
-            self.store.delete_content_group(old.content_id);
+            self.release_displaced_content(old.content_id);
         }
 
         // Write the chunks (and, for multi-chunk encodings, their per-chunk cert
@@ -130,8 +131,7 @@ impl State {
                 content_len,
             },
         );
-        self.certifier.recertify_asset(&self.store, &arg.key, &meta);
-        self.store.put_asset(arg.key, meta);
+        self.write_effective_asset(arg.key, meta);
 
         Ok(())
     }
@@ -141,26 +141,19 @@ impl State {
         arg: UnsetAssetContentArguments,
     ) -> Result<(), String> {
         let mut meta = self
-            .store
-            .get_asset(&arg.key)
+            .effective_asset(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
         if let Some(old) = meta.encodings.remove(&arg.encoding) {
-            self.store.delete_content_group(old.content_id);
-            self.certifier.recertify_asset(&self.store, &arg.key, &meta);
-            self.store.put_asset(arg.key, meta);
+            self.release_displaced_content(old.content_id);
+            self.write_effective_asset(arg.key, meta);
         }
 
         Ok(())
     }
 
     pub(super) fn delete_asset(&mut self, arg: DeleteAssetArguments) {
-        if let Some(meta) = self.store.remove_asset(&arg.key) {
-            self.certifier.remove_responses_for_path(&arg.key);
-            for enc in meta.encodings.values() {
-                self.store.delete_content_group(enc.content_id);
-            }
-        }
+        self.delete_effective_asset(&arg.key);
     }
 
     pub(super) fn set_asset_headers(
@@ -168,13 +161,11 @@ impl State {
         arg: SetAssetHeadersArguments,
     ) -> Result<(), String> {
         let mut meta = self
-            .store
-            .get_asset(&arg.key)
+            .effective_asset(&arg.key)
             .ok_or_else(|| "asset not found".to_string())?;
 
         meta.headers = arg.headers;
-        self.certifier.recertify_asset(&self.store, &arg.key, &meta);
-        self.store.put_asset(arg.key, meta);
+        self.write_effective_asset(arg.key, meta);
 
         Ok(())
     }

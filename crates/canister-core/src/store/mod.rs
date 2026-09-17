@@ -36,6 +36,7 @@ use std::collections::BTreeSet;
 
 use crate::asset::AssetMeta;
 use crate::cert::AssetKey;
+use crate::governance::{GovernanceSettings, PendingAsset, PreparedBatch};
 use crate::protection::{ProtectionSettings, TokenMeta};
 use crate::redirect::RedirectRules;
 use chunks::{ChunkStore, ContentChunkKey};
@@ -95,6 +96,20 @@ const STATE_HASH_MEMORY: MemoryId = MemoryId::new(40);
 /// upgraded in place reads the default — see the field's doc.
 const PREPARATION_CANARY_MEMORY: MemoryId = MemoryId::new(50);
 
+// 60–69 — governance mode (by-proposal deploys). All three regions are unused
+// by earlier builds, so a canister upgraded in place reads their defaults:
+// no approver, no prepared batch, an empty overlay — i.e. governance mode off,
+// which is exactly the behavior that build had.
+/// The governance approver (`GovernanceSettings`): one small cell whose
+/// `Some`/`None` is the master switch for by-proposal deploys.
+const GOVERNANCE_MEMORY: MemoryId = MemoryId::new(60);
+/// The prepared-but-uncommitted batch (`PreparedSlot`), or `None`.
+const PREPARED_BATCH_MEMORY: MemoryId = MemoryId::new(61);
+/// The prepared batch's per-asset metadata overlay (`PendingAsset` by key).
+/// A map rather than a field of the cell above so a many-asset prepare doesn't
+/// reserialize every entry on each operation.
+const PENDING_ASSETS_MEMORY: MemoryId = MemoryId::new(62);
+
 // Two newtypes with no domain module of their own: they exist only to give a
 // storage-internal value a `Storable` impl (the orphan rule forbids implementing
 // it on the bare `BTreeSet`/`[u8; 32]`), so they live here in the storage layer.
@@ -120,6 +135,12 @@ pub struct StateHash(pub [u8; 32]);
 /// re-prepare everything and write a real one. Its own fixed 32-byte cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PreparationCanary(pub [u8; 32]);
+
+/// The prepared-but-uncommitted batch, or `None` when nothing is staged (see
+/// [`PreparedBatch`]). A newtype for the same orphan-rule reason as the two
+/// above — the cell's value is really just an `Option`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PreparedSlot(pub Option<PreparedBatch>);
 
 /// Per-chunk certification data — the value type of the `chunk_certs` map below,
 /// keyed by the same [`ContentChunkKey`] as the content chunk (that key lives with
@@ -193,6 +214,15 @@ pub struct Store {
     /// canister upgraded from a build without this cell reports, and what makes
     /// a client fall back to preparing everything.
     preparation_canary: StableCell<PreparationCanary, Mem>,
+
+    // Governance mode.
+    /// The governance approver, or `None` (the default) for ordinary deploys.
+    governance: StableCell<GovernanceSettings, Mem>,
+    /// The prepared-but-uncommitted batch, or `None`.
+    prepared: StableCell<PreparedSlot, Mem>,
+    /// The prepared batch's per-asset metadata overlay. Empty unless a prepare
+    /// is in flight or staged; never consulted on the serving path.
+    pending_assets: StableBTreeMap<AssetKey, PendingAsset, Mem>,
 }
 
 impl Store {
@@ -231,6 +261,10 @@ impl Store {
                 mm.get(PREPARATION_CANARY_MEMORY),
                 PreparationCanary::default(),
             ),
+            // Governance mode.
+            governance: StableCell::init(mm.get(GOVERNANCE_MEMORY), GovernanceSettings::default()),
+            prepared: StableCell::init(mm.get(PREPARED_BATCH_MEMORY), PreparedSlot::default()),
+            pending_assets: StableBTreeMap::init(mm.get(PENDING_ASSETS_MEMORY)),
         }
     }
 
@@ -412,6 +446,86 @@ impl Store {
         self.preparation_canary.set(PreparationCanary(canary));
     }
 
+    // ---- governance mode ----
+
+    /// The configured governance approver, or `None` when by-proposal deploys
+    /// are off (the default). Reads the cell's in-memory cached value, so it is
+    /// cheap enough for the sync path to consult on every operation.
+    pub fn governance_approver(&self) -> Option<Principal> {
+        self.governance.get().approver
+    }
+
+    /// Sets (or clears, with `None`) the governance approver.
+    pub fn set_governance_approver(&mut self, approver: Option<Principal>) {
+        self.governance.set(GovernanceSettings { approver });
+    }
+
+    /// The prepared-but-uncommitted batch, if any.
+    pub fn prepared_batch(&self) -> Option<PreparedBatch> {
+        self.prepared.get().0.clone()
+    }
+
+    /// Stores (or clears, with `None`) the prepared batch. Clearing does **not**
+    /// touch the overlay — see [`Self::clear_pending_assets`] — because the two
+    /// are cleared together only by the state layer, which frees content first.
+    pub fn set_prepared_batch(&mut self, batch: Option<PreparedBatch>) {
+        self.prepared.set(PreparedSlot(batch));
+    }
+
+    /// The next content-group id the allocator will hand out. Read when a
+    /// prepare opens, to mark where its own content allocations begin.
+    pub fn peek_next_content_id(&self) -> u64 {
+        *self.next_content_id.get()
+    }
+
+    // ---- pending overlay (governance mode) ----
+
+    /// The pending change staged for `key`, if the prepare touched it.
+    pub fn get_pending_asset(&self, key: &AssetKey) -> Option<PendingAsset> {
+        self.pending_assets.get(key)
+    }
+
+    /// Stages a pending change for `key`, replacing any already staged for it.
+    pub fn put_pending_asset(&mut self, key: AssetKey, pending: PendingAsset) {
+        self.pending_assets.insert(key, pending);
+    }
+
+    /// Number of assets the prepare will create, replace, or delete.
+    pub fn pending_asset_count(&self) -> u64 {
+        self.pending_assets.len()
+    }
+
+    /// Every staged key, ascending. Materialized so the caller can apply each in
+    /// turn while mutating the live store.
+    pub fn pending_asset_keys(&self) -> Vec<AssetKey> {
+        self.pending_assets.keys().collect()
+    }
+
+    /// Staged changes in ascending key order, starting strictly after
+    /// `start_after` (`None` ⇒ from the first key). Merged against
+    /// [`Self::assets_from`] to fold the prospective state hash.
+    pub fn pending_assets_from(
+        &self,
+        start_after: Option<&AssetKey>,
+    ) -> impl Iterator<Item = (AssetKey, PendingAsset)> + '_ {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let lower = match start_after {
+            Some(key) => Excluded(key.clone()),
+            None => Unbounded,
+        };
+        self.pending_assets
+            .range((lower, Unbounded))
+            .map(|e| e.into_pair())
+    }
+
+    /// Drops the whole overlay. Content bytes are freed by the caller.
+    pub fn clear_pending_assets(&mut self) {
+        let keys: Vec<AssetKey> = self.pending_assets.keys().collect();
+        for key in keys {
+            self.pending_assets.remove(&key);
+        }
+    }
+
     // ---- redirect rules ----
 
     /// The redirect-rule list in match order. Returns the `StableCell`'s cached
@@ -510,6 +624,9 @@ impl_cbor_storable!(RedirectRules);
 impl_cbor_storable!(AssetMeta);
 impl_cbor_storable!(ProtectionSettings);
 impl_cbor_storable!(TokenMeta);
+impl_cbor_storable!(GovernanceSettings);
+impl_cbor_storable!(PreparedSlot);
+impl_cbor_storable!(PendingAsset);
 
 impl Storable for StateHash {
     fn to_bytes(&self) -> Cow<'_, [u8]> {

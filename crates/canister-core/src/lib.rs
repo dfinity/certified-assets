@@ -1,6 +1,7 @@
 //! This module declares canister methods expected by the assets canister client.
 mod asset;
 mod cert;
+mod governance;
 mod http;
 mod protection;
 mod redirect;
@@ -21,6 +22,7 @@ use candid::Principal;
 use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, time, trap};
 use std::cell::RefCell;
 
+pub use governance::ProposedState;
 pub use http::{HttpRequest, HttpResponse};
 pub use protection::{IssueTokenArgs, ProtectionStatus, TokenInfo};
 pub use serde_bytes::ByteBuf;
@@ -225,7 +227,130 @@ pub fn check_protection_status() -> ProtectionStatus {
 /// principals — controllers are always allowed without being stored.
 pub fn can_sync() -> bool {
     let caller = msg_caller();
-    STATE.with_borrow(|s| s.is_authorized(&caller)) || ic_cdk::api::is_controller(&caller)
+    is_owner(&caller) || STATE.with_borrow(|s| s.is_authorized(&caller))
+}
+
+/// Whether `caller` administers this canister: a controller, or the configured
+/// governance approver.
+///
+/// Under an SNS the two are different principals and both are needed. SNS
+/// **root** is the sole controller of a dapp canister, but root only performs
+/// canister management — it never relays an arbitrary method call. A proposal
+/// that calls a method on this canister is executed by SNS **governance**,
+/// calling directly, so governance is the principal that actually arrives here.
+/// Treating the approver as an administrator is what lets a DAO manage its own
+/// asset canister by proposal — notably `authorize`/`deauthorize`, without which
+/// it could never grant or rotate a developer's sync access.
+fn is_owner(caller: &Principal) -> bool {
+    ic_cdk::api::is_controller(caller) || STATE.with_borrow(|s| s.is_governance_approver(caller))
+}
+
+// ───────── Governance mode (by-proposal deploys) ─────────
+
+/// Sets (or clears, with `None`) the governance approver — the principal allowed
+/// to commit a prepared state. `Some` puts the canister in by-proposal mode:
+/// every sync then prepares instead of publishing. Controller-guarded at the
+/// endpoint; refused while a batch is prepared.
+pub fn set_governance(approver: Option<Principal>) {
+    STATE.with_borrow_mut(|s| {
+        if let Err(msg) = s.set_governance_approver(approver) {
+            trap(&msg);
+        }
+    })
+}
+
+/// The configured governance approver, or `None` when by-proposal deploys are
+/// off. Public: which principal may change this canister's content is exactly
+/// the kind of thing an outside verifier should be able to check.
+pub fn governance() -> Option<Principal> {
+    STATE.with_borrow(|s| s.governance_approver())
+}
+
+/// Whether anything is prepared, and if so the hash committing it would produce.
+///
+/// A query, so treat it as a convenience for operators and voters rather than
+/// proof: the binding check is the one `commit_proposed_state` makes on the
+/// replicated path. The number to verify against source is still reproduced
+/// locally with `state-hash-cli`.
+pub fn proposed_state() -> ProposedState {
+    STATE.with_borrow(|s| s.proposed_state())
+}
+
+/// Commits the prepared state, making it live. The single point at which served
+/// content changes.
+///
+/// `state_hash_hex` is the proposal's payload: the 64-hex-character state hash
+/// the committed canister must report, which a voter reproduces from source with
+/// `state-hash-cli`. Guarded to the governance approver at the endpoint.
+///
+/// **Traps on every failure, and never returns an error.** SNS governance
+/// discards a target method's reply (`canister_control.rs`: "any reply is
+/// considered a success"), so a method that returned `Err` would have its
+/// proposal recorded as *executed* while nothing happened. A trap is the only
+/// failure this canister can report that governance will actually surface — and
+/// it rolls the message back, so a rejected commit leaves the canister exactly
+/// as it was.
+pub fn commit_proposed_state(state_hash_hex: String) {
+    let expected = governance::parse_state_hash(&state_hash_hex).unwrap_or_else(|e| trap(&e));
+    STATE.with_borrow_mut(|s| {
+        if let Err(msg) = s.commit_proposed_state(expected) {
+            trap(&msg);
+        }
+        certified_data_set(s.root_hash());
+    })
+}
+
+/// Renders `commit_proposed_state`'s payload for voters — the `validator_method`
+/// of the SNS generic function. Read-only.
+///
+/// Must be an **update** method: an inter-canister call cannot reach a canister's
+/// query entry point, so governance could not call a `#[query]` validator at all.
+pub fn validate_commit_proposed_state(state_hash_hex: String) -> Result<String, String> {
+    let expected = governance::parse_state_hash(&state_hash_hex)?;
+    let rendered = hex::encode(expected);
+    match STATE.with_borrow(|s| s.proposed_state()) {
+        ProposedState::Staged {
+            prospective_state_hash,
+            changed_assets,
+            ..
+        } if prospective_state_hash == rendered => Ok(format!(
+            "Commit the prepared frontend state.\n\n\
+             State hash: {rendered}\n\
+             Assets changed by this commit: {changed_assets}\n\n\
+             Verify by reproducing the build from source and running \
+             `state-hash <dist>`; it must print exactly the state hash above. \
+             After execution, `state_hash()` on this canister returns the same value."
+        )),
+        ProposedState::Staged {
+            prospective_state_hash,
+            ..
+        } => Err(format!(
+            "the prepared batch commits to {prospective_state_hash}, not {rendered}"
+        )),
+        ProposedState::Preparing { .. } => {
+            Err("a sync is still preparing; nothing is committable yet".to_string())
+        }
+        ProposedState::None => Err("no prepared batch to commit".to_string()),
+    }
+}
+
+/// Discards the prepared state and frees the content it staged.
+///
+/// The escape hatch when a proposal is rejected or an upload is abandoned:
+/// without it a prepared batch blocks every further sync. Guarded like a sync,
+/// so the developer who prepared it can clean up without a proposal.
+pub fn discard_proposed_state() {
+    STATE.with_borrow_mut(|s| s.discard_proposed_state())
+}
+
+/// `#[update(guard = ...)]` guard restricting a call to the governance approver.
+pub fn guard_is_governance() -> Result<(), String> {
+    let caller = msg_caller();
+    if STATE.with_borrow(|s| s.is_governance_approver(&caller)) {
+        Ok(())
+    } else {
+        Err("Caller is not the governance approver.".to_string())
+    }
 }
 
 /// `#[update(guard = ...)]` guard over every asset-sync operation.
@@ -237,10 +362,11 @@ pub fn guard_can_sync() -> Result<(), String> {
     }
 }
 
-/// `#[update(guard = ...)]` guard restricting a call to canister controllers.
+/// `#[update(guard = ...)]` guard restricting a call to this canister's
+/// administrators: its controllers, plus the governance approver when one is
+/// configured (see [`is_owner`]).
 pub fn guard_is_controller() -> Result<(), String> {
-    let caller = msg_caller();
-    if ic_cdk::api::is_controller(&caller) {
+    if is_owner(&msg_caller()) {
         Ok(())
     } else {
         Err("Caller is not a controller.".to_string())
