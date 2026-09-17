@@ -250,4 +250,27 @@ fn documented_calls_are_accepted_by_the_canister() {
         },
         "the docs must show a runnable form of every governance method",
     );
+
+    // The validators a DAO registers alongside `authorize`/`deauthorize`. Nobody
+    // types these, but an SNS generic function is rejected without a
+    // `validator_method_name`, so if they were missing or mis-shaped the DAO
+    // could not manage its syncing principals by proposal at all — and nothing
+    // else in the suite would notice. Checked here rather than in a test of
+    // their own because this network is already up.
+    let subject = "aaaaa-aa";
+    let rendered = call(
+        project,
+        "validate_authorize",
+        &format!("(principal \"{subject}\")"),
+    );
+    assert!(rendered.contains(subject), "{rendered}");
+    assert!(rendered.contains("sync assets"), "{rendered}");
+
+    let rendered = call(
+        project,
+        "validate_deauthorize",
+        &format!("(principal \"{subject}\")"),
+    );
+    assert!(rendered.contains(subject), "{rendered}");
+    assert!(rendered.contains("Revoke"), "{rendered}");
 }

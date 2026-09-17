@@ -50,6 +50,21 @@ fn deauthorize(principal: Principal) {
     canister_core::deauthorize(principal)
 }
 
+// Validators for the two methods above, so a DAO can manage its syncing
+// principals by proposal: a generic nervous system function is rejected without
+// a `validator_method_name`. Read-only, unguarded, and updates rather than
+// queries because an inter-canister call cannot reach a query entry point.
+
+#[update]
+fn validate_authorize(principal: Principal) -> Result<String, String> {
+    canister_core::validate_authorize(principal)
+}
+
+#[update]
+fn validate_deauthorize(principal: Principal) -> Result<String, String> {
+    canister_core::validate_deauthorize(principal)
+}
+
 // Recaptures the `PUBLIC_*` env vars + IC root key and re-certifies the `ic_env`
 // cookie onto every HTML response. Any sync-authorized caller may trigger it
 // (same guard as a sync) — only controllers can *change* the env vars, but an

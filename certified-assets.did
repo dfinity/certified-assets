@@ -315,6 +315,12 @@ service: {
 
   authorize: (principal) -> ();
   deauthorize: (principal) -> ();
+  // Validators for the two methods above, so a DAO can manage its syncing
+  // principals by proposal: an SNS generic nervous system function is rejected
+  // without a `validator_method_name`. Read-only and unguarded; updates rather
+  // than queries because an inter-canister call cannot reach a query entry point.
+  validate_authorize: (principal) -> (variant { Ok : text; Err : text });
+  validate_deauthorize: (principal) -> (variant { Ok : text; Err : text });
   list_authorized: () -> (vec principal);
   // Whether the calling identity may sync assets (authorized or a controller).
   can_sync: () -> (bool) query;

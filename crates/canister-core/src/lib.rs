@@ -53,6 +53,45 @@ pub fn deauthorize(principal: Principal) {
     STATE.with_borrow_mut(|s| s.deauthorize(&principal))
 }
 
+/// Renders an `authorize` payload for voters — the `validator_method` of the SNS
+/// generic function that wraps it.
+///
+/// A generic nervous system function cannot be registered without a validator
+/// (`validator_method_name` empty is a rejected proposal), so `authorize` is only
+/// reachable by proposal because this exists. Reports whether the principal is
+/// already authorized, so a no-op proposal is visible before the vote rather
+/// than after.
+pub fn validate_authorize(principal: Principal) -> Result<String, String> {
+    let already = STATE.with_borrow(|s| s.is_authorized(&principal));
+    Ok(format!(
+        "Authorize {principal} to sync assets to this canister.\n\n\
+         Currently authorized: {}.\n\n\
+         A syncing principal can prepare a state change, but cannot make one \
+         live — only the governance approver can commit.",
+        if already {
+            "yes, this changes nothing"
+        } else {
+            "no"
+        }
+    ))
+}
+
+/// Renders a `deauthorize` payload for voters. See [`validate_authorize`].
+pub fn validate_deauthorize(principal: Principal) -> Result<String, String> {
+    let authorized = STATE.with_borrow(|s| s.is_authorized(&principal));
+    Ok(format!(
+        "Revoke {principal}'s authorization to sync assets to this canister.\n\n\
+         Currently authorized: {}.\n\n\
+         Canister controllers and the governance approver keep their access \
+         either way; this list holds only the extra principals.",
+        if authorized {
+            "yes"
+        } else {
+            "no, this changes nothing"
+        }
+    ))
+}
+
 pub fn list_authorized() -> Vec<Principal> {
     STATE.with_borrow(|s| s.list_authorized())
 }

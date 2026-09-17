@@ -78,8 +78,10 @@ icp canister call frontend set_governance '(opt principal "<sns-governance-canis
 icp canister call frontend governance '()'
 ```
 
-Then register two SNS generic nervous-system functions, exactly as you would for
-any other by-proposal method:
+Then register **one** SNS generic nervous-system function, exactly as you would
+for any other by-proposal method. A function names both the method to call and
+the validator that renders its payload — these are two methods, not two
+functions:
 
 | | |
 |---|---|
@@ -89,6 +91,11 @@ any other by-proposal method:
 
 The validator renders the payload for voters: the state hash, how many assets the
 commit touches, and how to reproduce the hash from source.
+
+If you also want the DAO to manage who may sync, register one function per
+method the same way — `authorize` with `validate_authorize`, and `deauthorize`
+with `validate_deauthorize`. A generic function is rejected without a validator,
+which is why the canister exposes one for each.
 
 ## The release flow
 
@@ -238,10 +245,11 @@ Add SNS root as a controller (registration is refused unless root already
 controls the canister), then remove yourself. Then, by proposal:
 
 - `RegisterDappCanisters` with the new canister id.
-- Two generic nervous system functions, as in [Setup](#setup):
-  `commit_proposed_state` with validator `validate_commit_proposed_state`.
-- Optionally `authorize` / `deauthorize` as generic functions too, so the DAO can
-  rotate deploy principals by proposal later.
+- One generic nervous system function, as in [Setup](#setup): target
+  `commit_proposed_state`, validator `validate_commit_proposed_state`.
+- Optionally one more per method — `authorize` / `validate_authorize` and
+  `deauthorize` / `validate_deauthorize` — so the DAO can rotate deploy
+  principals by proposal later.
 
 Rotating the approver later needs no special handling: the approver is accepted
 wherever a controller is, so the DAO can call `set_governance` on itself by
