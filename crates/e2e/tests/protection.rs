@@ -89,20 +89,32 @@ fn protected_app_gates_unauthenticated_requests() {
     // 302 + Set-Cookie (delivered only because it is certified).
     let r = http_post_form(project, "/login.html", "token=secret", &[]);
     assert_eq!(r.status(), StatusCode::FOUND);
-    let set_cookie = r
+    let cookies: Vec<String> = r
         .headers()
-        .get("set-cookie")
-        .and_then(|v| v.to_str().ok())
-        .expect("redeem must Set-Cookie");
-    assert!(
-        set_cookie.contains("certified_assets_access=secret"),
-        "got: {set_cookie}"
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        cookies.len(),
+        2,
+        "redeem must Set-Cookie twice, got: {cookies:?}"
     );
-    assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
-    // Embeddable by default: the credential must survive a cross-site iframe
-    // (Caffeine-style preview), so it is a partitioned cross-site cookie.
-    assert!(set_cookie.contains("SameSite=None"), "got: {set_cookie}");
-    assert!(set_cookie.contains("Partitioned"), "got: {set_cookie}");
+    assert!(
+        cookies
+            .iter()
+            .all(|c| c.contains("certified_assets_access=secret") && c.contains("HttpOnly")),
+        "got: {cookies:?}"
+    );
+    // Accepted everywhere: `Lax` for clients that reject `SameSite=None`, and a
+    // partitioned cross-site cookie so the credential survives a cross-site
+    // iframe (Caffeine-style preview).
+    assert!(cookies[0].contains("SameSite=Lax"), "got: {cookies:?}");
+    assert!(
+        cookies[1].contains("SameSite=None") && cookies[1].contains("Partitioned"),
+        "got: {cookies:?}"
+    );
 
     // A wrong password re-prompts with a certified 401.
     assert_eq!(

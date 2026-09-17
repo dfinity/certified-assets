@@ -4270,16 +4270,27 @@ mod access_protection {
         );
         assert_eq!(r.status_code, 302);
         assert_eq!(lookup_header(&r, "location"), Some("/"));
-        let set_cookie = lookup_header(&r, "set-cookie").expect("Set-Cookie");
+        let cookies: Vec<&str> = r
+            .headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(cookies.len(), 2, "got: {cookies:?}");
         assert!(
-            set_cookie.contains("certified_assets_access=secret"),
-            "got: {set_cookie}"
+            cookies
+                .iter()
+                .all(|c| c.contains("certified_assets_access=secret") && c.contains("HttpOnly")),
+            "got: {cookies:?}"
         );
-        assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
-        // Embedding-friendly by default: the credential must survive a cross-site
-        // iframe (Caffeine-style preview), so it is a partitioned cross-site cookie.
-        assert!(set_cookie.contains("SameSite=None"), "got: {set_cookie}");
-        assert!(set_cookie.contains("Partitioned"), "got: {set_cookie}");
+        // Accepted everywhere: `Lax` for clients that reject `SameSite=None`, and a
+        // partitioned cross-site cookie so the credential survives a cross-site
+        // iframe (Caffeine-style preview).
+        assert!(cookies[0].contains("SameSite=Lax"), "got: {cookies:?}");
+        assert!(
+            cookies[1].contains("SameSite=None") && cookies[1].contains("Partitioned"),
+            "got: {cookies:?}"
+        );
     }
 
     #[test]

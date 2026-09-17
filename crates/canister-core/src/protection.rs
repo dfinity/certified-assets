@@ -79,18 +79,35 @@ pub(crate) fn token_id(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
 
-/// The `Set-Cookie` value handed back on a successful redeem. Host-only (no
-/// `Domain`), `HttpOnly` (page scripts can't read it), `Secure`, and a session
-/// cookie (no `Max-Age` → dies on tab close). `SameSite=None; Partitioned` (CHIPS)
-/// so the credential is delivered when the app is shown inside a **cross-site
-/// iframe** (e.g. a preview embedded in another site): a plain cross-site cookie is
-/// blocked by Safari and restricted by Chrome/Firefox, whereas a partitioned cookie
-/// is scoped to the embedding top-level site and delivered there. `Partitioned` also
-/// keeps the cookie from riding along to arbitrary *other* embedders. Must be
-/// byte-identical between the certify path (`issue_token`) and the serve path
-/// (redeem), since it is part of the certified response hash.
-fn access_cookie(value: &str) -> String {
-    format!("{ACCESS_COOKIE}={value}; HttpOnly; Secure; SameSite=None; Partitioned; Path=/")
+/// The `Set-Cookie` values handed back on a successful redeem. Host-only (no
+/// `Domain`), `HttpOnly` (page scripts can't read it), `Secure`, and session
+/// cookies (no `Max-Age` → the credential dies on tab close).
+///
+/// Two variants, same name and value, for the reason given in
+/// [`crate::asset::render_env_cookies`]: no single attribute set is accepted in
+/// every client. `SameSite=None; Partitioned` (CHIPS) delivers the credential
+/// when the app is shown inside a **cross-site iframe** (e.g. a preview embedded
+/// in another site) — a plain cross-site cookie is blocked by Safari and
+/// restricted by Chrome/Firefox, whereas a partitioned cookie is scoped to the
+/// embedding top-level site and kept from riding along to arbitrary *other*
+/// embedders. But `SameSite=None` is rejected outright by Chrome 51–66, Android
+/// WebView of that vintage, and UC Browser before 12.13.2, and those clients
+/// would be unable to log in at all; the `SameSite=Lax` variant is what they
+/// accept. `Lax` is stricter than `None`, so offering it alongside loosens
+/// nothing.
+///
+/// Both are safe to present together: [`access_cookie_values`] collects every
+/// `certified_assets_access` in the request and protection accepts if any is
+/// valid.
+///
+/// Must be byte-identical between the certify path (`issue_token`) and the serve
+/// path (redeem), since these are part of the certified response hash.
+fn access_cookies(value: &str) -> Vec<String> {
+    let common = format!("{ACCESS_COOKIE}={value}; HttpOnly; Secure");
+    vec![
+        format!("{common}; SameSite=Lax; Path=/"),
+        format!("{common}; SameSite=None; Partitioned; Path=/"),
+    ]
 }
 
 /// Every `certified_assets_access=` value present in the request's `Cookie` header(s). The
@@ -181,11 +198,17 @@ impl ProtectionResponse {
     pub fn redeem_success(token_value: &str) -> Self {
         Self {
             status: 302,
-            headers: vec![
-                ("location".to_string(), "/".to_string()),
-                ("set-cookie".to_string(), access_cookie(token_value)),
-                ("cache-control".to_string(), "no-store".to_string()),
-            ],
+            headers: std::iter::once(("location".to_string(), "/".to_string()))
+                .chain(
+                    access_cookies(token_value)
+                        .into_iter()
+                        .map(|c| ("set-cookie".to_string(), c)),
+                )
+                .chain(std::iter::once((
+                    "cache-control".to_string(),
+                    "no-store".to_string(),
+                )))
+                .collect(),
             body: Vec::new(),
         }
     }
@@ -326,12 +349,16 @@ mod tests {
 
     #[test]
     fn access_cookie_is_embeddable_by_default() {
-        // The default must work inside a cross-site iframe out of the box (the
-        // Caffeine preview use case): `SameSite=None; Secure; Partitioned` (CHIPS).
-        // Host-only (no `Domain`) and a session cookie (no `Max-Age`).
+        // Both variants ship: `Lax` for clients that reject `SameSite=None`, and
+        // `SameSite=None; Secure; Partitioned` (CHIPS) so the credential is
+        // delivered inside a cross-site iframe (the Caffeine preview use case).
+        // Host-only (no `Domain`) and session cookies (no `Max-Age`).
         assert_eq!(
-            access_cookie("tok"),
-            "certified_assets_access=tok; HttpOnly; Secure; SameSite=None; Partitioned; Path=/"
+            access_cookies("tok"),
+            vec![
+                "certified_assets_access=tok; HttpOnly; Secure; SameSite=Lax; Path=/",
+                "certified_assets_access=tok; HttpOnly; Secure; SameSite=None; Partitioned; Path=/"
+            ]
         );
     }
 
