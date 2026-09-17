@@ -9,8 +9,8 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use crate::canister::{
-    CallType, CanisterCall, authorize_via_proxy, can_sync, execute_operations, governance,
-    list_all_assets, list_all_redirect_rules, preparation_canary, start_sync, version,
+    CallType, CanisterCall, authorize_via_proxy, can_sync, execute_operations, list_all_assets,
+    list_all_redirect_rules, preparation_canary, proposed_state, start_sync, version,
 };
 use asset_prep::{
     Compressors, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, ProjectPlan,
@@ -18,9 +18,9 @@ use asset_prep::{
 };
 use wire_types::{
     AssetDetails, ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding,
-    ExecuteOperationsArguments, Operation, RedirectRule, RulePattern, SetAssetContentArguments,
-    SetAssetHeadersArguments, SetPreparationCanaryArguments, SetRedirectRulesArguments,
-    UnsetAssetContentArguments, UploadChunksArguments,
+    ExecuteOperationsArguments, Operation, ProposedState, RedirectRule, RulePattern,
+    SetAssetContentArguments, SetAssetHeadersArguments, SetPreparationCanaryArguments,
+    SetRedirectRulesArguments, UnsetAssetContentArguments, UploadChunksArguments,
 };
 
 /// One encoding of an asset, as the canister diff/upload sees it: the prepared
@@ -345,16 +345,6 @@ pub fn sync<C: CanisterCall>(
     }
     println!("version: {canister_version}");
 
-    // Whether this canister publishes on sync or stages for a governance
-    // proposal is the canister's own setting, not ours — a by-proposal deploy
-    // takes exactly the same calls, and only the reporting differs. Ask up
-    // front so every line below can say which kind of run this is, rather than
-    // claiming at the end to have deployed something that is not live.
-    let by_proposal = governance(canister)?.is_some();
-    if by_proposal {
-        println!("governance mode: this run prepares a state change; it will not go live");
-    }
-
     // Plan the project's `dist/`: scan + parse `_redirects`/`_headers` +
     // synthesise html-handling/404 rules + load each asset, resolve its media
     // type and headers, and hash its uncompressed bytes. This is the cheap half
@@ -436,19 +426,32 @@ pub fn sync<C: CanisterCall>(
     .is_empty()
     {
         println!("canister is up to date, nothing to commit");
-        let n = project_assets.len();
-        // Worth being explicit in governance mode: no batch was staged, so
-        // there is nothing to propose and no need to go looking for a hash.
-        return Ok(if by_proposal {
-            format!("{n} asset(s) already up to date; nothing prepared, nothing to propose")
-        } else {
-            format!("{n} asset(s) already up to date")
-        });
+        // No sync was started, so this run neither published nor prepared
+        // anything — and that is the whole of what it can claim. Whether the
+        // canister has some *other* batch already staged is not something this
+        // invocation observed (its diff is against live assets, which a staged
+        // batch leaves untouched), so it must not say.
+        return Ok(format!(
+            "{} asset(s) already up to date",
+            project_assets.len()
+        ));
     }
 
     // Phase 2: start a sync and upload chunks for encodings not already in place.
     let session_id = start_sync(canister)?;
     println!("started sync session {session_id}");
+
+    // Ask what the canister just *decided*, rather than what its setting said a
+    // moment ago. `start_sync` fixes this sync's mode by opening a prepared
+    // batch or not, and after that nothing can move it: a batch blocks
+    // `set_governance`, and no second sync can start while we hold the session.
+    // Reading the setting before planning would only be a guess — flip the
+    // switch in that window and the summary claims a prepare went live, or that
+    // a published deploy did not.
+    let by_proposal = matches!(proposed_state(canister)?, ProposedState::Preparing { .. });
+    if by_proposal {
+        println!("governance mode: this run prepares a state change; it will not go live");
+    }
 
     pack_and_upload_chunks(canister, session_id, &mut project_assets)?;
 
@@ -1970,6 +1973,7 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        push_direct_mode(&mock);
         // Injected /404.html bytes are uploaded before operations execute;
         // SyncMock synthesizes the returned ids from the request.
         mock.push_ok("execute_operations", ());
@@ -2317,15 +2321,32 @@ mod tests {
         }
     }
 
-    /// Programs the three reads every `sync()` makes before it reaches anything
-    /// a test is usually about: the version gate, the authorization check, and
-    /// the governance switch. Governance is answered "off", the ordinary case;
-    /// a test exercising by-proposal mode programs `governance` itself instead
-    /// of calling this.
+    /// Programs the two reads every `sync()` makes before it reaches anything a
+    /// test is usually about: the version gate and the authorization check.
+    ///
+    /// The mode read is *not* here: `sync()` asks `proposed_state` only after
+    /// `start_sync`, so a test that never gets that far needs no answer for it,
+    /// and one that does programs the answer it wants.
     fn push_sync_preamble(mock: &SyncMock) {
         mock.push_ok("version", wire_types::VERSION);
         mock.push_ok("can_sync", true);
-        mock.push_ok("governance", None::<Principal>);
+    }
+
+    /// The `proposed_state` answer a canister with governance off gives right
+    /// after `start_sync`: no batch was opened, so this sync publishes.
+    fn push_direct_mode(mock: &SyncMock) {
+        mock.push_ok("proposed_state", ProposedState::None);
+    }
+
+    /// The answer a canister in governance mode gives: `start_sync` opened a
+    /// batch, so this sync prepares.
+    fn push_prepare_mode(mock: &SyncMock) {
+        mock.push_ok(
+            "proposed_state",
+            ProposedState::Preparing {
+                owner: Principal::anonymous(),
+            },
+        );
     }
 
     /// Programs the canary query with the canonical registry's fingerprint — i.e.
@@ -2520,6 +2541,7 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        push_direct_mode(&mock);
         // SyncMock synthesizes upload_chunks' returned ids from the request.
         mock.push_ok("execute_operations", ());
 
@@ -2542,13 +2564,12 @@ mod tests {
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
 
         let mock = SyncMock::new();
-        mock.push_ok("version", wire_types::VERSION);
-        mock.push_ok("can_sync", true);
-        mock.push_ok("governance", Some(Principal::management_canister()));
+        push_sync_preamble(&mock);
         push_matching_canary(&mock);
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        push_prepare_mode(&mock);
         mock.push_ok(
             "execute_operations",
             Some(serde_bytes::ByteBuf::from(vec![0xab; 32])),
@@ -2587,6 +2608,7 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        push_direct_mode(&mock);
         mock.push_ok(
             "execute_operations",
             Some(serde_bytes::ByteBuf::from(vec![0xab; 32])),
@@ -2607,6 +2629,11 @@ mod tests {
 
     /// A staged batch reports `Busy`, same as a colleague's deploy. Waiting
     /// would never clear it, so the message has to say so and name the way out.
+    ///
+    /// The two owners here are deliberately different. The hash is read from a
+    /// second call, so taking the owner from the first would let a
+    /// discard-and-re-prepare in between describe one batch with another's
+    /// owner; both fields must come from the same observation.
     #[test]
     fn a_staged_batch_explains_itself_rather_than_looking_busy() {
         let dir = tempfile::tempdir().unwrap();
@@ -2622,7 +2649,7 @@ mod tests {
         mock.push_ok(
             "start_sync",
             StartSyncOk::Busy {
-                owner: Principal::anonymous(),
+                owner: Principal::management_canister(),
                 idle_for_secs: 0,
             },
         );
@@ -2649,6 +2676,14 @@ mod tests {
         assert!(err.contains("awaiting its governance proposal"), "{err}");
         assert!(err.contains(&"cd".repeat(32)), "{err}");
         assert!(err.contains("discard_proposed_state"), "{err}");
+        assert!(
+            err.contains(&Principal::anonymous().to_text()),
+            "the owner must be the staged batch's, got: {err}"
+        );
+        assert!(
+            !err.contains(&Principal::management_canister().to_text()),
+            "must not name the owner from the earlier Busy reply: {err}"
+        );
         assert!(
             !err.contains("retry once it completes"),
             "must not suggest waiting it out: {err}"
@@ -3161,6 +3196,7 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        push_direct_mode(&mock);
         mock.push_ok("execute_operations", None::<ByteBuf>);
 
         sync(
