@@ -44,7 +44,7 @@ impl State {
     /// anything in governance mode, so switching out from under one would strand
     /// its content. Discard it first.
     pub fn set_governance_approver(&mut self, approver: Option<Principal>) -> Result<(), String> {
-        if self.store.prepared_batch().is_some() {
+        if self.store.has_prepared_batch() {
             return Err(
                 "a prepared batch is pending; commit or discard it before changing governance"
                     .to_string(),
@@ -54,11 +54,32 @@ impl State {
         Ok(())
     }
 
-    /// Whether the canister is in by-proposal mode, i.e. whether a sync prepares
-    /// rather than publishes. Consulted by every asset mutation, so it reads the
-    /// settings cell's cached value rather than stable memory.
-    pub(super) fn by_proposal(&self) -> bool {
+    /// Whether by-proposal deploys are switched on — i.e. whether the *next*
+    /// sync should prepare rather than publish.
+    ///
+    /// Only [`Self::start_sync`](crate::state::State::start_sync) asks this, at
+    /// the one moment the question is open. Everything inside a running sync
+    /// asks [`Self::by_proposal`] instead.
+    pub(super) fn governance_enabled(&self) -> bool {
         self.store.governance_approver().is_some()
+    }
+
+    /// Whether the sync in progress is a **prepare** — keyed off the prepared
+    /// batch, not the approver setting.
+    ///
+    /// The distinction matters because the setting can change underneath a
+    /// running sync. If this asked the setting, enabling governance mid-sync
+    /// would make the rest of that sync's operations write into an overlay no
+    /// batch was ever opened for: finalization would silently stage nothing,
+    /// leaving orphaned overlay entries and content that no later discard can
+    /// reach (its watermark sits after them). Keying off the batch makes a
+    /// sync's mode fixed for its whole life by construction — decided once, when
+    /// `start_sync` did or didn't open a batch — so no guard is needed and the
+    /// two halves can never disagree.
+    ///
+    /// Consulted on every asset mutation, so it must not clone the batch.
+    pub(super) fn by_proposal(&self) -> bool {
+        self.store.has_prepared_batch()
     }
 
     /// What `proposed_state` reports.
@@ -195,8 +216,8 @@ impl State {
     fn release_prepared_content(&mut self, content_id: u64) {
         let is_ours = self
             .store
-            .prepared_batch()
-            .is_some_and(|b| content_id >= b.first_content_id);
+            .prepared_first_content_id()
+            .is_some_and(|first| content_id >= first);
         if is_ours {
             self.store.delete_content_group(content_id);
         }
@@ -429,11 +450,18 @@ impl State {
     ///
     /// The escape hatch for a rejected proposal or an abandoned upload: without
     /// it a prepared batch would block further syncs forever. Live state is
-    /// untouched — a prepare never wrote any.
+    /// untouched — a prepare never wrote any — and any sync still preparing is
+    /// ended along with it.
     pub fn discard_proposed_state(&mut self) {
         let Some(batch) = self.store.prepared_batch() else {
             return;
         };
+        // End the preparing sync too, if one is still running. Dropping the
+        // batch out from under it would otherwise leave its remaining
+        // operations writing into an overlay with nothing to stage them; ending
+        // the session makes those calls fail cleanly on their session id.
+        self.sync_session = None;
+        self.chunks.clear();
         // Everything from this prepare's watermark up to the allocator's current
         // position was allocated by it and is referenced by nothing live.
         // Already-freed ids in the range are a no-op.

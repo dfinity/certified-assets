@@ -97,12 +97,21 @@ impl State {
         // the previous session before starting fresh.
         self.chunks.clear();
 
-        if self.by_proposal() {
+        if self.governance_enabled() {
             // A by-proposal sync only *prepares*: it writes content that nothing
             // references and metadata that lives beside the live keyspace, so
-            // what the canister serves — and therefore its cached hash — stays
-            // valid and verifiable for the whole voting period. Open a batch to
-            // collect the prepare instead of invalidating anything.
+            // the assets the canister serves — and therefore its cached hash —
+            // stay valid and verifiable for the whole voting period. Open a
+            // batch to collect the prepare instead of invalidating anything.
+            //
+            // One thing a prepare does still publish: the caller above captures
+            // the environment, which re-certifies the `ic_env` cookie on HTML
+            // responses if it changed. That is outside the overlay by design —
+            // the cookie carries controller-set `PUBLIC_*` vars and the root
+            // key, it is not part of the state-hash manifest, and any
+            // sync-authorized caller can already publish it on its own with
+            // `refresh_env`. So it moves no hash and grants no new power; it is
+            // simply not content, and not gated on the proposal.
             self.open_prepared_batch(owner);
         } else {
             // From here on this sync may mutate served content, so the cached

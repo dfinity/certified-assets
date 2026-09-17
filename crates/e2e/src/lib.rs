@@ -369,11 +369,13 @@ pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
 /// values so a snippet can be sent as-is. A placeholder left unfilled fails the
 /// caller rather than skipping the snippet — a new spelling belongs here, not in
 /// a hole in the coverage.
-const PLACEHOLDERS: [(&str, &str); 5] = [
+const PLACEHOLDERS: [(&str, &str); 7] = [
     ("<label>", "doc-label"),
     ("<value>", "doc-secret"),
     ("<secs>", "3600"),
     ("= N :", "= 3600 :"),
+    ("<sns-governance-canister>", "rrkah-fqaaa-aaaaa-aaaaq-cai"),
+    ("<your-deploy-principal>", "rrkah-fqaaa-aaaaa-aaaaq-cai"),
     ("...", "doc"),
 ];
 

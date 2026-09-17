@@ -5206,6 +5206,112 @@ mod governance {
 
     /// Turning governance off restores ordinary publish-on-sync behaviour, so an
     /// SNS can hand a canister back without leaving it wedged.
+    /// Flipping the switch mid-sync must not change what the *running* sync
+    /// does. A sync's mode is fixed when `start_sync` does or doesn't open a
+    /// prepared batch; if it were read from the setting instead, the operations
+    /// after the flip would write into an overlay with no batch to stage them,
+    /// stranding metadata and leaking the content they allocated.
+    #[test]
+    fn enabling_governance_mid_sync_does_not_hijack_it() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        let session_id = start_session(&mut state, &ctx);
+        let mut operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+            session_id,
+        );
+
+        // The switch flips while the sync is mid-flight.
+        enable(&mut state);
+
+        // The running sync still publishes, as it was authorized to when it
+        // started, and finalizes into a real cached hash.
+        operations.push(Operation::SetAssetHeaders(SetAssetHeadersArguments {
+            key: "/index.html".to_string(),
+            headers: vec![("x-late".to_string(), "1".to_string())],
+        }));
+        execute_all(&mut state, session_id, operations, &ctx);
+
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+        assert_ne!(state.cached_state_hash(), [0u8; 32]);
+        assert_eq!(state.recompute_state_hash(), state.cached_state_hash());
+        assert!(
+            matches!(state.proposed_state(), ProposedState::None),
+            "the sync left no half-staged batch behind"
+        );
+
+        // And governance takes effect from the next sync, cleanly.
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v2"]),
+            ],
+        );
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+        let prospective = staged_hash(&state);
+        state.commit_proposed_state(prospective).unwrap();
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v2"[..]));
+    }
+
+    /// Discarding while a prepare is still uploading must end that sync too,
+    /// so its remaining operations can't write into an overlay that no longer
+    /// has a batch behind it.
+    #[test]
+    fn discarding_mid_prepare_ends_the_sync() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+        );
+        let live_hash = state.cached_state_hash();
+        enable(&mut state);
+
+        let session_id = start_session(&mut state, &ctx);
+        let operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/late.html", "text/html").with_encoding("identity", vec![b"x"]),
+            ],
+            session_id,
+        );
+
+        state.discard_proposed_state();
+
+        // The abandoned session is gone, so its queued operations are refused
+        // rather than landing in a batch-less overlay.
+        let outcome = run_computation_until_completion(|progress| {
+            state.execute_operations(
+                &ExecuteOperationsArguments {
+                    session_id,
+                    operations: operations.clone(),
+                    is_final: true,
+                },
+                progress,
+                &ctx,
+            )
+        });
+        assert!(outcome.is_err(), "operations must not outlive the discard");
+
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+        assert_eq!(state.cached_state_hash(), live_hash);
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+    }
+
     #[test]
     fn disabling_governance_restores_direct_syncs() {
         let mut state = State::default();

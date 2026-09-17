@@ -1,6 +1,6 @@
 ---
-title: "Deploys by proposal"
-description: "Put frontend updates under DAO control: a developer prepares, a governance proposal commits, and voters approve a hash they can reproduce from source"
+title: "Deploy by proposal"
+description: "Put site updates under DAO control: a developer prepares, a governance proposal commits, and voters approve a hash they can reproduce from source"
 sidebar:
   order: 8
 ---
@@ -65,9 +65,14 @@ commit. Under an SNS this is the **governance** canister — not root.
 > notably `authorize` and `deauthorize`. Without that, a DAO could never grant or
 > rotate a developer's sync access on its own asset canister.
 
+Set it **as a controller, before the canister belongs to the DAO**. Once SNS root
+is the sole controller there is no way to make this call — root performs canister
+management but never relays an arbitrary method call — so a canister handed over
+without an approver cannot be put into governance mode afterwards. See
+[Migrating](#migrating-from-the-old-asset-canister) for the order to do this in.
+
 ```sh
-# As a controller (under an SNS: by proposal, since root is the controller).
-icp canister call frontend set_governance '(opt principal "rrkah-fqaaa-aaaaa-aaaaq-cai")'
+icp canister call frontend set_governance '(opt principal "<sns-governance-canister>")'
 
 # Confirm. Public, so anyone can check who may change this canister's content.
 icp canister call frontend governance '()'
@@ -157,6 +162,16 @@ target method's reply and records any reply as success, so an error return would
 show an adopted proposal as *executed* while nothing happened. Trapping is the
 only failure this canister can report that governance will surface.
 
+**The `ic_env` cookie is the one thing a prepare still publishes.** A sync
+captures the canister environment when it starts, and if the rendered cookie
+changed it re-certifies HTML responses with the new value — during a prepare too.
+That is deliberate: the cookie carries controller-set `PUBLIC_*` vars and the IC
+root key, it is not part of the state hash, and any sync-authorized caller can
+already publish it on its own with `refresh_env`. So it moves neither hash and
+grants nobody new power, but it does mean "a prepare changes nothing served" is
+about your *assets*, not literally every response byte. Env vars are normally set
+once at install and left alone, so in practice this never comes up.
+
 **Upgrades are safe mid-vote.** A prepared batch is stable state, so it survives a
 canister upgrade and is still committable afterwards.
 
@@ -174,21 +189,80 @@ the flow is the same shape with two differences: the payload is a state hash you
 reproduce from source rather than a batch evidence digest, and you propose *after*
 preparing rather than computing evidence on the canister.
 
-The move itself is a one-time, disruptive migration — stable-memory layouts are
-not compatible, so it is a reinstall, not an upgrade:
+**Migrate onto a new canister, not in place.** Stable-memory layouts are not
+compatible, so reusing the existing canister would mean a reinstall — which wipes
+it, leaves your DAO's frontend dark while you re-upload, and gives you nothing to
+fall back on if the new setup misbehaves. Standing up a second canister keeps the
+old frontend serving the whole time, and you decommission it only once you have
+watched the new one work.
 
-1. Upgrade the wasm with `UpgradeSnsControlledCanister`, pointed at a
-   [release](https://github.com/dfinity/certified-assets/releases)
-   `canister-release.wasm.gz`, using **reinstall** mode. This wipes the canister's
-   state.
-2. Re-grant developer sync access with `authorize` (the old `Prepare` grants do
-   not carry over).
-3. `set_governance` to your SNS governance canister.
-4. Replace the old generic functions (`commit_proposed_batch`, `grant_permission`,
-   `revoke_permission`) with the two above plus `authorize`/`deauthorize`.
-5. Re-deploy the site in full: the first prepare uploads every asset, and the
-   first commit publishes them.
+It also avoids a bootstrapping problem. `set_governance` is controller-guarded,
+and once a canister belongs to the DAO its only controller is SNS **root**, which
+performs canister management but never relays an arbitrary method call. So
+governance must be configured *before* the handover, while you are still the
+controller — which is exactly what the order below does.
 
-The canister and the `icp-cli` sync plugin ship as a version-locked pair, and
-`state-hash-cli` must match them, so plan each canister upgrade as its own
-proposal.
+### 1. Stand up the new canister
+
+Create and deploy it yourself, outside DAO control, and check it over:
+
+```sh
+icp deploy
+```
+
+Confirm it serves correctly, then verify it the way a voter will:
+
+```sh
+state-hash ./dist
+icp canister call frontend state_hash '()'   # must match
+```
+
+### 2. Configure it, while you are still the controller
+
+Order matters here — both of these need controller rights that you are about to
+give up.
+
+```sh
+# Your CI / deploy principal, so you can keep preparing after the handover.
+icp canister call frontend authorize '(principal "<your-deploy-principal>")'
+
+# The DAO's governance canister, as the approver.
+icp canister call frontend set_governance '(opt principal "<sns-governance-canister>")'
+```
+
+From here on `icp deploy` prepares instead of publishing.
+
+### 3. Hand it to the DAO
+
+Add SNS root as a controller (registration is refused unless root already
+controls the canister), then remove yourself. Then, by proposal:
+
+- `RegisterDappCanisters` with the new canister id.
+- Two generic nervous system functions, as in [Setup](#setup):
+  `commit_proposed_state` with validator `validate_commit_proposed_state`.
+- Optionally `authorize` / `deauthorize` as generic functions too, so the DAO can
+  rotate deploy principals by proposal later.
+
+Rotating the approver later needs no special handling: the approver is accepted
+wherever a controller is, so the DAO can call `set_governance` on itself by
+proposal if its governance canister ever changes.
+
+### 4. Run one full cycle before cutting over
+
+Do a real prepare → proposal → commit on the new canister while the old frontend
+is still live. That exercises the part you cannot rehearse any other way: whether
+voters can reproduce your build's state hash.
+
+### 5. Retire the old canister
+
+Once the new one is serving and you have cut over any custom domain, remove the
+old asset canister from DAO control with `DeregisterDappCanisters`, or stop and
+delete it.
+
+Two ongoing notes:
+
+- Your build must be **reproducible** for any of this to be verifiable — see the
+  warning under [What voters actually approve](#what-voters-actually-approve).
+- The canister and the `icp-cli` sync plugin ship as a version-locked pair, and
+  `state-hash-cli` must match them, so plan each canister upgrade as its own
+  proposal.

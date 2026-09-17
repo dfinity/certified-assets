@@ -460,9 +460,21 @@ impl Store {
         self.governance.set(GovernanceSettings { approver });
     }
 
-    /// The prepared-but-uncommitted batch, if any.
+    /// The prepared-but-uncommitted batch, if any. Clones; prefer the two cheap
+    /// accessors below on paths a sync walks per operation.
     pub fn prepared_batch(&self) -> Option<PreparedBatch> {
         self.prepared.get().0.clone()
+    }
+
+    /// Whether a batch is prepared, without cloning it. The sync path asks this
+    /// on every operation, and a batch can carry the whole redirect-rule list.
+    pub fn has_prepared_batch(&self) -> bool {
+        self.prepared.get().0.is_some()
+    }
+
+    /// The prepared batch's content-allocation watermark, without cloning it.
+    pub fn prepared_first_content_id(&self) -> Option<u64> {
+        self.prepared.get().0.as_ref().map(|b| b.first_content_id)
     }
 
     /// Stores (or clears, with `None`) the prepared batch. Clearing does **not**
