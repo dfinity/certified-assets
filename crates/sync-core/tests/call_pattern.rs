@@ -115,6 +115,9 @@ impl CanisterCall for RecordingMock {
             // The test drives sync() in direct mode, which checks can_sync up
             // front; report the identity as allowed so it proceeds.
             "can_sync" => Encode!(&true),
+            // Governance mode off: this measures the ordinary publish-on-sync
+            // call pattern, which is what every static-site deploy makes.
+            "governance" => Encode!(&None::<candid::Principal>),
             // An empty canister has no recorded compression fingerprint, so
             // report the "unknown" value — every asset is new here anyway.
             "preparation_canary" => Encode!(&serde_bytes::ByteBuf::from(vec![0u8; 32])),
@@ -205,6 +208,7 @@ fn many_tiny_files() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("governance", 1),
                 ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
@@ -212,7 +216,7 @@ fn many_tiny_files() {
                 ("upload_chunks", 1),
                 ("execute_operations", 5),
             ],
-            1_160_920,
+            1160927,
         ),
     );
 }
@@ -227,6 +231,7 @@ fn many_small_files() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("governance", 1),
                 ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
@@ -234,7 +239,7 @@ fn many_small_files() {
                 ("upload_chunks", 1),
                 ("execute_operations", 1),
             ],
-            528_204,
+            528211,
         ),
     );
 }
@@ -248,6 +253,7 @@ fn few_medium_files() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("governance", 1),
                 ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
@@ -255,7 +261,7 @@ fn few_medium_files() {
                 ("upload_chunks", 12),
                 ("execute_operations", 1),
             ],
-            20_976_577,
+            20976584,
         ),
     );
 }
@@ -270,6 +276,7 @@ fn one_huge_file() {
             &[
                 ("version", 1),
                 ("can_sync", 1),
+                ("governance", 1),
                 ("preparation_canary", 1),
                 ("get_asset_details", 1),
                 ("get_redirect_rules", 1),
@@ -277,7 +284,7 @@ fn one_huge_file() {
                 ("upload_chunks", 28),
                 ("execute_operations", 1),
             ],
-            52_433_943,
+            52433950,
         ),
     );
 }
