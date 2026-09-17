@@ -27,3 +27,9 @@ tempfile.workspace = true
 sync-agent = { path = "../sync-agent" }
 ic-agent.workspace = true
 tokio.workspace = true
+# Only the SNS governance test (tests/sns.rs) needs it: it drives the PocketIC
+# instance behind `icp network start` directly, which is the one way to send a
+# call *as* the NNS governance canister. Version-matched to the server
+# icp-cli-network-launcher runs.
+pocket-ic = "16.0.0"
+sha2.workspace = true

@@ -491,3 +491,31 @@ pub fn proposed_state(project: &Path) -> ProposedState {
         candid::decode_args::<(ProposedState,)>(&bytes).expect("failed to decode candid response");
     state
 }
+
+/// The PocketIC instance backing this project's local network: the server's base
+/// URL and the instance id within it.
+///
+/// `icp network start` runs PocketIC and records both in the network descriptor,
+/// which is how a test reaches the instance *directly* rather than through the
+/// HTTP gateway. That matters for exactly one thing: PocketIC lets a caller send
+/// a message as an arbitrary principal, which is the only way to exercise a code
+/// path gated on being a specific system canister.
+pub fn pocketic_instance(project: &Path) -> (String, usize) {
+    let descriptor = project.join(".icp/cache/networks/local/descriptor.json");
+    let json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&descriptor)
+            .unwrap_or_else(|e| panic!("{}: {e}", descriptor.display())),
+    )
+    .expect("network descriptor is json");
+
+    let port = json
+        .get("pocketic-config-port")
+        .and_then(|p| p.as_u64())
+        .expect("descriptor has no pocketic-config-port — is this a managed network?");
+    let instance = json
+        .get("pocketic-instance-id")
+        .and_then(|i| i.as_u64())
+        .expect("descriptor has no pocketic-instance-id") as usize;
+
+    (format!("http://localhost:{port}"), instance)
+}
