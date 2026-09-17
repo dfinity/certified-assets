@@ -13,8 +13,8 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use wire_types::{
-    AssetDetails, ChunkId, ExecuteOperationsArguments, RedirectRule, StartSyncResult,
-    UploadChunksArguments, Version,
+    AssetDetails, ChunkId, ExecuteOperationsArguments, ProposedState, RedirectRule,
+    StartSyncResult, UploadChunksArguments, Version,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -200,11 +200,47 @@ pub fn start_sync(c: &impl CanisterCall) -> Result<u64, String> {
         StartSyncResult::Busy {
             owner,
             idle_for_secs,
-        } => Err(format!(
-            "a sync is already in progress on this canister (started by {owner}, \
-             idle for {idle_for_secs}s); retry once it completes, or after it goes stale"
-        )),
+        } => Err(busy_reason(c, owner, idle_for_secs)),
     }
+}
+
+/// Explains a `Busy`, which covers two situations the operator has to act on
+/// very differently.
+///
+/// A canister in governance mode also reports `Busy` when a prepared state
+/// change is waiting for its proposal — the variant carries no room to say
+/// which, and "idle for 0s" reads like a colleague's deploy. Waiting it out
+/// would never work, so ask the canister rather than guess. A failed or
+/// unrecognised answer falls back to the concurrent-sync wording, which is the
+/// right reading for every canister that has governance switched off.
+fn busy_reason(c: &impl CanisterCall, owner: Principal, idle_for_secs: u64) -> String {
+    // Both fields come from the *same* observation. Taking the owner from the
+    // earlier `Busy` instead would let a discard-and-re-prepare in between
+    // produce a message naming one batch's owner beside another's hash.
+    if let Ok(ProposedState::Staged {
+        owner: staged_by,
+        prospective_state_hash,
+        ..
+    }) = proposed_state(c)
+    {
+        return format!(
+            "this canister has a prepared state change awaiting its governance proposal, \
+             so deploys are blocked until it is resolved.\n\
+             \x20 prepared by:  {staged_by}\n\
+             \x20 state hash:   {prospective_state_hash}\n\
+             Commit it by adopting a proposal that calls `commit_proposed_state` with that \
+             hash, or abandon it with `discard_proposed_state`."
+        );
+    }
+    format!(
+        "a sync is already in progress on this canister (started by {owner}, \
+         idle for {idle_for_secs}s); retry once it completes, or after it goes stale"
+    )
+}
+
+/// What the canister currently has prepared, if anything.
+pub fn proposed_state(c: &impl CanisterCall) -> Result<ProposedState, String> {
+    c.call("proposed_state", (), CallType::Query, true)
 }
 
 /// Stage content chunks under the sync. Takes ownership of the chunk bytes:
