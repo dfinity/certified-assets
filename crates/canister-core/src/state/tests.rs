@@ -3,7 +3,7 @@ use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
 use crate::state::State;
-use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS};
+use crate::sync::{ComputationStatus, ExecuteOperationsProgress, SYNC_IDLE_TIMEOUT_NANOS};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use candid::Principal;
 use ic_certification_testing::CertificateBuilder;
@@ -615,6 +615,322 @@ mod sync {
             }
             other => panic!("expected Busy, got {other:?}"),
         }
+    }
+
+    /// One asset, so a sync has something to hash and a later mutation is
+    /// observable.
+    fn seed_one_asset(state: &mut State, ctx: &SystemContext) {
+        create_assets(
+            state,
+            ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"benign"]),
+            ],
+        );
+    }
+
+    /// A call that deletes the seeded asset and does *not* finalize — the stand-in
+    /// for a long, still-suspended `execute_operations`.
+    fn mutating_call(session_id: SessionId) -> ExecuteOperationsArguments {
+        ExecuteOperationsArguments {
+            session_id,
+            operations: vec![Operation::DeleteAsset(DeleteAssetArguments {
+                key: "/index.html".to_string(),
+            })],
+            is_final: false,
+        }
+    }
+
+    /// Takes the first step of `arg`, returning the progress the driver would
+    /// carry across its next self-call — i.e. leaves the call suspended.
+    fn suspend_after_first_step(
+        state: &mut State,
+        arg: &ExecuteOperationsArguments,
+        ctx: &SystemContext,
+    ) -> ExecuteOperationsProgress {
+        match state.execute_operations(arg, ExecuteOperationsProgress::Starting, ctx) {
+            ComputationStatus::InProgress(p) => p,
+            other => panic!("expected the first step to yield, got {other:?}"),
+        }
+    }
+
+    /// Steps `arg` until it enters the hashing phase and returns there, leaving
+    /// the session flagged `finalizing` with the hash only partly folded.
+    fn advance_into_hashing(
+        state: &mut State,
+        arg: &ExecuteOperationsArguments,
+        ctx: &SystemContext,
+    ) -> ExecuteOperationsProgress {
+        let mut progress = ExecuteOperationsProgress::Starting;
+        loop {
+            match state.execute_operations(arg, progress, ctx) {
+                ComputationStatus::InProgress(
+                    p @ ExecuteOperationsProgress::HashingState { .. },
+                ) => {
+                    return p;
+                }
+                ComputationStatus::InProgress(p) => progress = p,
+                other => panic!("expected to reach the hashing phase, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn operations_cannot_land_after_their_sync_finalized() {
+        // Two `execute_operations` calls can be in flight on the same session at
+        // once: each yields to a self-call between steps, and progress rides in a
+        // local, not in `State`. If a suspended call could resume after another
+        // one finalized the sync, its mutations would land *after* the hash was
+        // cached — the canister would keep reporting a hash that no longer
+        // describes what it serves.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+
+        let session_id = start_session(&mut state, &ctx);
+        let mutating = mutating_call(session_id);
+        let mutating_progress = suspend_after_first_step(&mut state, &mutating, &ctx);
+
+        // A second call finalizes the same session end to end while the first is
+        // suspended.
+        let finalizing = ExecuteOperationsArguments {
+            session_id,
+            operations: vec![],
+            is_final: true,
+        };
+        let hash = run_computation_until_completion(|progress| {
+            state.execute_operations(&finalizing, progress, &ctx)
+        })
+        .unwrap()
+        .expect("the finalizing call reports the hash");
+        assert_eq!(state.cached_state_hash(), hash);
+
+        // The suspended call resumes into a finished sync and must be refused.
+        match state.execute_operations(&mutating, mutating_progress, &ctx) {
+            ComputationStatus::Error(e) => assert!(e.contains("no active sync"), "got: {e}"),
+            other => panic!("expected the resumed call to be refused, got {other:?}"),
+        }
+        assert!(
+            state.contains_asset(&"/index.html".to_string()),
+            "the refused operation must not have been applied"
+        );
+        assert_eq!(
+            state.cached_state_hash(),
+            hash,
+            "the cached hash must still describe the served state"
+        );
+
+        // Finalization released the lock, so a fresh sync starts normally.
+        start_session(&mut state, &ctx);
+    }
+
+    #[test]
+    fn operations_are_refused_while_the_sync_is_finalizing() {
+        // Same race, but the suspended call resumes *during* the staged hashing
+        // rather than after it: the hasher walks the keyspace across messages, so
+        // a mutation here would be folded in only partially.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+
+        let session_id = start_session(&mut state, &ctx);
+        let mutating = mutating_call(session_id);
+        let mutating_progress = suspend_after_first_step(&mut state, &mutating, &ctx);
+
+        let finalizing = ExecuteOperationsArguments {
+            session_id,
+            operations: vec![],
+            is_final: true,
+        };
+        let hashing_progress = advance_into_hashing(&mut state, &finalizing, &ctx);
+
+        match state.execute_operations(&mutating, mutating_progress, &ctx) {
+            ComputationStatus::Error(e) => assert!(e.contains("finalizing"), "got: {e}"),
+            other => panic!("expected the resumed call to be refused, got {other:?}"),
+        }
+        assert!(
+            state.contains_asset(&"/index.html".to_string()),
+            "the refused operation must not have been applied"
+        );
+
+        // Chunk uploads are refused for the same reason.
+        let err = state
+            .upload_chunks(
+                UploadChunksArguments {
+                    session_id,
+                    chunks: vec![ByteBuf::from(b"x".to_vec())],
+                },
+                &ctx,
+            )
+            .unwrap_err();
+        assert!(err.contains("finalizing"), "got: {err}");
+
+        // The finalization itself still completes (resuming where it was parked —
+        // a *new* call can't even start against a finalizing session).
+        let mut progress = hashing_progress;
+        loop {
+            match state.execute_operations(&finalizing, progress, &ctx) {
+                ComputationStatus::InProgress(p) => progress = p,
+                ComputationStatus::Done(hash) => {
+                    assert_eq!(
+                        hash.expect("the finalizing call reports the hash"),
+                        state.cached_state_hash()
+                    );
+                    break;
+                }
+                ComputationStatus::Error(e) => panic!("finalization should complete, got {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn finalizing_sync_blocks_even_its_own_owner() {
+        // The owner may normally reclaim their own sync immediately. That has to
+        // yield while the hash is being computed, or the owner's next deploy could
+        // mutate the very state the staged hasher is walking.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+
+        let session_id = start_session(&mut state, &ctx);
+        let finalizing = ExecuteOperationsArguments {
+            session_id,
+            operations: vec![],
+            is_final: true,
+        };
+        advance_into_hashing(&mut state, &finalizing, &ctx);
+
+        match state.start_sync(some_principal(), &ctx) {
+            StartSyncResult::Busy { owner, .. } => assert_eq!(owner, some_principal()),
+            other => panic!("expected Busy while finalizing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_finalizing_sync_is_still_reclaimable() {
+        // `finalizing` is cleared only by the finalization that set it, so without
+        // an escape a finalization that dies mid-flight (a trap in a later hashing
+        // step, out of cycles, a dropped callback) would wedge the sync lock until
+        // the next upgrade. The idle timeout is that escape.
+        let mut state = State::default();
+        let mut ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+
+        let session_id = start_session(&mut state, &ctx);
+        let finalizing = ExecuteOperationsArguments {
+            session_id,
+            operations: vec![],
+            is_final: true,
+        };
+        advance_into_hashing(&mut state, &finalizing, &ctx);
+        // ...and now the call never comes back.
+
+        ctx.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS;
+        match state.start_sync(some_principal(), &ctx) {
+            StartSyncResult::Started { session_id: id } => assert!(id > session_id),
+            other => panic!("expected a stale finalizing sync to be reclaimable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn starting_a_sync_invalidates_the_cached_hash() {
+        // The lock only keeps mutations out of the *hashing* phase. Everything
+        // before it — a sync's ordinary, non-final operations — changes served
+        // content while the cached digest still describes the state before the
+        // sync. Reporting that stale hash would let a verifier reproduce `dist/`
+        // from clean source, match the canister, and be wrong; so a sync start
+        // drops it, and only finalization puts a real one back.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+        assert_ne!(
+            state.cached_state_hash(),
+            [0u8; 32],
+            "the seeding sync should have cached a hash"
+        );
+
+        start_session(&mut state, &ctx);
+        assert_eq!(
+            state.cached_state_hash(),
+            [0u8; 32],
+            "a sync may mutate from its first call, so the old hash must go"
+        );
+    }
+
+    #[test]
+    fn abandoned_sync_leaves_no_hash_for_the_content_it_changed() {
+        // The concrete attack the invalidation closes: apply a mutation with
+        // `is_final: false` and walk away. The asset is served immediately, and
+        // without invalidation `state_hash` would keep reporting the pre-sync
+        // hash for as long as nobody syncs again.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+        let clean_hash = state.cached_state_hash();
+
+        let session_id = start_session(&mut state, &ctx);
+        let mutating = mutating_call(session_id);
+        run_computation_until_completion(|progress| {
+            state.execute_operations(&mutating, progress, &ctx)
+        })
+        .unwrap();
+        // ...and the sync is never finalized.
+
+        assert!(
+            !state.contains_asset(&"/index.html".to_string()),
+            "the non-final operation is served straight away"
+        );
+        assert_ne!(
+            state.cached_state_hash(),
+            clean_hash,
+            "the canister must not vouch for content it no longer serves"
+        );
+        assert_eq!(state.cached_state_hash(), [0u8; 32]);
+    }
+
+    #[test]
+    fn abandoned_hashing_cannot_disturb_the_sync_that_replaced_it() {
+        // The flip side of the reclaim above: if the abandoned finalization does
+        // eventually resume, it must not cache a hash computed over state the new
+        // sync has since changed, nor tear down the new sync's session.
+        let mut state = State::default();
+        let mut ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+
+        let session_id = start_session(&mut state, &ctx);
+        let finalizing = ExecuteOperationsArguments {
+            session_id,
+            operations: vec![],
+            is_final: true,
+        };
+        let hashing_progress = advance_into_hashing(&mut state, &finalizing, &ctx);
+
+        ctx.current_timestamp_ns += SYNC_IDLE_TIMEOUT_NANOS;
+        let new_session_id = start_session(&mut state, &ctx);
+
+        match state.execute_operations(&finalizing, hashing_progress, &ctx) {
+            ComputationStatus::Error(e) => assert!(e.contains("superseded"), "got: {e}"),
+            other => panic!("expected the superseded hashing step to be refused, got {other:?}"),
+        }
+        assert_eq!(
+            state.cached_state_hash(),
+            [0u8; 32],
+            "a superseded finalization must not publish a hash; the replacement \
+             sync's invalidation stands until that sync finalizes"
+        );
+        assert!(
+            state
+                .upload_chunks(
+                    UploadChunksArguments {
+                        session_id: new_session_id,
+                        chunks: vec![ByteBuf::from(b"x".to_vec())],
+                    },
+                    &ctx,
+                )
+                .is_ok(),
+            "the replacement session must survive the superseded finalization"
+        );
     }
 }
 

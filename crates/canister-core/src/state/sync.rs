@@ -29,8 +29,15 @@ impl State {
     ///   (`SYNC_IDLE_TIMEOUT_NANOS` since its last call); otherwise the call
     ///   returns `Busy` so a teammate can't barge into an active deploy.
     ///
-    /// Reclaiming clears the previous session's staged chunks. The session id
-    /// counter is monotonic and never reused.
+    /// While a sync is *finalizing* (computing its state hash) nobody may
+    /// reclaim it, not even its owner, until it goes stale — see the guard
+    /// below. This is the one exception to the "same owner reclaims
+    /// immediately" rule above, and it is part of the public `start_sync`
+    /// contract (see `certified-assets.did`).
+    ///
+    /// Reclaiming clears the previous session's staged chunks, and starting
+    /// invalidates the cached state hash. The session id counter is monotonic
+    /// and never reused.
     pub fn start_sync(
         &mut self,
         owner: Principal,
@@ -40,7 +47,19 @@ impl State {
 
         if let Some(active) = &self.sync_session {
             let idle = now.saturating_sub(active.last_activity_ns);
-            let reclaimable = active.owner == owner || idle >= SYNC_IDLE_TIMEOUT_NANOS;
+            let stale = idle >= SYNC_IDLE_TIMEOUT_NANOS;
+            // A finalizing session holds the lock against *everyone*, including
+            // its own owner, so nothing mutates the state the staged hasher is
+            // walking. It still yields to the idle timeout, though: a
+            // finalization that never completes (a trap in a later hashing
+            // step, out of cycles, a dropped self-call callback) would
+            // otherwise wedge the sync lock until the next upgrade, since
+            // `finalizing` is only ever cleared on the success path.
+            let reclaimable = if active.finalizing {
+                stale
+            } else {
+                active.owner == owner || stale
+            };
             if !reclaimable {
                 return StartSyncResult::Busy {
                     owner: active.owner,
@@ -53,27 +72,64 @@ impl State {
         // the previous session before starting fresh.
         self.chunks.clear();
 
+        // From here on this sync may mutate served content, so the cached hash
+        // no longer describes what the canister serves. Drop it: a sync that
+        // finalizes caches the real one again, and a sync that is abandoned
+        // leaves the canister reporting "no verifiable hash" instead of a clean
+        // hash for content it no longer serves.
+        self.invalidate_cached_state_hash();
+
         let session_id = self.alloc_session_id();
         self.sync_session = Some(SyncSession {
             id: session_id,
             owner,
             last_activity_ns: now,
+            finalizing: false,
         });
 
         StartSyncResult::Started { session_id }
+    }
+
+    /// Checks that `session_id` still names the active sync and that the sync is
+    /// accepting mutations.
+    ///
+    /// Every step of a sync runs in its own message: `execute_operations` yields
+    /// to a bogus self-call whenever the instruction budget runs low, and any
+    /// other update call can land in that window. The step's progress rides
+    /// across the gap in a local variable, *not* in `State`, so a resumed step
+    /// must re-check the session rather than assume the world is as it left it —
+    /// its sync may have been finalized (its hash already cached, so a further
+    /// mutation would leave the canister reporting a hash that doesn't describe
+    /// what it serves) or reclaimed by someone else entirely.
+    fn require_mutable_session(&self, session_id: SessionId) -> Result<(), String> {
+        match &self.sync_session {
+            Some(s) if s.id == session_id && !s.finalizing => Ok(()),
+            Some(s) if s.id == session_id => Err("sync is finalizing".to_string()),
+            _ => Err("no active sync for this session id".to_string()),
+        }
+    }
+
+    /// Checks that `session_id` still names the active sync *and* that the sync
+    /// is the one this call put into its finalizing phase — the precondition for
+    /// caching a hash and releasing the lock. Fails if the session was reclaimed
+    /// while the staged hasher was suspended, in which case the hash under
+    /// construction no longer describes the live state.
+    fn require_own_finalizing_session(&self, session_id: SessionId) -> Result<(), String> {
+        match &self.sync_session {
+            Some(s) if s.id == session_id && s.finalizing => Ok(()),
+            _ => Err("sync was superseded while the state hash was being computed".to_string()),
+        }
     }
 
     /// Marks the active session as touched (resets its idle clock). Returns an
     /// error if `session_id` does not match the active session — the sync was
     /// superseded or never started.
     fn touch_session(&mut self, session_id: SessionId, now: u64) -> Result<(), String> {
-        match &mut self.sync_session {
-            Some(s) if s.id == session_id => {
-                s.last_activity_ns = now;
-                Ok(())
-            }
-            _ => Err("no active sync for this session id".to_string()),
+        self.require_mutable_session(session_id)?;
+        if let Some(s) = &mut self.sync_session {
+            s.last_activity_ns = now;
         }
+        Ok(())
     }
 
     /// Stages chunks for the active sync and returns the id assigned to each, in
@@ -122,6 +178,13 @@ impl State {
                 ComputationStatus::InProgress(initial_progress)
             }
             ExecuteOperationsProgress::ProcessingOperations { operation_index } => {
+                // This step resumes in a fresh message, so the session it was
+                // started under may be gone (see `require_mutable_session`).
+                // Re-check it before mutating anything.
+                if let Err(e) = self.require_mutable_session(arg.session_id) {
+                    return ComputationStatus::Error(e);
+                }
+
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
                     // Asset ops in this call may have clobbered tree entries
@@ -134,7 +197,22 @@ impl State {
                     // last call; otherwise keep the session open for further
                     // operations and don't touch the cached hash yet.
                     if arg.is_final {
-                        self.sync_session = None;
+                        // Keep the session active and mark it finalizing until
+                        // hashing completes. Otherwise another sync (including
+                        // one from the same owner) could mutate the state while
+                        // the staged hasher is suspended between assets. The
+                        // guard above proved this is our own session, so the
+                        // flag can't land on a session that replaced it.
+                        match &mut self.sync_session {
+                            Some(session) if session.id == arg.session_id => {
+                                session.finalizing = true;
+                            }
+                            _ => {
+                                return ComputationStatus::Error(
+                                    "no active sync for this session id".to_string(),
+                                );
+                            }
+                        }
                         self.chunks.clear();
                         // Recompute the cached state hash over the now-final
                         // state, staged one asset per step.
@@ -252,6 +330,15 @@ impl State {
                 mut hasher,
                 resume_after,
             } => {
+                // Hashing is staged across messages too, so this step can resume
+                // into a world where the finalization it belongs to was reclaimed
+                // (the idle timeout applies to a finalizing session as well).
+                // Bail rather than fold state someone else is now mutating, cache
+                // a hash that doesn't describe it, or tear down their session.
+                if let Err(e) = self.require_own_finalizing_session(arg.session_id) {
+                    return ComputationStatus::Error(e);
+                }
+
                 // Fold one asset per step, in key order, resuming after the last.
                 if let Some((key, asset)) = self.next_manifest_asset(&resume_after) {
                     hasher.write_asset(&asset);
@@ -267,6 +354,10 @@ impl State {
                 self.fold_redirect_rules(&mut hasher);
                 let hash = hasher.finish();
                 self.cache_state_hash(hash);
+                // Release the sync lock only after the hash covers the complete
+                // finalized state and has been cached. The guard above proved the
+                // session is still ours to release.
+                self.sync_session = None;
                 ComputationStatus::Done(Some(hash))
             }
         }

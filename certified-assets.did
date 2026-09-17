@@ -254,7 +254,15 @@ service: {
   // by `execute_operations`; the sync finalizes on the call flagged `is_final`.
 
   // Begin a sync. Returns a session id, or `Busy` if another non-stale sync is
-  // already in progress (the owner can always reclaim their own sync).
+  // already in progress (the owner can always reclaim their own sync, except
+  // while it is finalizing — see below). Starting a sync clears the canister's
+  // cached `state_hash`, which is recomputed when the sync finalizes.
+  //
+  // A sync that has reached its `is_final` call is *finalizing*: it holds the
+  // session against every caller, its own owner included, until the state hash
+  // is computed, so nothing mutates the state being hashed. Should such a
+  // finalization never complete, its session goes stale on the usual idle
+  // timeout and becomes reclaimable like any other.
   start_sync : () -> (StartSyncResult);
   // Stage content chunks under the sync. Returns the id assigned to each chunk,
   // in the same order as the argument's `chunks`; the caller maps them by
@@ -292,7 +300,12 @@ service: {
   // The canister's canonical state hash: a 32-byte SHA-256 over its served-
   // content model — every asset's content_type, response headers, and per-
   // encoding content hashes, plus the redirect rules in match order. Recomputed
-  // at the end of every sync; a `blob` of 32 zero bytes before the first sync.
+  // at the end of every sync.
+  //
+  // A `blob` of 32 zero bytes means "no verifiable hash": before the first sync,
+  // and from the moment a sync starts until it finalizes. A sync that is
+  // abandoned partway leaves the zeros in place rather than the pre-sync hash,
+  // since the canister is by then serving content that hash does not describe.
   //
   // Lets a third party verify the canister serves exactly a known frontend
   // build: reproduce `dist/` from public source, compute the same hash locally

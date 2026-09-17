@@ -11,7 +11,9 @@ use crate::cert::AssetKey;
 
 impl State {
     /// The cached canonical state hash (see the `state-hash` crate). `[0; 32]`
-    /// before the first sync finalizes. Read by the public `state_hash` endpoint.
+    /// before the first sync finalizes, and again from the moment a sync starts
+    /// until it finalizes (see [`Self::invalidate_cached_state_hash`]). Read by
+    /// the public `state_hash` endpoint.
     pub fn cached_state_hash(&self) -> [u8; 32] {
         self.store.cached_state_hash()
     }
@@ -100,6 +102,23 @@ impl State {
     /// Stores a freshly-computed state hash in its cell.
     pub(super) fn cache_state_hash(&mut self, hash: [u8; 32]) {
         self.store.cache_state_hash(hash);
+    }
+
+    /// Clears the cached state hash back to `[0; 32]` — "no verifiable hash".
+    ///
+    /// Called when a sync starts, because from that moment the served content
+    /// can change while the cached digest still describes the state before it.
+    /// Reporting the stale value would be worse than reporting nothing: a
+    /// verifier reproducing `dist/` from source would match a hash the canister
+    /// no longer serves. A sync that finalizes caches the real hash again; one
+    /// that is abandoned leaves the canister honestly unverifiable until the
+    /// next sync completes.
+    pub(super) fn invalidate_cached_state_hash(&mut self) {
+        // Cheap guard: the cell lives in stable memory and is usually already
+        // zero on a canister that has never finished a sync.
+        if self.store.cached_state_hash() != [0u8; 32] {
+            self.store.cache_state_hash([0u8; 32]);
+        }
     }
 
     /// Recomputes the canonical state hash in one pass and caches it. Off-staging

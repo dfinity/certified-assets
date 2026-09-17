@@ -21,7 +21,8 @@ use wire_types::SessionId;
 /// How long a sync may sit idle (no calls carrying its session id) before a
 /// *different* caller is allowed to reclaim it. Comfortably shorter than any
 /// real deploy's inter-call gap; the owner can always reclaim their own sync
-/// immediately regardless of this.
+/// immediately regardless of this — unless it is [`SyncSession::finalizing`],
+/// which blocks every caller until this timeout elapses.
 pub(crate) const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 
 /// The single in-progress sync. The canister holds at most one at a time;
@@ -30,6 +31,13 @@ pub(crate) struct SyncSession {
     pub id: SessionId,
     pub owner: Principal,
     pub last_activity_ns: u64,
+    /// Set while the final state hash is being computed. The session remains
+    /// active during this phase so no other sync can mutate the state being
+    /// hashed — not even one from the same owner, who would otherwise be
+    /// allowed to reclaim immediately. It is cleared only by the successful
+    /// finalization that set it, so the idle timeout is the sole escape from a
+    /// finalization that dies mid-flight.
+    pub finalizing: bool,
 }
 
 /// Status of an incremental computation

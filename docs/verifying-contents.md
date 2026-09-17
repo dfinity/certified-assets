@@ -67,6 +67,14 @@ that produce the served directory).
    # (blob "\81\50\a6\5e…")
    ```
 
+   32 zero bytes is not a hash: it means the canister has none to report, either
+   because it has never completed a sync or because one is in progress right
+   now. A sync drops the cached hash as soon as it starts, since from that point
+   the canister may serve content the old hash no longer describes, and only a
+   sync that runs to completion caches a new one. Read it again once the deploy
+   finishes. A canister that keeps reporting zeros was left mid-sync, and there
+   is nothing to verify it against.
+
 4. **Compare.** If the canister's hash equals the one you computed, it serves
    exactly the build you reproduced from source. If it doesn't, either the served
    content, headers, or redirects do not match that source, or it was deployed
