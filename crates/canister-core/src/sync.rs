@@ -21,7 +21,8 @@ use wire_types::SessionId;
 /// How long a sync may sit idle (no calls carrying its session id) before a
 /// *different* caller is allowed to reclaim it. Comfortably shorter than any
 /// real deploy's inter-call gap; the owner can always reclaim their own sync
-/// immediately regardless of this.
+/// immediately regardless of this — unless it is [`SyncSession::finalizing`],
+/// which blocks every caller until this timeout elapses.
 pub(crate) const SYNC_IDLE_TIMEOUT_NANOS: u64 = 30_000_000_000;
 
 /// The single in-progress sync. The canister holds at most one at a time;

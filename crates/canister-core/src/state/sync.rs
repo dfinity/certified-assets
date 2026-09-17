@@ -31,10 +31,13 @@ impl State {
     ///
     /// While a sync is *finalizing* (computing its state hash) nobody may
     /// reclaim it, not even its owner, until it goes stale — see the guard
-    /// below.
+    /// below. This is the one exception to the "same owner reclaims
+    /// immediately" rule above, and it is part of the public `start_sync`
+    /// contract (see `certified-assets.did`).
     ///
-    /// Reclaiming clears the previous session's staged chunks. The session id
-    /// counter is monotonic and never reused.
+    /// Reclaiming clears the previous session's staged chunks, and starting
+    /// invalidates the cached state hash. The session id counter is monotonic
+    /// and never reused.
     pub fn start_sync(
         &mut self,
         owner: Principal,
@@ -68,6 +71,13 @@ impl State {
         // No active sync, or we're taking over: drop any staged chunks left by
         // the previous session before starting fresh.
         self.chunks.clear();
+
+        // From here on this sync may mutate served content, so the cached hash
+        // no longer describes what the canister serves. Drop it: a sync that
+        // finalizes caches the real one again, and a sync that is abandoned
+        // leaves the canister reporting "no verifiable hash" instead of a clean
+        // hash for content it no longer serves.
+        self.invalidate_cached_state_hash();
 
         let session_id = self.alloc_session_id();
         self.sync_session = Some(SyncSession {

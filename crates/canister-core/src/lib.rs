@@ -118,7 +118,12 @@ pub fn get_redirect_rules(start_index: u64) -> Vec<RedirectRule> {
 /// The cached canonical **state hash**: a SHA-256 over the canister's served-
 /// content model (every asset's content_type/headers/encoding hashes + the
 /// redirect rules — see the `state-hash` crate). Recomputed at the end of every
-/// final sync and returned here verbatim. `[0; 32]` before the first sync.
+/// final sync and returned here verbatim.
+///
+/// `[0; 32]` means "no verifiable hash": before the first sync, and from the
+/// moment a sync starts until it finalizes. An abandoned sync therefore leaves
+/// zeros rather than the pre-sync hash, which by then describes content the
+/// canister no longer serves.
 ///
 /// The endpoint is public and unguarded; the `canister` crate exposes it as an
 /// **update** so the reply is consensus-backed and a verifier can trust it

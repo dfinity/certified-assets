@@ -834,6 +834,62 @@ mod sync {
     }
 
     #[test]
+    fn starting_a_sync_invalidates_the_cached_hash() {
+        // The lock only keeps mutations out of the *hashing* phase. Everything
+        // before it — a sync's ordinary, non-final operations — changes served
+        // content while the cached digest still describes the state before the
+        // sync. Reporting that stale hash would let a verifier reproduce `dist/`
+        // from clean source, match the canister, and be wrong; so a sync start
+        // drops it, and only finalization puts a real one back.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+        assert_ne!(
+            state.cached_state_hash(),
+            [0u8; 32],
+            "the seeding sync should have cached a hash"
+        );
+
+        start_session(&mut state, &ctx);
+        assert_eq!(
+            state.cached_state_hash(),
+            [0u8; 32],
+            "a sync may mutate from its first call, so the old hash must go"
+        );
+    }
+
+    #[test]
+    fn abandoned_sync_leaves_no_hash_for_the_content_it_changed() {
+        // The concrete attack the invalidation closes: apply a mutation with
+        // `is_final: false` and walk away. The asset is served immediately, and
+        // without invalidation `state_hash` would keep reporting the pre-sync
+        // hash for as long as nobody syncs again.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        seed_one_asset(&mut state, &ctx);
+        let clean_hash = state.cached_state_hash();
+
+        let session_id = start_session(&mut state, &ctx);
+        let mutating = mutating_call(session_id);
+        run_computation_until_completion(|progress| {
+            state.execute_operations(&mutating, progress, &ctx)
+        })
+        .unwrap();
+        // ...and the sync is never finalized.
+
+        assert!(
+            !state.contains_asset(&"/index.html".to_string()),
+            "the non-final operation is served straight away"
+        );
+        assert_ne!(
+            state.cached_state_hash(),
+            clean_hash,
+            "the canister must not vouch for content it no longer serves"
+        );
+        assert_eq!(state.cached_state_hash(), [0u8; 32]);
+    }
+
+    #[test]
     fn abandoned_hashing_cannot_disturb_the_sync_that_replaced_it() {
         // The flip side of the reclaim above: if the abandoned finalization does
         // eventually resume, it must not cache a hash computed over state the new
@@ -841,8 +897,6 @@ mod sync {
         let mut state = State::default();
         let mut ctx = mock_system_context();
         seed_one_asset(&mut state, &ctx);
-
-        let hash_before = state.cached_state_hash();
 
         let session_id = start_session(&mut state, &ctx);
         let finalizing = ExecuteOperationsArguments {
@@ -861,8 +915,9 @@ mod sync {
         }
         assert_eq!(
             state.cached_state_hash(),
-            hash_before,
-            "a superseded finalization must not cache its hash"
+            [0u8; 32],
+            "a superseded finalization must not publish a hash; the replacement \
+             sync's invalidation stands until that sync finalizes"
         );
         assert!(
             state
