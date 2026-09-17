@@ -24,7 +24,7 @@ impl State {
             return Err("asset already exists".to_string());
         }
 
-        self.write_effective_asset(
+        self.create_effective_asset(
             arg.key,
             AssetMeta {
                 content_type: arg.content_type,

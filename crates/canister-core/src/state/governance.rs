@@ -97,19 +97,53 @@ impl State {
     }
 
     /// Whether an asset exists in the view a sync operates on.
+    ///
+    /// Deliberately **not** `effective_asset(key).is_some()`: that would
+    /// deserialize the whole `AssetMeta` out of stable memory and throw it away,
+    /// on a check every `CreateAsset` and `SetAssetContent` performs. Falling
+    /// through to `contains_asset` keeps the ordinary-deploy path a bare BTree
+    /// key lookup, as it was before governance mode existed.
     pub(super) fn effective_contains_asset(&self, key: &AssetKey) -> bool {
-        self.effective_asset(key).is_some()
+        if self.by_proposal() {
+            match self.store.get_pending_asset(key) {
+                Some(PendingAsset::Upsert(_)) => return true,
+                Some(PendingAsset::Delete) => return false,
+                None => {}
+            }
+        }
+        self.store.contains_asset(key)
     }
 
     /// Writes `meta` for `key` in the view a sync operates on: staged into the
     /// overlay in governance mode (uncertified — nothing serves it yet), or
     /// published and re-certified live otherwise.
+    ///
+    /// For a **new** asset use [`Self::create_effective_asset`] instead: this one
+    /// re-certifies, which is only needed when a response for `key` may already
+    /// exist.
     pub(super) fn write_effective_asset(&mut self, key: AssetKey, meta: AssetMeta) {
         if self.by_proposal() {
             self.store
                 .put_pending_asset(key, PendingAsset::Upsert(meta));
         } else {
             self.certifier.recertify_asset(&self.store, &key, &meta);
+            self.store.put_asset(key, meta);
+        }
+    }
+
+    /// Writes the metadata of an asset that did not exist a moment ago.
+    ///
+    /// Deliberately skips re-certification. A fresh asset carries no encodings,
+    /// so there is no response to certify — and because the key was just proven
+    /// absent, none to clear either. Routing a create through
+    /// [`Self::write_effective_asset`] would still pay `remove_responses_for_path`,
+    /// a hash-tree mutation, on every `CreateAsset` of a deploy. Content arrives
+    /// next via `SetAssetContent`, which certifies then.
+    pub(super) fn create_effective_asset(&mut self, key: AssetKey, meta: AssetMeta) {
+        if self.by_proposal() {
+            self.store
+                .put_pending_asset(key, PendingAsset::Upsert(meta));
+        } else {
             self.store.put_asset(key, meta);
         }
     }
@@ -253,10 +287,12 @@ impl State {
     /// Folds the redirect rules the state will have once the overlay is applied:
     /// the prepare's staged rules when it replaced them, else the live ones.
     pub(super) fn fold_effective_redirect_rules(&self, hasher: &mut state_hash::StateHasher) {
+        // Short-circuit before touching the batch: off governance mode there is
+        // never one, and this runs on every sync's finalization.
         let staged = self
-            .store
-            .prepared_batch()
-            .filter(|_| self.by_proposal())
+            .by_proposal()
+            .then(|| self.store.prepared_batch())
+            .flatten()
             .and_then(|b| b.rules);
         match staged {
             Some(rules) => hasher.write_redirect_rules(&rules),
