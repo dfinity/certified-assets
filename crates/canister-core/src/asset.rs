@@ -59,17 +59,12 @@ pub struct EncodingMeta {
 /// Status codes we certify for every asset encoding.
 pub const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 
-/// How long a client may keep the env snapshot. Any HTML response re-sets both
-/// cookies, so an app that runs at all refreshes this on every start and the
-/// window only bounds a client that never loads HTML again.
-const ENV_COOKIE_MAX_AGE_SECS: u32 = 30 * 24 * 60 * 60;
-
 /// Renders the `Set-Cookie: ic_env=…` values for an environment snapshot, in the
 /// exact format the client lib (`@icp-sdk/core/agent/canister-env`) parses:
 ///
 /// ```text
-/// ic_env=<url_encode(payload)>; Path=/; Max-Age=<n>; Secure; SameSite=Lax
-/// ic_env=<url_encode(payload)>; Path=/; Max-Age=<n>; Secure; SameSite=None; Partitioned
+/// ic_env=<url_encode(payload)>; Path=/; Secure; SameSite=Lax
+/// ic_env=<url_encode(payload)>; Path=/; Secure; SameSite=None; Partitioned
 /// payload = "ic_root_key=<hex(DER root key)>" + ("&" + "<name>=<value>")*
 /// ```
 ///
@@ -111,6 +106,11 @@ const ENV_COOKIE_MAX_AGE_SECS: u32 = 30 * 24 * 60 * 60;
 /// visits would accumulate one `ic_env` per path, where the most specific match
 /// is offered first and can shadow a newer value at `/`.
 ///
+/// Session cookies (no `Max-Age`). An app is free to serve its HTML cacheable,
+/// so a persistent copy could outlive a change to the env vars and configure a
+/// client from a stale snapshot; expiring with the session keeps a missing
+/// snapshot a visible failure instead.
+///
 /// Pure (no system-API access) so it can be unit-tested directly.
 pub fn render_env_cookies(root_key: &[u8], public_vars: &BTreeMap<String, String>) -> Vec<String> {
     let mut entries = vec![format!("ic_root_key={}", hex::encode(root_key))];
@@ -118,7 +118,7 @@ pub fn render_env_cookies(root_key: &[u8], public_vars: &BTreeMap<String, String
         entries.push(format!("{name}={value}"));
     }
     let payload = url_encode(&entries.join("&"));
-    let common = format!("ic_env={payload}; Path=/; Max-Age={ENV_COOKIE_MAX_AGE_SECS}; Secure");
+    let common = format!("ic_env={payload}; Path=/; Secure");
     vec![
         format!("{common}; SameSite=Lax"),
         format!("{common}; SameSite=None; Partitioned"),
@@ -410,10 +410,10 @@ mod tests {
 
         for cookie in &rendered {
             // `Path=/` keeps one cookie per host rather than one per visited
-            // directory; `Max-Age` outlives the browsing session.
+            // directory, and the snapshot expires with the session.
             assert!(cookie.contains("; Path=/;"));
-            assert!(cookie.contains("; Max-Age=2592000;"));
             assert!(cookie.contains("; Secure"));
+            assert!(!cookie.contains("Max-Age"));
         }
     }
 }

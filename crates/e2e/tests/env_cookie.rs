@@ -61,10 +61,10 @@ fn sync_publishes_certified_ic_env_cookie_on_html() {
         "second ic_env cookie should carry SameSite=None; Secure; Partitioned, got: {}",
         ic_env[1]
     );
-    // One cookie per host, outliving the browsing session.
+    // One cookie per host, expiring with the session.
     for c in &ic_env {
         assert!(c.contains("; Path=/;"), "expected Path=/, got: {c}");
-        assert!(c.contains("; Max-Age="), "expected Max-Age, got: {c}");
+        assert!(!c.contains("Max-Age"), "expected no Max-Age, got: {c}");
     }
 
     // A non-HTML asset carries no env cookie.
