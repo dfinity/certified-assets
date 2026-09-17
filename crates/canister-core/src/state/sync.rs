@@ -40,8 +40,8 @@ impl State {
 
         if let Some(active) = &self.sync_session {
             let idle = now.saturating_sub(active.last_activity_ns);
-            let reclaimable = !active.finalizing
-                && (active.owner == owner || idle >= SYNC_IDLE_TIMEOUT_NANOS);
+            let reclaimable =
+                !active.finalizing && (active.owner == owner || idle >= SYNC_IDLE_TIMEOUT_NANOS);
             if !reclaimable {
                 return StartSyncResult::Busy {
                     owner: active.owner,
