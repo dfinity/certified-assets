@@ -36,18 +36,36 @@ fn sync_publishes_certified_ic_env_cookie_on_html() {
     let r = http_fetch(project, "/index.html");
     assert_eq!(r.status(), StatusCode::OK);
     let cookies = set_cookies(r.headers());
-    let ic_env = cookies
+    let ic_env: Vec<&String> = cookies
         .iter()
-        .find(|c| c.starts_with("ic_env="))
-        .unwrap_or_else(|| panic!("expected an ic_env cookie on /index.html, got: {cookies:?}"));
-    // Embeddable by default: `SameSite=None; Secure; Partitioned` (CHIPS) so page
-    // scripts can read it inside a cross-site iframe (Caffeine-style preview).
-    assert!(
-        ic_env.contains("SameSite=None")
-            && ic_env.contains("Secure")
-            && ic_env.contains("Partitioned"),
-        "ic_env cookie should carry SameSite=None; Secure; Partitioned, got: {ic_env}"
+        .filter(|c| c.starts_with("ic_env="))
+        .collect();
+    assert_eq!(
+        ic_env.len(),
+        2,
+        "expected both ic_env variants on /index.html, got: {cookies:?}"
     );
+    // Readable in every context: the `Lax` variant for clients that reject
+    // `SameSite=None` outright, and `SameSite=None; Secure; Partitioned` (CHIPS)
+    // so page scripts can read it inside a cross-site iframe (Caffeine-style
+    // preview). See `canister_core::asset::render_env_cookies`.
+    assert!(
+        ic_env[0].contains("SameSite=Lax") && ic_env[0].contains("Secure"),
+        "first ic_env cookie should carry Secure; SameSite=Lax, got: {}",
+        ic_env[0]
+    );
+    assert!(
+        ic_env[1].contains("SameSite=None")
+            && ic_env[1].contains("Secure")
+            && ic_env[1].contains("Partitioned"),
+        "second ic_env cookie should carry SameSite=None; Secure; Partitioned, got: {}",
+        ic_env[1]
+    );
+    // One cookie per host, outliving the browsing session.
+    for c in &ic_env {
+        assert!(c.contains("; Path=/;"), "expected Path=/, got: {c}");
+        assert!(c.contains("; Max-Age="), "expected Max-Age, got: {c}");
+    }
 
     // A non-HTML asset carries no env cookie.
     let r = http_fetch(project, "/style.css");

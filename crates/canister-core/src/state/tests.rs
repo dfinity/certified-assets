@@ -3852,10 +3852,17 @@ mod env_cookie {
         // passing *is* the assertion that the cookie is certified.
         let resp = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         assert_eq!(resp.status_code, 200);
+        // Both attribute variants of the snapshot are served and certified; see
+        // `asset::render_env_cookies` for why a single variant cannot cover every
+        // client.
         let cookies = all_headers(&resp, "set-cookie");
-        assert_eq!(cookies.len(), 1);
-        assert!(cookies[0].starts_with("ic_env="), "got: {}", cookies[0]);
-        assert!(cookies[0].ends_with("; Secure; SameSite=None; Partitioned"));
+        assert_eq!(cookies.len(), 2);
+        assert!(
+            cookies.iter().all(|c| c.starts_with("ic_env=")),
+            "got: {cookies:?}"
+        );
+        assert!(cookies[0].ends_with("; Secure; SameSite=Lax"));
+        assert!(cookies[1].ends_with("; Secure; SameSite=None; Partitioned"));
     }
 
     #[test]
@@ -3901,8 +3908,8 @@ mod env_cookie {
         assert_eq!(root.status_code, 200);
         assert_eq!(root.body.as_ref(), INDEX);
         let root_cookies = all_headers(&root, "set-cookie");
-        assert_eq!(root_cookies.len(), 1);
-        assert!(root_cookies[0].starts_with("ic_env="));
+        assert_eq!(root_cookies.len(), 2);
+        assert!(root_cookies.iter().all(|c| c.starts_with("ic_env=")));
 
         // The direct hit carries it too.
         let direct = certified_http_request(&state, RequestBuilder::get("/index.html").build());
@@ -4037,9 +4044,12 @@ mod env_cookie {
         // `set-cookie` listed twice in the certificate expression.
         let resp = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         let cookies = all_headers(&resp, "set-cookie");
-        assert_eq!(cookies.len(), 2, "user cookie + env cookie coexist");
+        assert_eq!(cookies.len(), 3, "user cookie + both env cookies coexist");
         assert!(cookies.iter().any(|c| c.contains("session=xyz")));
-        assert!(cookies.iter().any(|c| c.starts_with("ic_env=")));
+        assert_eq!(
+            cookies.iter().filter(|c| c.starts_with("ic_env=")).count(),
+            2
+        );
     }
 
     #[test]
