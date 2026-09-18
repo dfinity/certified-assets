@@ -126,7 +126,7 @@ impl State {
             // malformed URL has no certifiable response anyway. The HTTP gateway
             // rejects uncertified responses, so a browser never sees this body —
             // it surfaces only to a direct query call of `http_request` (e.g.
-            // `dfx canister call`), where it serves as a diagnostic.
+            // `icp canister call`), where it serves as a diagnostic.
             Err(err) => HttpResponse {
                 status_code: 400,
                 headers: vec![],
