@@ -54,8 +54,9 @@ re-hashed. Two things a visitor receives are outside the model:
 You need the canister's id, its public source (the repo and the build steps that
 produce the served directory), and a Rust toolchain to build the verifier.
 
-1. **Reproduce the build.** Check out the source at the deployed version and run
-   the build to produce the site directory (`dist/`), exactly as the deploy does.
+1. **Reproduce the build.** Check out the source at the version whose deployment
+   you are checking, and run the build to produce the site directory (`dist/`),
+   exactly as the deploy does.
 
 2. **Build the verifier at the canister's release.** Ask the canister which
    release it runs, and build `state-hash` from that tag. It is not published as a
@@ -160,13 +161,14 @@ parameters baked into the hash:
   stream (see the `state-hash` crate). Independent of map/header iteration order,
   but bound to this layout version.
 - **Synthesized content.** The preparation adds what a deploy adds: the clean-URL
-  and trailing-slash rules derived from the asset keys, and the built-in
-  [`404` page](routing.md#not-found-handling) with its catch-all rule when the
-  directory declares neither its own `404.html` nor a root `/*` rule (a
-  single-page app's `/*` suppresses both). These come from the tool rather than
-  from your directory, which is why a directory with no `404.html` still matches:
-  the verifier adds, or withholds, exactly what the deploy did. They are pinned to
-  its release like everything above.
+  and trailing-slash rules derived from the asset keys, and a `/*` catch-all at
+  status `404`, pointing at your own root `404.html` if the directory has one and
+  otherwise at the built-in [`404` page](routing.md#not-found-handling), which it
+  then adds as well. A root `/*` rule of your own (a single-page app's, say)
+  replaces both. All of it comes from the tool rather than from your directory,
+  which is why a directory with no `404.html` still matches: the verifier adds, or
+  withholds, exactly what the deploy did. It is pinned to the tool's release like
+  everything above.
 
 The contract can change between releases; when it does, the format version is
 bumped and every previously-computed hash is expected to change. Within a release
