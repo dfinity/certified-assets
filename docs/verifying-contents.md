@@ -44,9 +44,10 @@ re-hashed. Two things a visitor receives are outside the model:
   different canister while the build stays byte-identical.
 - **Access protection.** Who may *sync* (controllers, authorized principals) has no
   bearing on what is served. The access-protection gate does: with it on, an
-  unauthenticated request gets a certified `307` to the login page or a `401`
-  instead of content, and `cache-control` is replaced with `no-store`. A matching
-  hash says the canister holds your build, not that a visitor can reach it.
+  unauthenticated request for your content gets a certified `307` to the login
+  page (HTML) or a `401` (anything else) instead of the asset, and `cache-control`
+  is replaced with `no-store`. A matching hash says the canister holds your build,
+  not that a visitor can reach it.
 
 ## How to verify
 
@@ -56,7 +57,7 @@ produce the served directory), and a Rust toolchain to build the verifier.
 1. **Reproduce the build.** Check out the source at the deployed version and run
    the build to produce the site directory (`dist/`), exactly as the deploy does.
 
-2. **Build the verifier at the canister's version.** Ask the canister which
+2. **Build the verifier at the canister's release.** Ask the canister which
    release it runs, and build `state-hash` from that tag. It is not published as a
    binary or to crates.io, which is the point: the verifier should come from the
    same source you are trusting, not from someone's download.
@@ -66,11 +67,15 @@ produce the served directory), and a Rust toolchain to build the verifier.
    # (record { major = 0 : nat32; minor = 3 : nat32; patch = 3 : nat32 })
 
    cargo install --git https://github.com/dfinity/certified-assets \
-     --tag v0.3.3 state-hash-cli
+     --tag v0.3.3 --locked state-hash-cli
    ```
 
-   The version has to match the one that deployed the canister, for the reasons in
-   [the frozen contract](#the-frozen-contract).
+   The release has to match the one that deployed the canister, for the reasons in
+   [the frozen contract](#the-frozen-contract). `--locked` is part of that match,
+   not a precaution: the committed `Cargo.lock` is what pins the compressor builds
+   whose output bytes the hash covers, and `cargo install` re-resolves dependencies
+   without it. A verifier on the right tag with a newer `brotli` patch computes a
+   different hash.
 
 3. **Compute the hash locally** with the `state-hash` tool, pointed at that
    directory (include any `_headers` / `_redirects` files, as deployed):
@@ -154,12 +159,14 @@ parameters baked into the hash:
 - **Byte format.** A versioned, length-prefixed, domain-separated SHA-256
   stream (see the `state-hash` crate). Independent of map/header iteration order,
   but bound to this layout version.
-- **Synthesized content.** The preparation adds what a deploy adds: the built-in
-  [`404` page](routing.md#not-found-handling) when the directory ships none, and
-  the clean-URL and trailing-slash rules derived from the asset keys. These come
-  from the tool rather than from your directory. That is why a directory with no
-  `404.html` still matches (the verifier synthesizes the same page the deploy did),
-  and why they are pinned to its version like everything above.
+- **Synthesized content.** The preparation adds what a deploy adds: the clean-URL
+  and trailing-slash rules derived from the asset keys, and the built-in
+  [`404` page](routing.md#not-found-handling) with its catch-all rule when the
+  directory declares neither its own `404.html` nor a root `/*` rule (a
+  single-page app's `/*` suppresses both). These come from the tool rather than
+  from your directory, which is why a directory with no `404.html` still matches:
+  the verifier adds, or withholds, exactly what the deploy did. They are pinned to
+  its release like everything above.
 
 The contract can change between releases; when it does, the format version is
 bumped and every previously-computed hash is expected to change. Within a release
