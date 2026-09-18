@@ -10,9 +10,9 @@ impl State {
     /// Stores the rendered env cookie from a freshly captured snapshot **without**
     /// re-certifying. Used by `post_upgrade` *before* `post_upgrade_rebuild`, so
     /// the rebuild — which re-certifies every asset from scratch — picks the
-    /// cookie up through `effective_headers`.
+    /// cookies up through `effective_headers`.
     pub fn store_env(&mut self, env: &crate::runtime::CanisterEnv) {
-        self.certifier.set_env_cookie(env.render_cookie());
+        self.certifier.set_env_cookie(env.render_cookies());
     }
 
     /// Captures the env at the **start of a sync**, so the operations that follow
@@ -25,7 +25,7 @@ impl State {
     /// certificate while `effective_headers` serves the new cookie, and the
     /// gateway would reject them. Caller publishes `certified_data` afterwards.
     pub fn capture_env_at_sync_start(&mut self, env: &crate::runtime::CanisterEnv) {
-        if self.certifier.env_cookie() != Some(env.render_cookie().as_str()) {
+        if self.certifier.env_cookie() != Some(env.render_cookies().as_slice()) {
             self.refresh_env(env);
         }
     }
