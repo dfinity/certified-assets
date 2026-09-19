@@ -6,7 +6,7 @@ use std::{
 };
 
 // Wire types shared with the canister and sync plugin.
-pub use wire_types::{AssetDetails, AssetEncodingDetails, Encoding};
+pub use wire_types::{AssetDetails, AssetEncodingDetails, Encoding, ProposedState};
 
 /// Build an `icp` subprocess command rooted at `project_dir`.
 ///
@@ -363,4 +363,131 @@ pub fn list_assets(project: &Path) -> Vec<AssetDetails> {
     let (assets,) = candid::decode_args::<(Vec<AssetDetails>,)>(&bytes)
         .expect("failed to decode candid response");
     assets
+}
+
+/// Reference forms in the docs are written with placeholders; fill in concrete
+/// values so a snippet can be sent as-is. A placeholder left unfilled fails the
+/// caller rather than skipping the snippet — a new spelling belongs here, not in
+/// a hole in the coverage.
+const PLACEHOLDERS: [(&str, &str); 7] = [
+    ("<label>", "doc-label"),
+    ("<value>", "doc-secret"),
+    ("<secs>", "3600"),
+    ("= N :", "= 3600 :"),
+    ("<sns-governance-canister>", "rrkah-fqaaa-aaaaa-aaaaq-cai"),
+    ("<your-deploy-principal>", "rrkah-fqaaa-aaaaa-aaaaq-cai"),
+    ("...", "doc"),
+];
+
+/// Extracts every documented `(method, candid-args)` pair for `methods` from
+/// `markdown`, in document order — the same shape whether it sits in a fenced
+/// `icp canister call frontend …` line or in a reference-table cell, so both stay
+/// checked.
+///
+/// Shared by the doc-coverage tests (`protection.rs`, `governance.rs`): the point
+/// of those tests is that the *committed* docs stay runnable, so there is exactly
+/// one notion of "a call a document shows".
+pub fn documented_calls(markdown: &str, methods: &[&str]) -> Vec<(String, String)> {
+    // A shell line continued with `\` puts the method and its argument on
+    // different source lines (the quick start does); glue those back together.
+    let text = markdown
+        .split("\\\n")
+        .fold(String::new(), |mut acc, piece| {
+            if acc.is_empty() {
+                acc.push_str(piece);
+            } else {
+                acc.push_str(piece.trim_start());
+            }
+            acc
+        });
+
+    let mut calls: Vec<(usize, String, String)> = Vec::new();
+    for method in methods {
+        let mut from = 0;
+        while let Some(offset) = text[from..].find(method) {
+            let start = from + offset;
+            from = start + method.len();
+            // Reject a name embedded in a longer identifier, and require the
+            // argument to follow immediately — prose like "the `issue_token`
+            // call" documents nothing runnable.
+            let preceded_by_ident = text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let rest = &text[from..];
+            if preceded_by_ident || !rest.starts_with(" '") {
+                continue;
+            }
+            let Some(end) = rest[2..].find('\'') else {
+                continue;
+            };
+            let mut args = rest[2..2 + end].to_string();
+            for (placeholder, value) in PLACEHOLDERS {
+                args = args.replace(placeholder, value);
+            }
+            assert!(
+                !args.contains('<') && !args.contains("..."),
+                "unfilled placeholder in `{method} '{args}'` — add it to PLACEHOLDERS",
+            );
+            calls.push((start, method.to_string(), args));
+        }
+    }
+    calls.sort_by_key(|(offset, _, _)| *offset);
+    calls
+        .into_iter()
+        .map(|(_, method, args)| (method, args))
+        .collect()
+}
+
+/// The principal `icp canister call` signs with in this project — what a test
+/// names when it needs the calling identity to *be* some configured principal.
+pub fn identity_principal(project: &Path) -> String {
+    let stdout = icp_cmd(project)
+        .args(["identity", "principal"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8_lossy(&stdout).trim().to_string()
+}
+
+/// Read the committed `docs/<name>` (not the project copy's), so a doc-coverage
+/// test guards the file a reader actually lands on.
+pub fn committed_doc(relative: &str) -> String {
+    // crates/e2e -> crates -> repo root.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/e2e/ must have a repo root two levels up");
+    std::fs::read_to_string(repo.join(relative)).unwrap_or_else(|e| panic!("{relative}: {e}"))
+}
+
+/// Call `proposed_state` on the `frontend` canister and decode the reply.
+///
+/// Decoded from `-o hex` rather than read out of the CLI's textual rendering:
+/// the test wasm carries no `candid:service` metadata (only the release build
+/// does), so `icp canister call` prints field *hashes*, not names.
+pub fn proposed_state(project: &Path) -> ProposedState {
+    let stdout = icp_cmd(project)
+        .args([
+            "canister",
+            "call",
+            "frontend",
+            "proposed_state",
+            "()",
+            "-o",
+            "hex",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let hex_str = String::from_utf8_lossy(&stdout);
+    let bytes = hex::decode(hex_str.trim()).expect("failed to decode hex response");
+    let (state,) =
+        candid::decode_args::<(ProposedState,)>(&bytes).expect("failed to decode candid response");
+    state
 }

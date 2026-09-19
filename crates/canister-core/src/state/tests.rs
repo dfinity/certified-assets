@@ -4648,3 +4648,687 @@ mod authorization {
         assert!(restored.is_authorized(&p));
     }
 }
+
+/// By-proposal deploys: a sync in governance mode prepares rather than
+/// publishes, and only the approver's commit makes the prepared state live.
+///
+/// The property under test throughout is that **a prepare is invisible**: served
+/// responses, `get_asset_details`, and the cached state hash all stay exactly as
+/// they were until the commit, which is the single instant everything changes.
+mod governance {
+    use super::*;
+    use wire_types::ProposedState;
+
+    fn approver() -> Principal {
+        Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap()
+    }
+
+    /// Puts the canister in by-proposal mode.
+    fn enable(state: &mut State) {
+        state.set_governance_approver(Some(approver())).unwrap();
+    }
+
+    /// The hash a staged batch says committing it will produce.
+    fn staged_hash(state: &State) -> [u8; 32] {
+        match state.proposed_state() {
+            ProposedState::Staged {
+                prospective_state_hash,
+                ..
+            } => hex::decode(prospective_state_hash)
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap(),
+            other => panic!("expected a staged batch, got {other:?}"),
+        }
+    }
+
+    fn body_of(state: &State, url: &str) -> Option<Vec<u8>> {
+        let response = certified_http_request(
+            state,
+            RequestBuilder::get(url)
+                .with_header("Accept-Encoding", "identity")
+                .with_certificate_version(2)
+                .build(),
+        );
+        (response.status_code == 200).then(|| response.body.to_vec())
+    }
+
+    #[test]
+    fn governance_is_off_by_default() {
+        let state = State::default();
+        assert_eq!(state.governance_approver(), None);
+        assert!(!state.is_governance_approver(&approver()));
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+    }
+
+    #[test]
+    fn a_prepare_changes_nothing_that_is_served() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        const V1: &[u8] = b"<html>v1</html>";
+        const V2: &[u8] = b"<html>v2 is much longer than v1</html>";
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![V1])],
+        );
+        let live_hash = state.cached_state_hash();
+        let live_details = state.get_asset_details(None);
+
+        enable(&mut state);
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![V2])],
+        );
+
+        // Everything an outside observer can see is untouched.
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(V1));
+        assert_eq!(
+            state.cached_state_hash(),
+            live_hash,
+            "a prepare leaves the live hash valid for the whole voting period"
+        );
+        assert_eq!(state.get_asset_details(None).len(), live_details.len());
+        assert_eq!(state.get_asset_details(None)[0].key, "/index.html");
+
+        // But a batch is staged, committing to a different hash.
+        let prospective = staged_hash(&state);
+        assert_ne!(prospective, live_hash);
+    }
+
+    #[test]
+    fn commit_publishes_the_prepared_state_and_its_hash() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        const V1: &[u8] = b"<html>v1</html>";
+        const V2: &[u8] = b"<html>v2</html>";
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![V1])],
+        );
+        enable(&mut state);
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![V2])],
+        );
+
+        let prospective = staged_hash(&state);
+        assert_eq!(
+            state.commit_proposed_state(prospective).unwrap(),
+            prospective
+        );
+
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(V2));
+        assert_eq!(state.cached_state_hash(), prospective);
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+    }
+
+    /// The load-bearing claim of the whole design: the hash a prepare reports is
+    /// the hash the canister reports after the commit — so a number computed
+    /// offline from source, and voted on, is the number that ends up live.
+    #[test]
+    fn the_prospective_hash_equals_the_post_commit_hash() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![b"a"]),
+                AssetBuilder::new("/old.css", "text/css").with_encoding("identity", vec![b"old"]),
+            ],
+        );
+        enable(&mut state);
+
+        // A realistic deploy: one asset changed, one added, one deleted.
+        let session_id = start_session(&mut state, &ctx);
+        let mut operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"changed"]),
+                AssetBuilder::new("/new.js", "text/javascript")
+                    .with_encoding("identity", vec![b"new"]),
+            ],
+            session_id,
+        );
+        operations.push(Operation::DeleteAsset(DeleteAssetArguments {
+            key: "/old.css".to_string(),
+        }));
+        execute_all(&mut state, session_id, operations, &ctx);
+
+        let prospective = staged_hash(&state);
+        state.commit_proposed_state(prospective).unwrap();
+
+        // Recomputing from scratch over the committed state must agree — the
+        // prepare-time fold and a full recompute are the same number.
+        assert_eq!(state.recompute_state_hash(), prospective);
+        assert_eq!(
+            body_of(&state, "/index.html").as_deref(),
+            Some(&b"changed"[..])
+        );
+        assert_eq!(body_of(&state, "/new.js").as_deref(), Some(&b"new"[..]));
+        assert_eq!(body_of(&state, "/old.css"), None);
+    }
+
+    #[test]
+    fn commit_rejects_a_hash_the_batch_does_not_commit_to() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+        );
+        enable(&mut state);
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v2"]),
+            ],
+        );
+
+        let err = state.commit_proposed_state([7u8; 32]).unwrap_err();
+        assert!(err.contains("state hash mismatch"), "{err}");
+        // Nothing was published, and the batch is still there to be committed
+        // with the right hash.
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+        assert!(matches!(
+            state.proposed_state(),
+            ProposedState::Staged { .. }
+        ));
+    }
+
+    #[test]
+    fn commit_is_refused_without_a_staged_batch() {
+        let mut state = State::default();
+        enable(&mut state);
+        let err = state.commit_proposed_state([0u8; 32]).unwrap_err();
+        assert!(err.contains("no prepared batch"), "{err}");
+    }
+
+    #[test]
+    fn commit_is_refused_while_the_preparing_sync_is_unfinished() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        enable(&mut state);
+
+        let session_id = start_session(&mut state, &ctx);
+        assert!(matches!(
+            state.proposed_state(),
+            ProposedState::Preparing { .. }
+        ));
+        let err = state.commit_proposed_state([0u8; 32]).unwrap_err();
+        assert!(err.contains("incomplete"), "{err}");
+        let _ = session_id;
+    }
+
+    /// A staged batch is the canister's pending governance decision, so it holds
+    /// the sync lock until it is committed or discarded — mirroring the old asset
+    /// canister's "batch N is already proposed".
+    #[test]
+    fn a_staged_batch_blocks_further_syncs() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        enable(&mut state);
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![b"x"]),
+            ],
+        );
+
+        match state.start_sync(some_principal(), &ctx) {
+            StartSyncResult::Busy { owner, .. } => assert_eq!(owner, some_principal()),
+            other => panic!("expected Busy, got {other:?}"),
+        }
+
+        // Discarding releases it.
+        state.discard_proposed_state();
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+        assert!(matches!(
+            state.start_sync(some_principal(), &ctx),
+            StartSyncResult::Started { .. }
+        ));
+    }
+
+    #[test]
+    fn discarding_reclaims_the_content_a_prepare_staged() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+        );
+        let live_hash = state.cached_state_hash();
+        enable(&mut state);
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![vec![9u8; 4096]]),
+            ],
+        );
+        state.discard_proposed_state();
+
+        // The live asset and its hash survived the prepare *and* the discard.
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+        assert_eq!(state.cached_state_hash(), live_hash);
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+
+        // And a fresh prepare/commit cycle still works afterwards.
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v2"]),
+            ],
+        );
+        let prospective = staged_hash(&state);
+        state.commit_proposed_state(prospective).unwrap();
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v2"[..]));
+        assert_eq!(state.recompute_state_hash(), prospective);
+    }
+
+    /// Voting periods span days, and a canister can be upgraded mid-vote. A
+    /// prepared batch is stable state, so it must still be committable after.
+    #[test]
+    fn a_prepared_batch_survives_an_upgrade() {
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+        );
+        enable(&mut state);
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v2"]),
+            ],
+        );
+        let prospective = staged_hash(&state);
+
+        let mut restored = upgrade(state, memory.clone());
+
+        assert_eq!(restored.governance_approver(), Some(approver()));
+        assert_eq!(staged_hash(&restored), prospective);
+        // Still serving the old content across the upgrade.
+        assert_eq!(
+            body_of(&restored, "/index.html").as_deref(),
+            Some(&b"v1"[..])
+        );
+
+        restored.commit_proposed_state(prospective).unwrap();
+        assert_eq!(
+            body_of(&restored, "/index.html").as_deref(),
+            Some(&b"v2"[..])
+        );
+        assert_eq!(restored.recompute_state_hash(), prospective);
+    }
+
+    /// The prospective hash describes live-plus-overlay, so it is only valid
+    /// against the state it was folded over. If the live state moved underneath,
+    /// the commit must refuse rather than install a hash that doesn't describe
+    /// what it produced.
+    #[test]
+    fn commit_refuses_when_the_base_state_moved() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+        );
+        enable(&mut state);
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v2"]),
+            ],
+        );
+        let prospective = staged_hash(&state);
+
+        // Simulate the live state drifting out from under the staged batch.
+        state.cache_state_hash([1u8; 32]);
+
+        let err = state.commit_proposed_state(prospective).unwrap_err();
+        assert!(
+            err.contains("changed since this batch was prepared"),
+            "{err}"
+        );
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+    }
+
+    /// The reclamation rule a prepare must get right: content that is still
+    /// serving may only be freed by the commit that displaces it, while content
+    /// the same prepare allocated and then superseded is dead immediately.
+    #[test]
+    fn a_prepare_never_frees_live_content() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/keep.html", "text/html")
+                    .with_encoding("identity", vec![b"keep"]),
+                AssetBuilder::new("/doomed.css", "text/css")
+                    .with_encoding("identity", vec![b"doomed"]),
+            ],
+        );
+        enable(&mut state);
+
+        // Stage a delete of one live asset, and write another key's content
+        // twice within the same prepare (the second write supersedes the first).
+        let session_id = start_session(&mut state, &ctx);
+        let mut operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/keep.html", "text/html")
+                    .with_encoding("identity", vec![b"first"]),
+            ],
+            session_id,
+        );
+        let base = state.chunks().len() as u64;
+        state
+            .upload_chunks(
+                UploadChunksArguments {
+                    session_id,
+                    chunks: vec![ByteBuf::from(b"second".to_vec())],
+                },
+                &ctx,
+            )
+            .unwrap();
+        operations.push(Operation::SetAssetContent(SetAssetContentArguments {
+            key: "/keep.html".to_string(),
+            encoding: Encoding::Identity,
+            chunk_ids: vec![base],
+            sha256: ByteBuf::from(sha2::Sha256::digest(b"second").to_vec()),
+            chunk_sha256: vec![],
+        }));
+        operations.push(Operation::DeleteAsset(DeleteAssetArguments {
+            key: "/doomed.css".to_string(),
+        }));
+        execute_all(&mut state, session_id, operations, &ctx);
+
+        // Both live assets are still served, in full, from content the prepare
+        // was not allowed to touch.
+        assert_eq!(body_of(&state, "/keep.html").as_deref(), Some(&b"keep"[..]));
+        assert_eq!(
+            body_of(&state, "/doomed.css").as_deref(),
+            Some(&b"doomed"[..])
+        );
+
+        let prospective = staged_hash(&state);
+        state.commit_proposed_state(prospective).unwrap();
+
+        assert_eq!(
+            body_of(&state, "/keep.html").as_deref(),
+            Some(&b"second"[..])
+        );
+        assert_eq!(body_of(&state, "/doomed.css"), None);
+        assert_eq!(state.recompute_state_hash(), prospective);
+    }
+
+    #[test]
+    fn redirect_rules_are_staged_and_published_by_the_commit() {
+        use wire_types::{RedirectRule, RulePattern};
+
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"hi"]),
+            ],
+        );
+        enable(&mut state);
+
+        let rule = RedirectRule {
+            from: RulePattern::Exact("/old".to_string()),
+            to: "/index.html".to_string(),
+            status: 301,
+            headers: vec![],
+        };
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::SetRedirectRules(
+                wire_types::SetRedirectRulesArguments {
+                    rules: vec![rule.clone()],
+                },
+            )],
+            &ctx,
+        );
+
+        assert!(
+            state.get_redirect_rules(0).is_empty(),
+            "the rule is staged, not live"
+        );
+        let prospective = staged_hash(&state);
+        state.commit_proposed_state(prospective).unwrap();
+
+        assert_eq!(state.get_redirect_rules(0), vec![rule]);
+        assert_eq!(state.recompute_state_hash(), prospective);
+    }
+
+    #[test]
+    fn the_preparation_canary_is_staged_and_published_by_the_commit() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        enable(&mut state);
+
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::SetPreparationCanary(
+                SetPreparationCanaryArguments {
+                    canary: ByteBuf::from(vec![3u8; 32]),
+                },
+            )],
+            &ctx,
+        );
+
+        assert_eq!(state.preparation_canary(), [0u8; 32], "staged, not live");
+        state.commit_proposed_state(staged_hash(&state)).unwrap();
+        assert_eq!(state.preparation_canary(), [3u8; 32]);
+    }
+
+    #[test]
+    fn governance_cannot_be_changed_while_a_batch_is_prepared() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        enable(&mut state);
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![b"x"]),
+            ],
+        );
+
+        let err = state.set_governance_approver(None).unwrap_err();
+        assert!(err.contains("prepared batch is pending"), "{err}");
+
+        state.discard_proposed_state();
+        state.set_governance_approver(None).unwrap();
+        assert_eq!(state.governance_approver(), None);
+    }
+
+    /// Turning governance off restores ordinary publish-on-sync behaviour, so an
+    /// SNS can hand a canister back without leaving it wedged.
+    /// Flipping the switch mid-sync must not change what the *running* sync
+    /// does. A sync's mode is fixed when `start_sync` does or doesn't open a
+    /// prepared batch; if it were read from the setting instead, the operations
+    /// after the flip would write into an overlay with no batch to stage them,
+    /// stranding metadata and leaking the content they allocated.
+    #[test]
+    fn enabling_governance_mid_sync_does_not_hijack_it() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        let session_id = start_session(&mut state, &ctx);
+        let mut operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+            session_id,
+        );
+
+        // The switch flips while the sync is mid-flight.
+        enable(&mut state);
+
+        // The running sync still publishes, as it was authorized to when it
+        // started, and finalizes into a real cached hash.
+        operations.push(Operation::SetAssetHeaders(SetAssetHeadersArguments {
+            key: "/index.html".to_string(),
+            headers: vec![("x-late".to_string(), "1".to_string())],
+        }));
+        execute_all(&mut state, session_id, operations, &ctx);
+
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+        assert_ne!(state.cached_state_hash(), [0u8; 32]);
+        assert_eq!(state.recompute_state_hash(), state.cached_state_hash());
+        assert!(
+            matches!(state.proposed_state(), ProposedState::None),
+            "the sync left no half-staged batch behind"
+        );
+
+        // And governance takes effect from the next sync, cleanly.
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v2"]),
+            ],
+        );
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+        let prospective = staged_hash(&state);
+        state.commit_proposed_state(prospective).unwrap();
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v2"[..]));
+    }
+
+    /// Discarding while a prepare is still uploading must end that sync too,
+    /// so its remaining operations can't write into an overlay that no longer
+    /// has a batch behind it.
+    #[test]
+    fn discarding_mid_prepare_ends_the_sync() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"v1"]),
+            ],
+        );
+        let live_hash = state.cached_state_hash();
+        enable(&mut state);
+
+        let session_id = start_session(&mut state, &ctx);
+        let operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/late.html", "text/html").with_encoding("identity", vec![b"x"]),
+            ],
+            session_id,
+        );
+
+        state.discard_proposed_state();
+
+        // The abandoned session is gone, so its queued operations are refused
+        // rather than landing in a batch-less overlay.
+        let outcome = run_computation_until_completion(|progress| {
+            state.execute_operations(
+                &ExecuteOperationsArguments {
+                    session_id,
+                    operations: operations.clone(),
+                    is_final: true,
+                },
+                progress,
+                &ctx,
+            )
+        });
+        assert!(outcome.is_err(), "operations must not outlive the discard");
+
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+        assert_eq!(state.cached_state_hash(), live_hash);
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"v1"[..]));
+    }
+
+    #[test]
+    fn disabling_governance_restores_direct_syncs() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        enable(&mut state);
+        state.set_governance_approver(None).unwrap();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec![b"hi"]),
+            ],
+        );
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"hi"[..]));
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+    }
+}

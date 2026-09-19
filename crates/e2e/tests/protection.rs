@@ -13,8 +13,8 @@
 //! disturbed.
 
 use e2e::{
-    LocalNetwork, frontend_canister_id, http_fetch, http_fetch_with_headers, http_post_form,
-    icp_cmd, setup_example,
+    LocalNetwork, committed_doc, documented_calls, frontend_canister_id, http_fetch,
+    http_fetch_with_headers, http_post_form, icp_cmd, setup_example,
 };
 use reqwest::StatusCode;
 
@@ -148,21 +148,12 @@ fn documented_calls_are_accepted_by_the_canister() {
 
     icp_cmd(project).arg("deploy").assert().success();
 
-    // crates/e2e -> crates -> repo root. Read the committed docs, not the copy's,
-    // so this guards the files a reader lands on.
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("crates/e2e/ must have a repo root two levels up");
-
     let mut covered = std::collections::BTreeSet::new();
     for source in [
         "docs/access-protection.md",
         "examples/access-protection/README.md",
     ] {
-        let markdown =
-            std::fs::read_to_string(repo.join(source)).unwrap_or_else(|e| panic!("{source}: {e}"));
-        for (method, args) in documented_calls(&markdown) {
+        for (method, args) in documented_calls(&committed_doc(source), &METHODS) {
             if method == "issue_token" {
                 call(project, "enable_protection", "(\"/login.html\")");
             }
@@ -196,70 +187,3 @@ const METHODS: [&str; 6] = [
     "list_tokens",
     "check_protection_status",
 ];
-
-/// Reference forms are written with placeholders; fill in concrete values so the
-/// snippet can be sent as-is. A placeholder left unfilled fails the test rather
-/// than skipping the snippet — a new spelling belongs here, not in a hole in the
-/// coverage.
-const PLACEHOLDERS: [(&str, &str); 5] = [
-    ("<label>", "doc-label"),
-    ("<value>", "doc-secret"),
-    ("<secs>", "3600"),
-    ("= N :", "= 3600 :"),
-    ("...", "doc"),
-];
-
-/// Extracts every documented `(method, candid-args)` pair from `markdown`, in
-/// document order — the same shape whether it sits in a fenced `icp canister call
-/// frontend …` line or in a reference-table cell, so both stay checked.
-fn documented_calls(markdown: &str) -> Vec<(String, String)> {
-    // A shell line continued with `\` puts the method and its argument on
-    // different source lines (the quick start does); glue those back together.
-    let text = markdown
-        .split("\\\n")
-        .fold(String::new(), |mut acc, piece| {
-            if acc.is_empty() {
-                acc.push_str(piece);
-            } else {
-                acc.push_str(piece.trim_start());
-            }
-            acc
-        });
-
-    let mut calls: Vec<(usize, String, String)> = Vec::new();
-    for method in METHODS {
-        let mut from = 0;
-        while let Some(offset) = text[from..].find(method) {
-            let start = from + offset;
-            from = start + method.len();
-            // Reject a name embedded in a longer identifier, and require the
-            // argument to follow immediately — prose like "the `issue_token`
-            // call" documents nothing runnable.
-            let preceded_by_ident = text[..start]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-            let rest = &text[from..];
-            if preceded_by_ident || !rest.starts_with(" '") {
-                continue;
-            }
-            let Some(end) = rest[2..].find('\'') else {
-                continue;
-            };
-            let mut args = rest[2..2 + end].to_string();
-            for (placeholder, value) in PLACEHOLDERS {
-                args = args.replace(placeholder, value);
-            }
-            assert!(
-                !args.contains('<') && !args.contains("..."),
-                "unfilled placeholder in `{method} '{args}'` — add it to PLACEHOLDERS",
-            );
-            calls.push((start, method.to_string(), args));
-        }
-    }
-    calls.sort_by_key(|(offset, _, _)| *offset);
-    calls
-        .into_iter()
-        .map(|(_, method, args)| (method, args))
-        .collect()
-}

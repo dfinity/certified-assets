@@ -80,9 +80,9 @@ surface so the ones above can't reach into the ones below:
 - [`state/`](crates/canister-core/src/state/) — the **orchestrator**. `State`
   composes one `Store` and one `Certifier` (plus transient upload/session state and
   the hot-path token index) and holds all the behavior, split across per-concern
-  submodules: `assets`, `rules`, `env`, `hashing`, `serving`, `sync`, `protection`,
-  and `upgrade`. Every `impl State` block lives here, so the composed pieces stay
-  private to this module tree.
+  submodules: `assets`, `rules`, `env`, `governance`, `hashing`, `serving`, `sync`,
+  `protection`, and `upgrade`. Every `impl State` block lives here, so the composed
+  pieces stay private to this module tree.
 
 The crate's own [`lib.rs`](crates/canister-core/src/lib.rs) holds the one `State`
 instance and the entrypoints that forward to it; the thin
@@ -110,6 +110,27 @@ Because both sides go through the one `asset-prep` preparation path and the one
 `state-hash` byte format, a matching hash means the canister serves exactly the build
 the verifier reproduced from source. The trust root is the source, never an operator's
 reported number. User-facing details: [Verifying contents](docs/verifying-contents.md).
+
+## Deploys by proposal
+
+The state hash is also what makes **governance mode** work, so the two features share
+one number rather than introducing a second digest.
+
+With an approver configured, a sync no longer publishes. `execute_operations` still
+writes content bytes through `Store::store_content` — durable, but referenced by no
+live `AssetMeta`, so nothing serves them — and parks the metadata that *would* make
+them live in a **pending overlay** (`state/governance.rs`, two stable regions). Live
+state, and therefore every served response and the cached state hash, is untouched.
+The finalizing sync folds the digest over live-plus-overlay instead of live, yielding
+the **prospective** hash: what the canister will report once the batch is committed,
+and what `state-hash-cli` prints for the same source build.
+
+Committing is then metadata work only — `put_asset` + `recertify_asset` per changed
+asset, freeing displaced content groups — with no content copied and no hash
+recomputed, because the prospective hash was folded over exactly the state the
+overlay produces. That is what lets the commit run in a single message, so it either
+lands whole or traps and the message rolls back. User-facing details:
+[Deploys by proposal](docs/governance.md).
 
 ## Where things live
 

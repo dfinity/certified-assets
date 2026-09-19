@@ -189,3 +189,11 @@ visitor's browser. The last link in that chain is the visitor's gateway: over a
 [`raw` URL](how-it-works.md#the-raw-hosts-skip-verification) nobody checks the proof,
 so the state hash still says what the canister committed to but no longer guarantees
 that a visitor received it.
+
+## Verifying *before* it goes live
+
+Everything above verifies a canister after the fact. If the app is DAO-governed,
+the same hash can be checked *before* anything changes: under
+[deploys by proposal](governance.md) the state hash is the proposal payload, so a
+voter reproduces it from source exactly as in step 2 and approves the resulting
+site rather than a description of a change.
