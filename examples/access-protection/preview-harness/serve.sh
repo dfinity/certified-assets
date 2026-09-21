@@ -5,7 +5,8 @@
 # Serves a tiny parent page (on harness.localhost) that embeds this canister
 # (on <canister-id>.localhost) in an iframe. The two are different sites, so the
 # browser treats the canister as a cross-site frame — the "embedded preview"
-# scenario — which exercises the SameSite=None; Secure; Partitioned access cookie.
+# scenario — which exercises the SameSite=None; Secure; Partitioned variant of the
+# access cookie (the canister also sets a SameSite=Lax one under the same name).
 #
 # Chromium-based browsers ONLY (Chrome/Edge/Brave): they resolve *.localhost and
 # accept Secure cookies over local http. Safari/Firefox cannot be checked this

@@ -84,9 +84,11 @@ icp network stop
 
 ## Preview it in an embedded iframe (local, Chromium only)
 
-The access cookie is `SameSite=None; Secure; Partitioned`, so a private app also
-works when shown inside a **cross-site iframe** (e.g. an embedded preview). To
-check this locally:
+The canister sets the access cookie twice — once `SameSite=Lax` and once
+`SameSite=None; Partitioned` (both `HttpOnly; Secure`, same name and value) — so a
+private app works both in a first-party tab and when shown inside a **cross-site
+iframe** (e.g. an embedded preview). Clients that reject `SameSite=None` keep the
+`Lax` variant and can still log in. To check the iframe case locally:
 
 ```sh
 cd examples/access-protection
