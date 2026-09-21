@@ -78,10 +78,10 @@ impl CanisterEnv {
         }
     }
 
-    /// The rendered `Set-Cookie: ic_env=…` value for this snapshot; see
-    /// [`crate::asset::render_env_cookie`].
-    pub fn render_cookie(&self) -> String {
-        crate::asset::render_env_cookie(&self.root_key, &self.public_vars)
+    /// The rendered `Set-Cookie: ic_env=…` values for this snapshot; see
+    /// [`crate::asset::render_env_cookies`] for why there is more than one.
+    pub fn render_cookies(&self) -> Vec<String> {
+        crate::asset::render_env_cookies(&self.root_key, &self.public_vars)
     }
 }
 
