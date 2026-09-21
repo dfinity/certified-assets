@@ -82,13 +82,13 @@ icp canister call frontend disable_protection '()'
 icp network stop
 ```
 
-## Preview it in an embedded iframe (local, Chromium only)
+## Check both cookie variants in a browser (local, Chromium only)
 
 The canister sets the access cookie twice — once `SameSite=Lax` and once
 `SameSite=None; Partitioned` (both `HttpOnly; Secure`, same name and value) — so a
 private app works both in a first-party tab and when shown inside a **cross-site
 iframe** (e.g. an embedded preview). Clients that reject `SameSite=None` keep the
-`Lax` variant and can still log in. To check the iframe case locally:
+`Lax` variant and can still log in. The harness opens both contexts side by side:
 
 ```sh
 cd examples/access-protection
@@ -97,9 +97,12 @@ icp network start -d && icp deploy
 ```
 
 Open <http://harness.localhost:8000/> in a **Chromium-based** browser
-(Chrome/Edge/Brave): the page frames this canister as a cross-site iframe.
-**PASS** = the private content renders in the frame; **FAIL** = you get the
-login page (the cookie was blocked as a third-party cookie).
+(Chrome/Edge/Brave). Section 1 links to the app as an ordinary top-level visit;
+section 2 frames it as a cross-site iframe. **PASS** = the private content
+renders in both; **FAIL** = you get the login page (the cookie was blocked).
+
+Both cookies are session cookies, so do each check within one browser session —
+quitting the browser drops them and a reused profile looks logged out.
 
 Only Chromium browsers can be checked this way — they resolve `*.localhost` and
 honour `Secure` cookies over local `http`. Safari and Firefox behave correctly
