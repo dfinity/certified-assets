@@ -45,7 +45,7 @@ canisters:
         dir: dist          # the directory of files to serve
 ```
 
-Replace `<version>` with a released version (e.g. `v0.3.3`); see the
+Replace `<version>` with a released version (e.g. `v0.4.0`); see the
 [available versions](https://github.com/dfinity/icp-cli-recipes/releases?q=static-site&expanded=true).
 Pick the version here: because the recipe pins a matched canister + plugin pair,
 there is no separate canister version to choose.

@@ -1,9 +1,9 @@
 # Project stage
 
-This project is **launching**. `v0.3.0` is the first release whose recipe
-(`@dfinity/static-site`) is published to the public `icp-cli-recipes` registry, so
-from this version on we should expect **real production canisters** in the wild.
-The old "no production instances, break anything" stance no longer applies.
+This project is **launched**. Since `v0.3.0` the recipe (`@dfinity/static-site`)
+is published to the public `icp-cli-recipes` registry, so we should expect **real
+production canisters** in the wild. The old "no production instances, break
+anything" stance no longer applies.
 
 The compatibility contract is the one the release machinery already encodes — see
 [`crates/wire-types/src/version.rs`](../../crates/wire-types/src/version.rs) and the
@@ -11,11 +11,11 @@ The compatibility contract is the one the release machinery already encodes — 
 
 - **Within a release series, stable state must survive an upgrade.** The canister and
   plugin ship as a version-locked pair, and while `major == 0` a *patch* bump
-  (`0.3.0 → 0.3.1`) is a non-breaking, in-place `upgrade`: `post_upgrade` must recover
+  (`0.4.0 → 0.4.1`) is a non-breaking, in-place `upgrade`: `post_upgrade` must recover
   state written by any earlier build in the same series. Don't land a stable-state
   shape change that a patch release couldn't deserialize.
 - **Breaking changes are allowed, but are a deliberate, disruptive event.** A *series*
-  bump (pre-1.0, a minor: `0.3.x → 0.4.0`) reinstalls the canister and wipes its state;
+  bump (pre-1.0, a minor: `0.4.x → 0.5.0`) reinstalls the canister and wipes its state;
   a fresh sync re-uploads every asset. That is the sanctioned mechanism for changing
   stable-state shapes, dropping legacy fields, and deleting migration code — fine to
   do, but not free: it discards any canister state not re-derived from the local
