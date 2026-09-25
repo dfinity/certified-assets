@@ -65,9 +65,10 @@ outlived the problem they solved, and survive mainly as a debugging aid.
 
 This canister never needed the escape hatch. It is v2-only and certifies everything, so
 it behaves identically on both hostnames: it attaches the certificate either way, and on
-`raw` the gateway simply discards it. Nothing about the canister's guarantee weakens
-there, but the client has chosen a party that doesn't check, so it gets no better
-assurance than from an ordinary web host.
+`raw` the gateway forwards it without checking it. Nothing about the canister's guarantee
+weakens there, but the client has chosen a party that doesn't check, so unless it
+verifies the certificate itself, it gets no better assurance than from an ordinary web
+host.
 
 **The canister can't reliably refuse `raw` requests.** Its only clue is the `Host`
 header, which the client supplies and nothing authenticates. Matching it against `raw`
