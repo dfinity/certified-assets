@@ -26,6 +26,8 @@
 //! - [`assets`] — asset create/set-content/unset/delete/set-headers + details query
 //! - [`rules`] — redirect-rule mutations + the 404 fallback + rules query
 //! - [`env`](mod@env) — the env cookie capture / re-certify path
+//! - [`governance`](mod@governance) — by-proposal deploys: the pending overlay a
+//!   prepare stages into, and the commit that publishes it
 //! - [`hashing`] — the canonical state-hash computation
 //! - [`serving`] — the HTTP read path (`http_request` and its resolvers)
 //! - [`sync`] — start/upload/execute sync orchestration (the `impl State` half of
@@ -47,6 +49,7 @@
 
 mod assets;
 mod env;
+mod governance;
 mod hashing;
 mod protection;
 mod rules;
@@ -57,7 +60,9 @@ mod upgrade;
 #[cfg(test)]
 mod tests;
 
-use crate::cert::{AssetKey, Certifier};
+#[cfg(test)]
+use crate::cert::AssetKey;
+use crate::cert::Certifier;
 use crate::store::Store;
 use crate::sync::SyncSession;
 use candid::Principal;
@@ -145,7 +150,10 @@ impl State {
         self.store.alloc_session_id()
     }
 
-    /// Whether an asset exists at `key`.
+    /// Whether an asset exists **live** at `key`, ignoring any pending overlay.
+    /// Test-only: the sync path asks `effective_contains_asset` instead, which
+    /// is the same thing outside governance mode.
+    #[cfg(test)]
     fn contains_asset(&self, key: &AssetKey) -> bool {
         self.store.contains_asset(key)
     }
@@ -155,8 +163,7 @@ impl State {
     /// (see the alias-rule certification in [`Certifier`]), so the sync op guard
     /// rejects 4xx rules whose target is already multi-chunk.
     fn target_is_multichunk(&self, key: &str) -> bool {
-        self.store
-            .get_asset(&key.to_string())
+        self.effective_asset(&key.to_string())
             .is_some_and(|meta| meta.encodings.values().any(|e| e.num_chunks > 1))
     }
 

@@ -8,7 +8,10 @@ An ICP assets canister and `icp-cli` sync plugin for serving certified static as
   [getting started](docs/overview.md), [routing & clean URLs](docs/routing.md),
   [single-page apps](docs/routing.md#single-page-apps-spa),
   [redirects](docs/redirects.md), [custom headers](docs/headers.md),
-  [site files](docs/site-files.md), and [how it works](docs/how-it-works.md).
+  [site files](docs/site-files.md), [access protection](docs/access-protection.md),
+  [verifying contents](docs/verifying-contents.md),
+  [deploys by proposal](docs/governance.md), and
+  [how it works](docs/how-it-works.md).
 - **Examples** — runnable projects in [`examples/`](examples/): a minimal static
   site, custom headers, redirects, clean URLs, a catch-all 404, a single-page app,
   and access protection. Each deploys with `icp deploy` and doubles as an e2e test.

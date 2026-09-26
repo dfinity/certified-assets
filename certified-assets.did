@@ -213,6 +213,30 @@ type TokenInfo = record {
   expires_at : nat64; // absolute expiry, nanoseconds
 };
 
+// ───────── Governance mode ─────────
+
+// Reported by `proposed_state`. `None` covers both "governance mode is off" and
+// "nothing is prepared"; `Preparing` means a sync is still uploading, so there
+// is nothing a proposal could commit yet.
+type ProposedState = variant {
+  None;
+  Preparing : record { owner : principal };
+  Staged : record {
+    // The principal whose sync prepared this batch.
+    owner : principal;
+    // Hex state hash this batch was prepared against — what the canister
+    // reports right now, and what the commit re-checks before applying.
+    base_state_hash : text;
+    // Hex state hash committing this batch will produce. This is the proposal
+    // payload, and the value `state-hash <dist>` prints for the same source.
+    prospective_state_hash : text;
+    // Assets the commit will create, replace, or delete.
+    changed_assets : nat64;
+    // When the batch was staged (nanoseconds).
+    prepared_at : nat64;
+  };
+};
+
 service: {
   // ───────── Canister metadata ─────────
 
@@ -291,6 +315,12 @@ service: {
 
   authorize: (principal) -> ();
   deauthorize: (principal) -> ();
+  // Validators for the two methods above, so a DAO can manage its syncing
+  // principals by proposal: an SNS generic nervous system function is rejected
+  // without a `validator_method_name`. Read-only and unguarded; updates rather
+  // than queries because an inter-canister call cannot reach a query entry point.
+  validate_authorize: (principal) -> (variant { Ok : text; Err : text });
+  validate_deauthorize: (principal) -> (variant { Ok : text; Err : text });
   list_authorized: () -> (vec principal);
   // Whether the calling identity may sync assets (authorized or a controller).
   can_sync: () -> (bool) query;
@@ -347,4 +377,59 @@ service: {
   list_tokens : () -> (vec TokenInfo) query;
   // Whether protection is off, healthy, or degraded. Controller-only.
   check_protection_status : () -> (ProtectionStatus) query;
+
+  // ───────── Governance mode (by-proposal deploys) ─────────
+  //
+  // Off by default: with no approver set, everything above behaves exactly as
+  // documented and nothing here has any effect.
+  //
+  // With an approver, a sync no longer publishes. It **prepares**: content is
+  // written to the canister but referenced by nothing, and the metadata that
+  // would make it live is parked in a pending overlay. Served responses, and
+  // the `state_hash` the canister reports, are untouched for the whole voting
+  // period. What the prepare produces is one number — the state hash the
+  // canister *will* report once the batch is committed — which is the proposal
+  // payload and which anyone can reproduce offline from source with
+  // `state-hash <dist>`. Committing applies the overlay in a single message, so
+  // proposal execution is the one instant at which served content changes.
+  //
+  // Under an SNS, the approver is the **governance** canister, not root: root
+  // is the controller but only performs canister management, while a proposal
+  // that calls a method here is executed by governance calling directly. The
+  // approver is therefore also accepted wherever a controller is (notably
+  // `authorize`/`deauthorize`), so a DAO can manage its asset canister by
+  // proposal.
+
+  // The configured approver, or null when by-proposal deploys are off. Public.
+  governance : () -> (opt principal) query;
+  // Set (or clear, with null) the approver. Controller-only. Refused while a
+  // batch is prepared — commit or discard it first.
+  set_governance : (opt principal) -> ();
+
+  // Whether anything is prepared, and if so the hash committing it produces.
+  // A query, so it is a convenience for operators and voters, not proof: the
+  // binding check happens inside `commit_proposed_state`, and the number to
+  // trust is the one you reproduce from source.
+  proposed_state : () -> (ProposedState) query;
+
+  // Make the prepared state live. Restricted to the approver; this is the
+  // `target_method_name` of the SNS generic function.
+  //
+  // The argument is the 64-hex-character state hash the committed canister must
+  // report. The call **traps** on any failure rather than returning an error —
+  // SNS governance discards a target method's reply, so an error return would
+  // be recorded as a successful execution. Trapping also rolls the message
+  // back, so a rejected commit leaves the canister exactly as it was, and the
+  // commit as a whole is all-or-nothing.
+  commit_proposed_state : (text) -> ();
+  // The generic function's `validator_method_name`: renders the payload for
+  // voters. Read-only, unguarded, and an update (not a query) because an
+  // inter-canister call cannot reach a query entry point.
+  validate_commit_proposed_state : (text) -> (variant { Ok : text; Err : text });
+
+  // Drop the prepared state and free the content it staged. Authorized to the
+  // same callers as a sync, so the developer who prepared a batch can clear it
+  // after a rejected proposal without another proposal. Without this, a
+  // prepared batch blocks every further sync.
+  discard_proposed_state : () -> ();
 }
