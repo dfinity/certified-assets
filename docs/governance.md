@@ -65,11 +65,11 @@ commit. Under an SNS this is the **governance** canister — not root.
 > notably `authorize` and `deauthorize`. Without that, a DAO could never grant or
 > rotate a developer's sync access on its own asset canister.
 
-Set it **as a controller, before the canister belongs to the DAO**. Once SNS root
-is the sole controller there is no way to make this call — root performs canister
-management but never relays an arbitrary method call — so a canister handed over
-without an approver cannot be put into governance mode afterwards. See
-[Migrating](#migrating-from-the-old-asset-canister) for the order to do this in.
+Set it **as a controller**. Once SNS root is the sole controller this call is out
+of reach — root performs canister management but never relays a method call — so
+a canister the DAO already owns is configured through the
+[install argument](#configuration-has-to-arrive-with-the-install) instead, as
+part of a reinstall proposal.
 
 ```sh
 icp canister call frontend set_governance '(opt principal "<sns-governance-canister>")'
@@ -200,18 +200,54 @@ the flow is the same shape with two differences: the payload is a state hash you
 reproduce from source rather than a batch evidence digest, and you propose *after*
 preparing rather than computing evidence on the canister.
 
-**Migrate onto a new canister, not in place.** Stable-memory layouts are not
-compatible, so reusing the existing canister would mean a reinstall — which wipes
-it, leaves your DAO's frontend dark while you re-upload, and gives you nothing to
-fall back on if the new setup misbehaves. Standing up a second canister keeps the
-old frontend serving the whole time, and you decommission it only once you have
-watched the new one work.
+There are two shapes, and which suits you turns on one question about your users
+— see [Which shape to choose](#which-shape-to-choose) below.
 
-It also avoids a bootstrapping problem. `set_governance` is controller-guarded,
-and once a canister belongs to the DAO its only controller is SNS **root**, which
-performs canister management but never relays an arbitrary method call. So
-governance must be configured *before* the handover, while you are still the
-controller — which is exactly what the order below does.
+### Configuration has to arrive with the install
+
+Whichever you pick, this is the constraint behind both. `set_governance` and
+`authorize` are controller-guarded, and once a canister belongs to the DAO its
+only controller is SNS **root**, which performs canister management but never
+relays a method call. So on a canister the DAO already owns, neither can be
+called.
+
+The canister therefore takes an **install argument** carrying both:
+
+```candid
+(opt record {
+  governance : opt principal;          // the approver
+  authorize  : opt vec principal;      // who may prepare
+})
+```
+
+It applies on install and reinstall, never on upgrade — the approver is ordinary
+stable state and survives an upgrade untouched. An ordinary `icp deploy` passes
+no argument and gets an unconfigured canister, exactly as before.
+
+### Which shape to choose
+
+**In place**, by reinstalling the existing canister with the new wasm and that
+argument in a single `UpgradeSnsControlledCanister` proposal (mode `reinstall`).
+The canister ID is preserved, so custom domains, links and bookmarks are
+untouched. The cost is downtime: the reinstall wipes the canister, and the first
+content can only go live through a commit proposal, so the frontend is dark for
+roughly one voting period. This is also the path a future **major version** will
+require, since a series bump reinstalls by design.
+
+**Onto a new canister**, configured while you are still its controller and handed
+over afterwards. The old frontend keeps serving throughout and rollback is
+trivial, but the canister ID changes.
+
+> **Check your Internet Identity derivation origin before choosing.** II derives
+> each user's principal from the origin they authenticate on. If that origin is
+> your **custom domain**, a new canister is safe — move the domain with it and
+> update `ii-alternative-origins`. If users authenticate against the raw
+> `<canister-id>` origin, changing canisters **changes every principal** and they
+> lose their accounts, unless the old canister stays alive purely to serve that
+> file. When in doubt, migrate in place.
+
+The steps below are the new-canister shape. For in place, the only difference is
+that steps 1–3 collapse into the single reinstall proposal.
 
 ### 1. Stand up the new canister
 

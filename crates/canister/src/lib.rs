@@ -1,10 +1,20 @@
 use candid::Principal;
 use canister_core::{
     AssetDetails, ByteBuf, ChunkId, ExecuteOperationsArguments, HttpRequest, HttpResponse,
-    IssueTokenArgs, ProposedState, ProtectionStatus, RedirectRule, StartSyncResult, TokenInfo,
-    UploadChunksArguments, Version, guard_can_sync, guard_is_controller, guard_is_governance,
+    InitArgs, IssueTokenArgs, ProposedState, ProtectionStatus, RedirectRule, StartSyncResult,
+    TokenInfo, UploadChunksArguments, Version, guard_can_sync, guard_is_controller,
+    guard_is_governance,
 };
-use ic_cdk::{post_upgrade, query, update};
+use ic_cdk::{init, post_upgrade, query, update};
+
+// Runs on install and reinstall. Optional, so an ordinary `icp deploy` passes
+// nothing and gets an unconfigured canister; an SNS reinstalling a governed
+// frontend in place passes the approver and deploy principals here, because
+// after the install there is no principal left who could set them.
+#[init]
+fn init(args: Option<InitArgs>) {
+    canister_core::init(args);
+}
 
 #[post_upgrade]
 fn post_upgrade() {
