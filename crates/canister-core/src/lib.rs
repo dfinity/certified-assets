@@ -27,7 +27,7 @@ pub use http::{HttpRequest, HttpResponse};
 pub use protection::{IssueTokenArgs, ProtectionStatus, TokenInfo};
 pub use serde_bytes::ByteBuf;
 pub use wire_types::{
-    AssetDetails, ChunkId, ExecuteOperationsArguments, RedirectRule, StartSyncResult,
+    AssetDetails, ChunkId, ExecuteOperationsArguments, InitArgs, RedirectRule, StartSyncResult,
     UploadChunksArguments, Version,
 };
 
@@ -423,6 +423,37 @@ pub fn refresh_env() {
         s.refresh_env(&env);
         certified_data_set(s.root_hash());
     });
+}
+
+/// Applies the install argument to a freshly installed canister.
+///
+/// Runs on install and on **reinstall**, never on upgrade — which is the whole
+/// point. Stable state does not survive a reinstall, so a governed canister
+/// would come back configured as an ordinary one, and on an SNS there is no
+/// principal left who could fix that: root controls it but relays no method
+/// call, and the approver it would need is the very thing that was lost. Taking
+/// the configuration with the install closes that gap, and is also what lets an
+/// SNS create a frontend canister already governed.
+///
+/// Deliberately not accepted on upgrade. The approver is ordinary stable state
+/// and survives one untouched; threading it through `post_upgrade` would make
+/// every routine upgrade a moment the setting could change, and leave "no
+/// argument" ambiguous between *keep* and *clear*.
+pub fn init(args: Option<InitArgs>) {
+    let Some(args) = args else {
+        return;
+    };
+    STATE.with_borrow_mut(|s| {
+        for principal in args.authorize.into_iter().flatten() {
+            s.authorize(principal);
+        }
+        if let Some(approver) = args.governance {
+            // Infallible here in a way `set_governance` is not: a canister this
+            // new has no prepared batch to strand.
+            s.set_governance_approver(Some(approver))
+                .expect("a freshly installed canister cannot have a prepared batch");
+        }
+    })
 }
 
 /// Rebuilds derived heap state (the certified-response tree) from the durable

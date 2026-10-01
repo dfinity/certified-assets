@@ -213,6 +213,28 @@ type TokenInfo = record {
   expires_at : nat64; // absolute expiry, nanoseconds
 };
 
+// ───────── Install argument ─────────
+
+// Everything here is also settable afterwards (`set_governance`, `authorize`),
+// so an ordinary deploy passes no argument at all and gets the defaults.
+//
+// It exists for the one situation where "afterwards" never comes. A canister
+// owned by an SNS has root as its only controller, and root performs canister
+// management but never relays a method call — so configuration that does not
+// arrive *with* the install cannot arrive. That makes this the mechanism behind
+// reinstalling a governed frontend in place (which a major version requires,
+// since a reinstall wipes state) and behind an SNS creating frontend canisters
+// for itself, governed from birth.
+type InitArgs = record {
+  // The approver, as `set_governance` would set it. Absent leaves by-proposal
+  // deploys off, which is the ordinary case.
+  governance : opt principal;
+  // Principals authorized to sync, as `authorize` would add them. A governed
+  // canister wants at least one from the start: it cannot be deployed to
+  // otherwise, and once handed over only the approver could add one.
+  authorize : opt vec principal;
+};
+
 // ───────── Governance mode ─────────
 
 // Reported by `proposed_state`. `None` covers both "governance mode is off" and
@@ -237,7 +259,11 @@ type ProposedState = variant {
   };
 };
 
-service: {
+// The argument is applied on install and reinstall, never on upgrade: the
+// approver is ordinary stable state and survives one untouched. Optional, and an
+// absent argument decodes to null, so an installer that passes nothing is
+// unaffected.
+service: (opt InitArgs) -> {
   // ───────── Canister metadata ─────────
 
   // Semver release identity shared by the canister and its paired sync plugin.
