@@ -208,10 +208,17 @@ There are two shapes, and which suits you turns on one question about your users
 Whichever you pick, this is the constraint behind both. `set_governance` and
 `authorize` are controller-guarded, and once a canister belongs to the DAO its
 only controller is SNS **root**, which performs canister management but never
-relays a method call. So on a canister the DAO already owns, neither can be
-called.
+relays a method call.
 
-The canister therefore takes an **install argument** carrying both:
+So on a DAO-owned canister that has **no approver yet**, neither can be called —
+and nothing can set one, which is the deadlock. Once an approver *is* configured
+it is gone: the approver is accepted wherever a controller is, so the DAO can
+call `authorize`, `deauthorize`, and `set_governance` itself by proposal. The
+install-time list is a starting point, not a permanent one.
+
+What the install argument buys is getting past that first step — and getting past
+it again after every reinstall, which wipes the approver along with everything
+else:
 
 ```candid
 (opt record {
@@ -231,8 +238,10 @@ argument in a single `UpgradeSnsControlledCanister` proposal (mode `reinstall`).
 The canister ID is preserved, so custom domains, links and bookmarks are
 untouched. The cost is downtime: the reinstall wipes the canister, and the first
 content can only go live through a commit proposal, so the frontend is dark for
-roughly one voting period. This is also the path a future **major version** will
-require, since a series bump reinstalls by design.
+roughly one voting period. It is also the path every future **breaking release**
+will take: while the version is `0.x` a breaking change is a *series* bump — a
+minor, `0.3.x` → `0.4.0` — and a series bump reinstalls by design. So this is not
+a one-off migration step but the shape of every breaking upgrade from here on.
 
 **Onto a new canister**, configured while you are still its controller and handed
 over afterwards. The old frontend keeps serving throughout and rollback is

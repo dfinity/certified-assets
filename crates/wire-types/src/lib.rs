@@ -306,8 +306,9 @@ pub struct AssetDetails {
 /// install, it cannot arrive at all.
 ///
 /// That makes this the mechanism behind two things: reinstalling a governed
-/// frontend in place (which a major version requires, since it wipes state), and
-/// an SNS creating frontend canisters for itself, configured from birth.
+/// frontend in place — which every breaking release requires, since a *series*
+/// bump (pre-1.0 a minor, `0.3.x` → `0.4.0`) reinstalls and wipes state — and an
+/// SNS creating frontend canisters for itself, configured from birth.
 ///
 /// Every field is optional and an absent argument decodes to `None`, so adding
 /// it changes nothing for an installer that passes no argument.

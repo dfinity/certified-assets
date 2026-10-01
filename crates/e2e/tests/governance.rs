@@ -252,8 +252,9 @@ fn a_rejected_proposal_is_cleared_by_discarding() {
     assert_eq!(http_fetch(project, "/index.html").text().unwrap(), v3);
 }
 
-/// Reinstalling a governed frontend **in place**, which is what a major version
-/// of this canister will require of every SNS that runs one.
+/// Reinstalling a governed frontend **in place**, which is what every breaking
+/// release of this canister will require of each SNS running one — a *series*
+/// bump reinstalls by design, and while the version is `0.x` that is a minor.
 ///
 /// A reinstall wipes stable state, so the canister comes back unconfigured — and
 /// on an SNS that is terminal: root is the only controller and relays no method
