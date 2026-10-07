@@ -33,18 +33,52 @@ the proof (see
 [who verifies the certificate](how-it-works.md#who-verifies-the-certificate)).
 
 **Not covered:** asset content bytes are folded in as their certified hashes, never
-re-hashed; and permissions / authorization state are out of scope (they don't
-affect *what* is served, only *who may sync*).
+re-hashed. Two things a visitor receives are outside the model:
+
+- **The `ic_env` cookie.** Every `text/html` response carries a certified
+  `set-cookie: ic_env` holding the canister's `PUBLIC_*` environment variables and
+  the IC root key. It is added when the response is certified rather than stored
+  with the asset, so it is not part of the hash, and `refresh_env` republishes it
+  without moving the hash. A frontend that reads a backend's canister id from it is
+  configured by state the hash does not cover: a controller can point it at a
+  different canister while the build stays byte-identical.
+- **Access protection.** Who may *sync* (controllers, authorized principals) has no
+  bearing on what is served. The access-protection gate does: with it on, an
+  unauthenticated request for your content gets a certified `307` to the login
+  page (HTML) or a `401` (anything else) instead of the asset, and `cache-control`
+  is replaced with `no-store`. A matching hash says the canister holds your build,
+  not that a visitor can reach it.
 
 ## How to verify
 
-You need the canister's id and its public source (the repo and the build steps
-that produce the served directory).
+You need the canister's id, its public source (the repo and the build steps that
+produce the served directory), and a Rust toolchain to build the verifier.
 
-1. **Reproduce the build.** Check out the source at the deployed version and run
-   the build to produce the site directory (`dist/`), exactly as the deploy does.
+1. **Reproduce the build.** Check out the source at the version whose deployment
+   you are checking, and run the build to produce the site directory (`dist/`),
+   exactly as the deploy does.
 
-2. **Compute the hash locally** with the `state-hash` tool, pointed at that
+2. **Build the verifier at the canister's release.** Ask the canister which
+   release it runs, and build `state-hash` from that tag. It is not published as a
+   binary or to crates.io, which is the point: the verifier should come from the
+   same source you are trusting, not from someone's download.
+
+   ```sh
+   icp canister call <canister-id> version '()' -n ic --query
+   # (record { major = 0 : nat32; minor = 3 : nat32; patch = 3 : nat32 })
+
+   cargo install --git https://github.com/dfinity/certified-assets \
+     --tag v0.3.3 --locked state-hash-cli
+   ```
+
+   The release has to match the one that deployed the canister, for the reasons in
+   [the frozen contract](#the-frozen-contract). `--locked` is part of that match,
+   not a precaution: the committed `Cargo.lock` is what pins the compressor builds
+   whose output bytes the hash covers, and `cargo install` re-resolves dependencies
+   without it. A verifier on the right tag with a newer `brotli` patch computes a
+   different hash.
+
+3. **Compute the hash locally** with the `state-hash` tool, pointed at that
    directory (include any `_headers` / `_redirects` files, as deployed):
 
    ```sh
@@ -59,12 +93,25 @@ that produce the served directory).
    match this value. Verifying those is between that platform and its users; the
    tool deliberately doesn't guess at which settings someone else might have used.
 
-3. **Read the canister's hash.** `state_hash` is a public, unguarded method, and
+4. **Read the canister's hash.** `state_hash` is a public, unguarded method, and
    an *update* call, so the reply is consensus-backed and trustworthy:
 
    ```sh
-   dfx canister call <canister-id> state_hash --network ic
+   icp canister call <canister-id> state_hash '()' -n ic
    # (blob "\81\50\a6\5e…")
+   ```
+
+   Pass the argument explicitly: with none, `icp canister call` opens an
+   interactive prompt instead of sending an empty one. Target the canister by
+   **principal** with `-n <network>`; `-e <environment>` resolves a canister *name*
+   out of a local project, which a third-party verifier does not have.
+
+   To compare the two values directly, take the reply as raw bytes; the hash is
+   its last 32:
+
+   ```sh
+   icp canister call <canister-id> state_hash '()' -n ic -o hex | tail -c 65
+   # 8150a65e854b9bbb…
    ```
 
    32 zero bytes is not a hash: it means the canister has none to report, either
@@ -75,10 +122,10 @@ that produce the served directory).
    finishes. A canister that keeps reporting zeros was left mid-sync, and there
    is nothing to verify it against.
 
-4. **Compare.** If the canister's hash equals the one you computed, it serves
+5. **Compare.** If the canister's hash equals the one you computed, it serves
    exactly the build you reproduced from source. If it doesn't, either the served
    content, headers, or redirects do not match that source, or it was deployed
-   with compressors this tool doesn't know about (see step 2).
+   with compressors this tool doesn't know about (see step 3).
 
    A match needs no further checking of *how* the canister was synced. The hash
    covers every stored encoding by its own hash, so matching it means the canister
@@ -113,6 +160,15 @@ parameters baked into the hash:
 - **Byte format.** A versioned, length-prefixed, domain-separated SHA-256
   stream (see the `state-hash` crate). Independent of map/header iteration order,
   but bound to this layout version.
+- **Synthesized content.** The preparation adds what a deploy adds: the clean-URL
+  and trailing-slash rules derived from the asset keys, and a `/*` catch-all at
+  status `404`, pointing at your own root `404.html` if the directory has one and
+  otherwise at the built-in [`404` page](routing.md#not-found-handling), which it
+  then adds as well. A root `/*` rule of your own (a single-page app's, say)
+  replaces both. All of it comes from the tool rather than from your directory,
+  which is why a directory with no `404.html` still matches: the verifier adds, or
+  withholds, exactly what the deploy did. It is pinned to the tool's release like
+  everything above.
 
 The contract can change between releases; when it does, the format version is
 bumped and every previously-computed hash is expected to change. Within a release

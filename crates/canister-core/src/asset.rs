@@ -59,34 +59,70 @@ pub struct EncodingMeta {
 /// Status codes we certify for every asset encoding.
 pub const STATUS_CODES_TO_CERTIFY: [u16; 2] = [200, 304];
 
-/// Renders the value of the canister-injected `Set-Cookie: ic_env=…` header from
-/// an environment snapshot, in the exact format the client lib
-/// (`@icp-sdk/core/agent/canister-env`) parses:
+/// Renders the `Set-Cookie: ic_env=…` values for an environment snapshot, in the
+/// exact format the client lib (`@icp-sdk/core/agent/canister-env`) parses:
 ///
 /// ```text
-/// ic_env=<url_encode(payload)>; Secure; SameSite=None; Partitioned
+/// ic_env=<url_encode(payload)>; Path=/; Secure; SameSite=Lax
+/// ic_env=<url_encode(payload)>; Path=/; Secure; SameSite=None; Partitioned
 /// payload = "ic_root_key=<hex(DER root key)>" + ("&" + "<name>=<value>")*
 /// ```
 ///
 /// The root key always comes first; `public_vars` follow in sorted (BTreeMap)
 /// order. `url_encode` percent-encodes the `&`/`=` separators so the whole
 /// payload rides inside one cookie value; `decodeURIComponent` restores them
-/// client-side. `SameSite=None; Secure; Partitioned` (CHIPS) so page scripts can
-/// still read it when the app is shown inside a **cross-site iframe** — a plain
-/// cross-site cookie would be dropped by the browser before the client lib runs.
-/// (`ic_env` is read-only client state, never sent back to the canister, so
-/// `SameSite=None` only affects whether the browser stores it, not any request.)
+/// client-side.
+///
+/// **Two cookies, same name and value, because no single attribute set is
+/// readable in every context.** A cross-site iframe needs `SameSite=None;
+/// Secure; Partitioned` (CHIPS): WebKit blocks cross-site cookies that did not
+/// request partitioning, and a plain third-party cookie is being removed
+/// browser-wide, so nothing weaker survives there. But `SameSite=None` is
+/// *rejected outright* by Chrome 51–66, Android WebView of that vintage, and UC
+/// Browser before 12.13.2, which would leave those clients with no snapshot at
+/// all — and Android WebView ignores `Partitioned` entirely (CHIPS is off there
+/// until the `CookieManager` API can report partitioned cookies). The
+/// `SameSite=Lax` variant is what every such client accepts, so each context
+/// keeps whichever variant it understands.
+///
+/// Upstream guidance is to detect those clients by `User-Agent` and vary the
+/// attributes. That is not available to us: `set-cookie` is a *certified*
+/// response header (see [`certificate_expression_for`]), byte-identical for
+/// every requester, so the response cannot branch on the request. Sending both
+/// and letting the client choose is the only form the mitigation can take here.
+///
+/// Emitting the partitioned variant last matters for clients that ignore
+/// `Partitioned`: there the two collapse to one `(name, domain, path)` identity
+/// and the last write wins, which keeps cross-site embedding working wherever
+/// plain third-party cookies are still allowed. Clients that reject
+/// `SameSite=None` never store that variant, so they keep the `Lax` one
+/// regardless of order. Where both are honoured they occupy separate jars —
+/// the partition key is part of a cookie's identity — and carry the same value,
+/// so a duplicate in one `Cookie` header resolves identically either way.
+///
+/// `Path=/` is explicit because the default-path algorithm would otherwise scope
+/// the cookie to the requesting URL's directory: a single-page app entered at a
+/// nested route would get a cookie invisible to its other routes, and repeat
+/// visits would accumulate one `ic_env` per path, where the most specific match
+/// is offered first and can shadow a newer value at `/`.
+///
+/// Session cookies (no `Max-Age`). An app is free to serve its HTML cacheable,
+/// so a persistent copy could outlive a change to the env vars and configure a
+/// client from a stale snapshot; expiring with the session keeps a missing
+/// snapshot a visible failure instead.
+///
 /// Pure (no system-API access) so it can be unit-tested directly.
-pub fn render_env_cookie(root_key: &[u8], public_vars: &BTreeMap<String, String>) -> String {
+pub fn render_env_cookies(root_key: &[u8], public_vars: &BTreeMap<String, String>) -> Vec<String> {
     let mut entries = vec![format!("ic_root_key={}", hex::encode(root_key))];
     for (name, value) in public_vars {
         entries.push(format!("{name}={value}"));
     }
-    let payload = entries.join("&");
-    format!(
-        "ic_env={}; Secure; SameSite=None; Partitioned",
-        url_encode(&payload)
-    )
+    let payload = url_encode(&entries.join("&"));
+    let common = format!("ic_env={payload}; Path=/; Secure");
+    vec![
+        format!("{common}; SameSite=Lax"),
+        format!("{common}; SameSite=None; Partitioned"),
+    ]
 }
 
 /// Whether an asset's content-type denotes HTML — i.e. whether it should carry
@@ -303,7 +339,7 @@ fn build_headers(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_env_cookie, url_encode};
+    use super::{render_env_cookies, url_encode};
     use std::collections::BTreeMap;
 
     /// Client-side `decodeURIComponent`, reproduced for assertions: percent-decodes
@@ -321,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn render_env_cookie_orders_and_encodes() {
+    fn render_env_cookies_orders_and_encodes() {
         let vars = BTreeMap::from([
             ("PUBLIC_B".to_string(), "2".to_string()),
             // A value containing `=` must survive: only the structural `&`/`=`
@@ -329,20 +365,55 @@ mod tests {
             // first `=` so the rest of the value is preserved verbatim.
             ("PUBLIC_A".to_string(), "v=with=eq".to_string()),
         ]);
-        let rendered = render_env_cookie(&[0xab, 0xcd], &vars);
+        let rendered = render_env_cookies(&[0xab, 0xcd], &vars);
 
-        assert!(rendered.ends_with("; Secure; SameSite=None; Partitioned"));
-        let value = rendered
-            .strip_prefix("ic_env=")
-            .unwrap()
-            .strip_suffix("; Secure; SameSite=None; Partitioned")
-            .unwrap();
-        // Separators are percent-encoded, so the payload rides in one cookie value.
-        assert!(!value.contains('&') && !value.contains('='));
-        // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
-        assert_eq!(
-            client_decode(value),
-            "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2"
-        );
+        let expected_payload = "ic_root_key=abcd&PUBLIC_A=v=with=eq&PUBLIC_B=2";
+        for cookie in &rendered {
+            let value = cookie
+                .strip_prefix("ic_env=")
+                .unwrap()
+                .split("; ")
+                .next()
+                .unwrap();
+            // Separators are percent-encoded, so the payload rides in one cookie value.
+            assert!(!value.contains('&') && !value.contains('='));
+            // Decoding restores "ic_root_key=<hex>&<sorted PUBLIC_ vars>", root first.
+            assert_eq!(client_decode(value), expected_payload);
+        }
+    }
+
+    /// Both variants carry the same name and value, so a client that stores both
+    /// reads one snapshot either way; only the attributes differ.
+    #[test]
+    fn render_env_cookies_emits_lax_then_partitioned() {
+        let rendered = render_env_cookies(&[0xab, 0xcd], &BTreeMap::new());
+
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].ends_with("; Secure; SameSite=Lax"));
+        assert!(rendered[1].ends_with("; Secure; SameSite=None; Partitioned"));
+        // The partitioned variant is last: where `Partitioned` is ignored the two
+        // share one identity and the last write wins, which keeps cross-site
+        // embedding working there.
+        assert!(!rendered[0].contains("Partitioned"));
+
+        let payloads: Vec<&str> = rendered
+            .iter()
+            .map(|c| {
+                c.strip_prefix("ic_env=")
+                    .unwrap()
+                    .split("; ")
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(payloads[0], payloads[1]);
+
+        for cookie in &rendered {
+            // `Path=/` keeps one cookie per host rather than one per visited
+            // directory, and the snapshot expires with the session.
+            assert!(cookie.contains("; Path=/;"));
+            assert!(cookie.contains("; Secure"));
+            assert!(!cookie.contains("Max-Age"));
+        }
     }
 }
