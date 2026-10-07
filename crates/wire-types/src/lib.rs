@@ -296,6 +296,34 @@ pub struct AssetDetails {
     pub headers: Vec<(String, String)>,
 }
 
+/// What the `proposed_state` query reports under governance mode (by-proposal
+/// deploys). `None` covers both "governance mode is off" and "nothing is
+/// prepared"; `Preparing` means a sync is still uploading, so there is nothing a
+/// proposal could commit yet.
+///
+/// The two hashes are hex rather than `blob` so the value a voter compares
+/// against `state-hash <dist>` is character-for-character what that tool prints.
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
+pub enum ProposedState {
+    None,
+    Preparing {
+        owner: Principal,
+    },
+    Staged {
+        /// The principal whose sync prepared this batch.
+        owner: Principal,
+        /// Hex state hash the batch was prepared against — what the canister
+        /// reports now, and what the commit re-checks before applying.
+        base_state_hash: String,
+        /// Hex state hash committing the batch will produce: the proposal payload.
+        prospective_state_hash: String,
+        /// Assets the commit will create, replace, or delete.
+        changed_assets: u64,
+        /// When the batch was staged (nanoseconds).
+        prepared_at: u64,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::Encoding::{self, Brotli, Gzip, Identity};

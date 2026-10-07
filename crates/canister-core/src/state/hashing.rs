@@ -54,7 +54,7 @@ impl State {
     /// `EncodingMeta` and, for multi-chunk encodings only, scans the per-chunk
     /// `ChunkCert`s in index order — exactly the gateway-enforced hashes the
     /// digest folds in (single-chunk encodings are covered by the whole `sha256`).
-    fn manifest_asset(&self, key: &str, meta: &AssetMeta) -> state_hash::ManifestAsset {
+    pub(super) fn manifest_asset(&self, key: &str, meta: &AssetMeta) -> state_hash::ManifestAsset {
         let encodings = meta
             .encodings
             .iter()

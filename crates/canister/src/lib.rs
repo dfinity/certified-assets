@@ -1,8 +1,8 @@
 use candid::Principal;
 use canister_core::{
     AssetDetails, ByteBuf, ChunkId, ExecuteOperationsArguments, HttpRequest, HttpResponse,
-    IssueTokenArgs, ProtectionStatus, RedirectRule, StartSyncResult, TokenInfo,
-    UploadChunksArguments, Version, guard_can_sync, guard_is_controller,
+    IssueTokenArgs, ProposedState, ProtectionStatus, RedirectRule, StartSyncResult, TokenInfo,
+    UploadChunksArguments, Version, guard_can_sync, guard_is_controller, guard_is_governance,
 };
 use ic_cdk::{post_upgrade, query, update};
 
@@ -48,6 +48,21 @@ fn authorize(principal: Principal) {
 #[update(guard = "guard_is_controller")]
 fn deauthorize(principal: Principal) {
     canister_core::deauthorize(principal)
+}
+
+// Validators for the two methods above, so a DAO can manage its syncing
+// principals by proposal: a generic nervous system function is rejected without
+// a `validator_method_name`. Read-only, unguarded, and updates rather than
+// queries because an inter-canister call cannot reach a query entry point.
+
+#[update]
+fn validate_authorize(principal: Principal) -> Result<String, String> {
+    canister_core::validate_authorize(principal)
+}
+
+#[update]
+fn validate_deauthorize(principal: Principal) -> Result<String, String> {
+    canister_core::validate_deauthorize(principal)
 }
 
 // Recaptures the `PUBLIC_*` env vars + IC root key and re-certifies the `ic_env`
@@ -146,6 +161,50 @@ fn list_tokens() -> Vec<TokenInfo> {
 #[query(guard = "guard_is_controller")]
 fn check_protection_status() -> ProtectionStatus {
     canister_core::check_protection_status()
+}
+
+// ───────── Governance mode (by-proposal deploys) ─────────
+// Off unless an approver is set. With one, a sync prepares instead of
+// publishing, and only the approver — an SNS/NNS governance canister executing
+// an adopted proposal — can make the prepared state live.
+
+#[query]
+fn governance() -> Option<Principal> {
+    canister_core::governance()
+}
+
+#[update(guard = "guard_is_controller")]
+fn set_governance(approver: Option<Principal>) {
+    canister_core::set_governance(approver)
+}
+
+#[query]
+fn proposed_state() -> ProposedState {
+    canister_core::proposed_state()
+}
+
+// The target method of the SNS generic function. Traps on any failure: SNS
+// governance discards the reply, so an `Err` return would be recorded as a
+// successful execution. A trap is both the only failure governance surfaces and
+// what rolls the whole commit back, leaving the canister untouched.
+#[update(guard = "guard_is_governance")]
+fn commit_proposed_state(state_hash_hex: String) {
+    canister_core::commit_proposed_state(state_hash_hex)
+}
+
+// The generic function's validator, rendering the payload for voters. An update
+// rather than a query because an inter-canister call cannot reach a query entry
+// point, and unguarded because governance calls it while merely validating.
+#[update]
+fn validate_commit_proposed_state(state_hash_hex: String) -> Result<String, String> {
+    canister_core::validate_commit_proposed_state(state_hash_hex)
+}
+
+// Guarded like a sync, so the developer who prepared a batch can clear it after
+// a rejected proposal without needing another one.
+#[update(guard = "guard_can_sync")]
+fn discard_proposed_state() {
+    canister_core::discard_proposed_state()
 }
 
 ic_cdk::export_candid!();

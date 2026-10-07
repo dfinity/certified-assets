@@ -2,7 +2,7 @@
 title: "Under the hood"
 description: "How the canister certifies responses, serves large assets, negotiates encodings, and persists state across upgrades"
 sidebar:
-  order: 8
+  order: 9
 ---
 
 You don't need any of this to use certified-assets; the [overview](overview.md) is
