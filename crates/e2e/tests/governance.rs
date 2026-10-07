@@ -252,6 +252,74 @@ fn a_rejected_proposal_is_cleared_by_discarding() {
     assert_eq!(http_fetch(project, "/index.html").text().unwrap(), v3);
 }
 
+/// Reinstalling a governed frontend **in place**, which is what every breaking
+/// release of this canister will require of each SNS running one — a *series*
+/// bump reinstalls by design, and while the version is `0.x` that is a minor.
+///
+/// A reinstall wipes stable state, so the canister comes back unconfigured — and
+/// on an SNS that is terminal: root is the only controller and relays no method
+/// call, so `set_governance` and `authorize` are both out of reach afterwards.
+/// The install argument is the way out, and this is the test that it works:
+/// configuration arrives with the wasm, and the canister is governed from its
+/// first instruction rather than from a follow-up call that could never happen.
+#[test]
+fn a_reinstall_can_configure_governance_from_the_install_argument() {
+    let tmp = setup_example("static-site");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+    assert_eq!(http_fetch(project, "/index.html").status(), StatusCode::OK);
+
+    let approver = identity_principal(project);
+
+    // The in-place migration in one step: new wasm, and the configuration that
+    // could not be delivered any other way.
+    icp_cmd(project)
+        .args([
+            "canister",
+            "install",
+            "frontend",
+            "--mode",
+            "reinstall",
+            "--yes",
+            "--args",
+            &format!(
+                "(opt record {{ governance = opt principal \"{approver}\"; \
+                 authorize = opt vec {{ principal \"{approver}\" }} }})"
+            ),
+        ])
+        .assert()
+        .success();
+
+    // Governed immediately, with no call in between.
+    let reported = call(project, "governance", "()");
+    assert!(reported.contains(&approver), "{reported}");
+    // Asserted through `list_authorized`, not `can_sync`: this identity is also
+    // a controller, so `can_sync` would answer true even if the argument's
+    // `authorize` field had been ignored entirely.
+    let authorized = call(project, "list_authorized", "()");
+    assert!(
+        authorized.contains(&approver),
+        "the install argument must seed the authorized set: {authorized}"
+    );
+
+    // And it behaves as a governed canister: the next deploy prepares rather
+    // than publishes, so the content only goes live by proposal.
+    icp_cmd(project).arg("deploy").assert().success();
+    let staged = match proposed_state(project) {
+        ProposedState::Staged {
+            prospective_state_hash,
+            ..
+        } => prospective_state_hash,
+        other => panic!("expected the deploy to prepare, got {other:?}"),
+    };
+
+    call(project, "commit_proposed_state", &format!("(\"{staged}\")"));
+    assert_eq!(http_fetch(project, "/index.html").status(), StatusCode::OK);
+    assert_eq!(hex::encode(canister_state_hash(project)), staged);
+}
+
 /// The governance methods a *human* calls, all of which `docs/governance.md`
 /// must show in a form that runs. `commit_proposed_state` and its validator are
 /// deliberately absent: nobody types those — governance calls them when a

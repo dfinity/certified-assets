@@ -296,6 +296,33 @@ pub struct AssetDetails {
     pub headers: Vec<(String, String)>,
 }
 
+/// The canister's install argument.
+///
+/// Everything in it is also settable afterwards (`set_governance`, `authorize`),
+/// so an ordinary deploy passes nothing and gets the defaults. It exists for the
+/// one situation where "afterwards" never comes: a canister that belongs to an
+/// SNS has root as its only controller, and root performs canister management
+/// but never relays a method call — so unless configuration arrives *with* the
+/// install, it cannot arrive at all.
+///
+/// That makes this the mechanism behind two things: reinstalling a governed
+/// frontend in place — which every breaking release requires, since a *series*
+/// bump (pre-1.0 a minor, `0.3.x` → `0.4.0`) reinstalls and wipes state — and an
+/// SNS creating frontend canisters for itself, configured from birth.
+///
+/// Every field is optional and an absent argument decodes to `None`, so adding
+/// it changes nothing for an installer that passes no argument.
+#[derive(Clone, Debug, Default, PartialEq, Eq, CandidType, Serialize, Deserialize)]
+pub struct InitArgs {
+    /// The governance approver, as `set_governance` would set it. `None` leaves
+    /// by-proposal deploys off.
+    pub governance: Option<Principal>,
+    /// Principals authorized to sync, as `authorize` would add them. A governed
+    /// canister needs at least one from the start: it cannot be deployed to
+    /// otherwise, and after handover nobody can add one except the approver.
+    pub authorize: Option<Vec<Principal>>,
+}
+
 /// What the `proposed_state` query reports under governance mode (by-proposal
 /// deploys). `None` covers both "governance mode is off" and "nothing is
 /// prepared"; `Preparing` means a sync is still uploading, so there is nothing a

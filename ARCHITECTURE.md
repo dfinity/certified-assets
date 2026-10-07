@@ -129,8 +129,17 @@ Committing is then metadata work only — `put_asset` + `recertify_asset` per ch
 asset, freeing displaced content groups — with no content copied and no hash
 recomputed, because the prospective hash was folded over exactly the state the
 overlay produces. That is what lets the commit run in a single message, so it either
-lands whole or traps and the message rolls back. User-facing details:
-[Deploys by proposal](docs/governance.md).
+lands whole or traps and the message rolls back.
+
+The canister's **install argument** (`wire-types::InitArgs`, applied by `init`) exists
+for this feature alone. `set_governance` and `authorize` are controller-guarded, and a
+canister owned by an SNS has root as its only controller — which performs canister
+management but never relays a method call. So on a canister the DAO already owns,
+configuration that does not arrive with the install cannot arrive at all. It applies on
+install and reinstall only: the approver is ordinary stable state and survives an
+upgrade, and threading it through `post_upgrade` would make every upgrade a moment the
+setting could silently change. User-facing details:
+[Deploy by proposal](docs/governance.md).
 
 ## Where things live
 
