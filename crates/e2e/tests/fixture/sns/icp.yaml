@@ -1,0 +1,26 @@
+# Fixture for the SNS governance e2e (tests/sns.rs).
+#
+# `nns: true` is the whole point: it makes the local network's PocketIC instance
+# boot with NNS governance + root, an SNS subnet, and the SNS-W canister with the
+# SNS wasms already uploaded — so the test can stand up a real SNS governance
+# canister without bazel, the ic monorepo, or dfx.
+networks:
+  - name: local
+    mode: managed
+    nns: true
+    gateway:
+      port: 0
+
+canisters:
+  - name: frontend
+    build:
+      steps:
+        - type: pre-built
+          path: ../../dist/canister.wasm
+
+    sync:
+      steps:
+        - type: plugin
+          path: ../../dist/plugin.wasm
+          dirs:
+            - dist

@@ -49,6 +49,16 @@ Compressors are **injected**, not fixed by the crate ([`compressors.rs`](../../c
 
 E2E tests verify that the canister and plugin work correctly together through the `icp` CLI against a live local replica — deploy, re-sync, content update/deletion, serving, certification, redirects, headers, streaming/range, ETag, env cookie, upgrade persistence, access protection, and recipe resolution. One test also runs the `icp canister call` snippets **extracted from the committed docs** ([`protection.rs`](../../crates/e2e/tests/protection.rs)'s `documented_calls_are_accepted_by_the_canister`), so a documented call form can't drift from the canister's interface unnoticed — extend it rather than hand-copying a snippet into a new test.
 
+One test ([`sns.rs`](../../crates/e2e/tests/sns.rs)) goes further and drives a **real
+SNS**. Its fixture sets `nns: true`, which makes the local network's PocketIC boot
+with NNS governance, an SNS subnet, and SNS-W preloaded with the SNS wasms; the test
+then reaches PocketIC directly (via `pocketic_instance`, read out of the network
+descriptor) to send `deploy_new_sns` *as* the NNS governance canister, which is the
+only principal SNS-W accepts it from. Everything after that is real
+`ic-sns-governance`: registering a generic nervous system function and adopting a
+proposal that commits a prepared asset state. It needs no bazel, no ic monorepo and
+no dfx, and costs ~30s.
+
 Each test deploys a **project**, of which there are two kinds:
 
 - **Examples** — runnable, documented showcases under [`examples/`](../../examples/), loaded with `setup_example("<name>")`. Each is both what a human runs (`cd examples/<name> && icp deploy`) *and* a regression test, so it must stay clean and its README accurate.
