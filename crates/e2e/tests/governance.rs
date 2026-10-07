@@ -159,6 +159,54 @@ fn a_prepared_deploy_goes_live_only_when_committed() {
     assert_eq!(proposed_state(project), ProposedState::None);
 }
 
+/// What the operator actually sees. The unit tests pin the wording; this proves
+/// it survives the whole path — sync-core compiled to `wasm32-wasip2`, the host's
+/// stderr capture, and the CLI — because a deploy that silently reads as
+/// successful is how someone ships a frontend that nobody voted on.
+#[test]
+fn a_prepare_tells_the_operator_it_is_not_live() {
+    let tmp = setup_example("static-site");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+
+    icp_cmd(project).arg("deploy").assert().success();
+
+    let approver = identity_principal(project);
+    call(
+        project,
+        "set_governance",
+        &format!("(opt principal \"{approver}\")"),
+    );
+
+    std::fs::write(
+        project.join("dist/index.html"),
+        "<!DOCTYPE html><html><body>awaiting a vote</body></html>",
+    )
+    .unwrap();
+
+    let out = icp_cmd(project).arg("deploy").assert().success();
+    let shown = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+
+    assert!(shown.contains("nothing is live yet"), "{shown}");
+    assert!(
+        !shown.contains("synced"),
+        "a prepare must not read as a completed deploy: {shown}"
+    );
+    // The hash the operator is told to propose must be the one the canister
+    // staged, or they would propose a payload the commit then rejects.
+    assert!(shown.contains(&prospective_hash(project)), "{shown}");
+
+    // And a second deploy explains the block instead of looking like a
+    // colleague's sync that will clear on its own.
+    let out = icp_cmd(project).arg("deploy").assert().failure();
+    let shown = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        shown.contains("awaiting its governance proposal"),
+        "{shown}"
+    );
+    assert!(shown.contains("discard_proposed_state"), "{shown}");
+}
+
 /// A staged batch holds the sync lock until it is resolved, and `discard` is the
 /// escape hatch a rejected proposal needs — without it the release train stalls.
 #[test]

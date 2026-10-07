@@ -100,26 +100,29 @@ which is why the canister exposes one for each.
 ## The release flow
 
 **1. Prepare.** The developer deploys as usual. In governance mode the sync
-prepares instead of publishing:
+prepares instead of publishing, and says so:
 
 ```sh
 icp deploy
+# prepared 12 asset(s) for governance approval — nothing is live yet.
+#   state hash: 8150a65e…
+#   Check it reproduces from your build with `state-hash <dir>`, then propose it
+#   as the payload of `commit_proposed_state`. …
 ```
 
 Nothing served changes. `state_hash` still returns the old value, and keeps
 returning it for the whole voting period, so the *live* site stays verifiable
 while the *next* one waits.
 
-**2. Read off the hash.**
+**2. Check the hash reproduces.** The deploy prints it, and
+`state-hash ./dist` must print the same thing. If they differ, something
+differs between what you built and what you uploaded — stop and find out what
+before proposing. You can also read it back from the canister:
 
 ```sh
 icp canister call frontend proposed_state '()'
 # Staged { prospective_state_hash = "8150a65e…"; changed_assets = 12; … }
 ```
-
-It should equal `state-hash ./dist` for the build you just prepared. If it
-doesn't, something differs between what you built and what you uploaded — stop
-and find out what before proposing.
 
 **3. Propose**, with that hash as the payload, and publish the tag and build
 steps in the proposal summary so voters can reproduce it.
@@ -143,10 +146,11 @@ up without another proposal.
 
 ## Things to know
 
-**A prepared batch blocks further syncs.** Only one can be staged at a time; a
-second `icp deploy` reports the canister busy. That is deliberate — it is the same
-guarantee that makes the proposal's hash binding — but it means a forgotten batch
-stalls your release train. `discard_proposed_state` is the way out.
+**A prepared batch blocks further syncs.** Only one can be staged at a time, so a
+second `icp deploy` fails, naming the staged hash and pointing at
+`discard_proposed_state`. That is deliberate — it is the same guarantee that makes
+the proposal's hash binding — but it means a forgotten batch stalls your release
+train.
 
 **Prepared content costs storage while it waits.** The content is uploaded at
 prepare time and sits in the canister for the whole voting period, on top of the
