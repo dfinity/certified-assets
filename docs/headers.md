@@ -86,7 +86,7 @@ no CSP. If you want them, declare them in `_headers`. The only response headers 
 canister manages on its own are the ones tied to how it serves and certifies content:
 `Content-Type`, `Content-Encoding`, `ETag`, `Content-Range` (on large-asset
 [range responses](how-it-works.md#serving-large-assets)), the certification headers,
-and (on HTML responses) its own `ic_env` cookie.
+and (on HTML responses) its own `ic_env` cookie (two `Set-Cookie` headers, see below).
 
 A useful baseline to copy and adapt:
 
@@ -107,7 +107,10 @@ A useful baseline to copy and adapt:
 ```
 
 You may set `Set-Cookie` freely; note the canister adds its own `ic_env` cookie to
-HTML responses, so don't reuse that name.
+HTML responses, so don't reuse that name. It arrives as **two** `Set-Cookie` headers
+with the same name and value but different `SameSite` attributes (`Lax`, and
+`None; Partitioned` so the value survives in a cross-site iframe); a client stores
+whichever it accepts and reads one snapshot either way.
 
 ## Reserved headers
 

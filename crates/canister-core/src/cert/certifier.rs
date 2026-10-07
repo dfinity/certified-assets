@@ -56,13 +56,15 @@ pub struct Certifier {
     /// asset shadows an exact rule at the same path, or because an alias rule
     /// (200/4xx) points at a target asset that doesn't exist yet.
     rule_certified_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>>,
-    /// The fully rendered `Set-Cookie: ic_env=…` value layered onto every
+    /// The fully rendered `Set-Cookie: ic_env=…` values layered onto every
     /// `text/html` response, or `None` before any env snapshot has been captured.
+    /// One entry per attribute variant the snapshot is served under; see
+    /// [`crate::asset::render_env_cookies`].
     /// Owned here (never stored in `meta.headers`) and recomputed on capture; the
     /// env vars themselves survive an upgrade as canister settings, so this is
     /// rebuilt from the live system API in `post_upgrade` like the rest of the
     /// tree. See [`Self::effective_headers`].
-    env_cookie: Option<String>,
+    env_cookie: Option<Vec<String>>,
 }
 
 impl Certifier {
@@ -100,8 +102,8 @@ impl Certifier {
             .and_then(|e| e.as_ref())
     }
 
-    /// The rendered env cookie, if a snapshot has been captured.
-    pub fn env_cookie(&self) -> Option<&str> {
+    /// The rendered env cookies, if a snapshot has been captured.
+    pub fn env_cookie(&self) -> Option<&[String]> {
         self.env_cookie.as_deref()
     }
 
@@ -123,10 +125,12 @@ impl Certifier {
     /// (`protection == None`) are untouched.
     pub fn effective_headers(&self, store: &Store, meta: &AssetMeta) -> Vec<(String, String)> {
         let mut headers = meta.headers.clone();
-        if let Some(cookie) = &self.env_cookie
+        if let Some(cookies) = &self.env_cookie
             && crate::asset::is_html_content_type(&meta.content_type)
         {
-            headers.push(("set-cookie".to_string(), cookie.clone()));
+            for cookie in cookies {
+                headers.push(("set-cookie".to_string(), cookie.clone()));
+            }
         }
         if store.protection_enabled() {
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cache-control"));
@@ -137,11 +141,11 @@ impl Certifier {
 
     // ---- small tree edits used by State orchestration ----
 
-    /// Stores the rendered env cookie without re-certifying (the caller re-certs
+    /// Stores the rendered env cookies without re-certifying (the caller re-certs
     /// separately). Used by `post_upgrade` before the rebuild, and by the env
     /// refresh path.
-    pub fn set_env_cookie(&mut self, cookie: String) {
-        self.env_cookie = Some(cookie);
+    pub fn set_env_cookie(&mut self, cookies: Vec<String>) {
+        self.env_cookie = Some(cookies);
     }
 
     /// Removes every certified response under `path`'s subtree.
