@@ -222,8 +222,8 @@ type TokenInfo = record {
 // owned by an SNS has root as its only controller, and root performs canister
 // management but never relays a method call — so configuration that does not
 // arrive *with* the install cannot arrive. That makes this the mechanism behind
-// reinstalling a governed frontend in place (which a major version requires,
-// since a reinstall wipes state) and behind an SNS creating frontend canisters
+// reinstalling a governed frontend in place (which every breaking series bump
+// requires pre-1.0, since a reinstall wipes state) and behind an SNS creating frontend
 // for itself, governed from birth.
 type InitArgs = record {
   // The approver, as `set_governance` would set it. Absent leaves by-proposal
