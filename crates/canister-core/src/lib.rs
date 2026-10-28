@@ -419,31 +419,6 @@ pub fn validate_set_governance(approver: Option<Principal>) -> Result<String, St
     })
 }
 
-/// Renders a `discard_proposed_state` proposal for voters, so a DAO can clear a
-/// prepared batch itself rather than wait on whoever prepared it.
-pub fn validate_discard_proposed_state() -> Result<String, String> {
-    match STATE.with_borrow(|s| s.proposed_state()) {
-        ProposedState::Staged {
-            owner,
-            prospective_state_hash,
-            changed_assets,
-            ..
-        } => Ok(format!(
-            "Discard the batch {owner} prepared.\n\n\
-             It would have committed to state hash {prospective_state_hash}, \
-             changing {changed_assets} asset(s).\n\n\
-             Nothing served changes. The staged content is freed and syncs are \
-             unblocked."
-        )),
-        ProposedState::Preparing { owner } => Ok(format!(
-            "Discard the batch {owner} is still preparing.\n\n\
-             Nothing served changes. The uploaded content is freed and syncs are \
-             unblocked."
-        )),
-        ProposedState::None => Err("no prepared batch to discard".to_string()),
-    }
-}
-
 /// Discards the prepared state and frees the content it staged.
 ///
 /// The escape hatch when a proposal is rejected or an upload is abandoned:

@@ -536,43 +536,28 @@ fn an_adopted_sns_proposal_publishes_the_prepared_state() {
         }),
     );
 
-    // The DAO's other levers: clearing a prepared batch, and rotating or clearing
-    // its own approver. Registering them proves governance accepts their
-    // validators' shapes; the discard is also exercised end to end below.
-    const DISCARD_FUNCTION_ID: u64 = 1_001;
-    const SET_GOVERNANCE_FUNCTION_ID: u64 = 1_002;
-    for (id, target, validator) in [
-        (
-            DISCARD_FUNCTION_ID,
-            "discard_proposed_state",
-            "validate_discard_proposed_state",
-        ),
-        (
-            SET_GOVERNANCE_FUNCTION_ID,
-            "set_governance",
-            "validate_set_governance",
-        ),
-    ] {
-        propose(
-            &pic,
-            governance,
-            developer,
-            Action::AddGenericNervousSystemFunction(NervousSystemFunction {
-                id,
-                name: target.to_string(),
-                description: None,
-                function_type: Some(FunctionType::GenericNervousSystemFunction(
-                    GenericNervousSystemFunction {
-                        target_canister_id: Some(asset_canister),
-                        target_method_name: Some(target.to_string()),
-                        validator_canister_id: Some(asset_canister),
-                        validator_method_name: Some(validator.to_string()),
-                        topic: Some(Topic::DappCanisterManagement),
-                    },
-                )),
-            }),
-        );
-    }
+    // The DAO's other lever: rotating or clearing its own approver. Registering
+    // it proves governance accepts the validator's shape.
+    const SET_GOVERNANCE_FUNCTION_ID: u64 = 1_001;
+    propose(
+        &pic,
+        governance,
+        developer,
+        Action::AddGenericNervousSystemFunction(NervousSystemFunction {
+            id: SET_GOVERNANCE_FUNCTION_ID,
+            name: "Set the frontend's governance approver".to_string(),
+            description: None,
+            function_type: Some(FunctionType::GenericNervousSystemFunction(
+                GenericNervousSystemFunction {
+                    target_canister_id: Some(asset_canister),
+                    target_method_name: Some("set_governance".to_string()),
+                    validator_canister_id: Some(asset_canister),
+                    validator_method_name: Some("validate_set_governance".to_string()),
+                    topic: Some(Topic::DappCanisterManagement),
+                },
+            )),
+        }),
+    );
 
     // While a batch is staged, `set_governance` would trap, so its validator
     // must keep that proposal from reaching a vote at all.
@@ -590,40 +575,6 @@ fn an_adopted_sns_proposal_publishes_the_prepared_state() {
         rejected.contains("a prepared batch is pending"),
         "governance should surface our validator's own words, got: {rejected}"
     );
-
-    // The DAO discards the staged batch itself, then the developer prepares
-    // again: a rejected release must not need the developer to clean up.
-    propose(
-        &pic,
-        governance,
-        developer,
-        Action::ExecuteGenericNervousSystemFunction(ExecuteGenericNervousSystemFunction {
-            function_id: DISCARD_FUNCTION_ID,
-            payload: Encode!().expect("encode an empty argument"),
-        }),
-    );
-    for _ in 0..40 {
-        if matches!(proposed_state(project), ProposedState::None) {
-            break;
-        }
-        pic.tick();
-    }
-    assert!(
-        matches!(proposed_state(project), ProposedState::None),
-        "an adopted discard proposal must clear the staged batch"
-    );
-    icp_cmd(project)
-        .args(["sync", "frontend"])
-        .assert()
-        .success();
-    let restaged = match proposed_state(project) {
-        ProposedState::Staged {
-            prospective_state_hash,
-            ..
-        } => prospective_state_hash,
-        other => panic!("expected the second prepare to stage, got {other:?}"),
-    };
-    assert_eq!(restaged, staged, "the same dist must stage the same hash");
 
     // Before the real one: a payload the canister did not stage must be refused
     // at *submission*. Governance calls our validator to render every proposal,

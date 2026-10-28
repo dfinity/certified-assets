@@ -462,7 +462,4 @@ service: (opt InitArgs) -> {
   // after a rejected proposal without another proposal. Without this, a
   // prepared batch blocks every further sync.
   discard_proposed_state : () -> ();
-  // Validator for `discard_proposed_state` as an SNS generic function, so the
-  // DAO can clear a prepared batch itself. Refuses when nothing is prepared.
-  validate_discard_proposed_state : () -> (variant { Ok : text; Err : text });
 }

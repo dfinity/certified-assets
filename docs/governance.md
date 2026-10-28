@@ -99,7 +99,6 @@ function per method, each with the validator of the same name:
 |---|---|---|
 | `authorize` | `validate_authorize` | let a principal prepare |
 | `deauthorize` | `validate_deauthorize` | stop a principal preparing |
-| `discard_proposed_state` | `validate_discard_proposed_state` | clear a staged batch without waiting on whoever prepared it |
 | `set_governance` | `validate_set_governance` | rotate its own approver, or turn governance off |
 
 A generic function is rejected without a validator, which is why the canister
@@ -203,8 +202,14 @@ icp canister call frontend discard_proposed_state '()'
 ```
 
 This is authorized like a sync, so the developer who prepared the batch can clean
-up without another proposal. The DAO can also discard it by proposal, if it has
-registered the `discard_proposed_state` function.
+up without another proposal, and so can any other principal authorized to sync.
+
+There is deliberately no way to discard by proposal. `discard_proposed_state`
+takes no argument and clears whichever batch is prepared when it runs, and a
+proposal executes days after it was submitted: if the batch it was meant for
+were replaced in the meantime, adopting it would throw away the new one. If a
+batch is stuck because whoever prepared it is gone, have the DAO `authorize` a
+principal by proposal, and let that principal discard it.
 
 ## Things to know
 

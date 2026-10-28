@@ -225,14 +225,6 @@ fn discard_proposed_state() {
     canister_core::discard_proposed_state()
 }
 
-// The validator for `discard_proposed_state` as an SNS generic function, so the
-// DAO can clear a prepared batch itself — the approver may sync, so it may
-// discard. Read-only and unguarded.
-#[update]
-fn validate_discard_proposed_state() -> Result<String, String> {
-    canister_core::validate_discard_proposed_state()
-}
-
 ic_cdk::export_candid!();
 
 #[test]
