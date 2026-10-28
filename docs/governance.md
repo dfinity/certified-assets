@@ -368,8 +368,9 @@ controls the canister), then remove yourself. Then, by proposal:
 - One generic nervous system function, as in [Setup](#setup): target
   `commit_proposed_state`, validator `validate_commit_proposed_state`.
 - Optionally one more per method in the [table under Setup](#setup), so the DAO
-  can rotate deploy principals, clear a staged batch, or change its approver by
-  proposal later.
+  can rotate deploy principals or change its approver by proposal later. (A
+  staged batch is not cleared by proposal; see
+  [the release flow](#the-release-flow) for how the DAO recovers from a stuck one.)
 
 Rotating the approver later needs no special handling beyond that function: the
 approver is accepted wherever a controller is, so the DAO can call
