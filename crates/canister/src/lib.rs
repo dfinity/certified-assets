@@ -188,6 +188,14 @@ fn set_governance(approver: Option<Principal>) {
     canister_core::set_governance(approver)
 }
 
+// The validator for `set_governance` as an SNS generic function, so a DAO can
+// rotate or clear its own approver by proposal. Read-only and unguarded, and an
+// update for the same reason as the other validators.
+#[update]
+fn validate_set_governance(approver: Option<Principal>) -> Result<String, String> {
+    canister_core::validate_set_governance(approver)
+}
+
 #[query]
 fn proposed_state() -> ProposedState {
     canister_core::proposed_state()
@@ -215,6 +223,14 @@ fn validate_commit_proposed_state(state_hash_hex: String) -> Result<String, Stri
 #[update(guard = "guard_can_sync")]
 fn discard_proposed_state() {
     canister_core::discard_proposed_state()
+}
+
+// The validator for `discard_proposed_state` as an SNS generic function, so the
+// DAO can clear a prepared batch itself — the approver may sync, so it may
+// discard. Read-only and unguarded.
+#[update]
+fn validate_discard_proposed_state() -> Result<String, String> {
+    canister_core::validate_discard_proposed_state()
 }
 
 ic_cdk::export_candid!();

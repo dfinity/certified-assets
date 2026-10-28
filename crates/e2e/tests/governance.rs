@@ -135,6 +135,20 @@ fn a_prepared_deploy_goes_live_only_when_committed() {
     );
     assert!(rendered.contains(&staged), "{rendered}");
     assert!(rendered.contains("state-hash"), "{rendered}");
+    // It names the verifier release that reproduces the hash, pinned with
+    // `--locked`: any other build of `state-hash` may compute another number.
+    assert!(
+        rendered.contains(&format!("--tag v{}", env!("CARGO_PKG_VERSION"))),
+        "{rendered}"
+    );
+    assert!(rendered.contains("--locked"), "{rendered}");
+
+    // With a batch staged, the DAO may discard it but may not change governance
+    // (`set_governance` would trap), and the validators say so before a vote.
+    let rendered = call(project, "validate_discard_proposed_state", "()");
+    assert!(rendered.contains(&staged), "{rendered}");
+    let refused = call(project, "validate_set_governance", "(null)");
+    assert!(refused.contains("a prepared batch is pending"), "{refused}");
 
     // And it refuses a payload the staged batch does not commit to, so a
     // proposal carrying the wrong hash cannot even be submitted.
@@ -389,4 +403,19 @@ fn documented_calls_are_accepted_by_the_canister() {
     );
     assert!(rendered.contains(subject), "{rendered}");
     assert!(rendered.contains("Revoke"), "{rendered}");
+
+    // And the two that let a DAO clear a batch and manage its own approver.
+    // Nothing is prepared at this point, so there is nothing to discard.
+    let rendered = call(
+        project,
+        "validate_set_governance",
+        &format!("(opt principal \"{subject}\")"),
+    );
+    assert!(rendered.contains(subject), "{rendered}");
+    assert!(rendered.contains("approver"), "{rendered}");
+    let refused = call(project, "validate_discard_proposed_state", "()");
+    assert!(
+        refused.contains("no prepared batch to discard"),
+        "{refused}"
+    );
 }

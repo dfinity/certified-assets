@@ -431,6 +431,10 @@ service: (opt InitArgs) -> {
   // Set (or clear, with null) the approver. Controller-only. Refused while a
   // batch is prepared — commit or discard it first.
   set_governance : (opt principal) -> ();
+  // Validator for `set_governance` as an SNS generic function, so a DAO can
+  // rotate or clear its own approver by proposal. Refuses while a batch is
+  // prepared, as `set_governance` does.
+  validate_set_governance : (opt principal) -> (variant { Ok : text; Err : text });
 
   // Whether anything is prepared, and if so the hash committing it produces.
   // A query, so it is a convenience for operators and voters, not proof: the
@@ -458,4 +462,7 @@ service: (opt InitArgs) -> {
   // after a rejected proposal without another proposal. Without this, a
   // prepared batch blocks every further sync.
   discard_proposed_state : () -> ();
+  // Validator for `discard_proposed_state` as an SNS generic function, so the
+  // DAO can clear a prepared batch itself. Refuses when nothing is prepared.
+  validate_discard_proposed_state : () -> (variant { Ok : text; Err : text });
 }
