@@ -188,6 +188,14 @@ fn set_governance(approver: Option<Principal>) {
     canister_core::set_governance(approver)
 }
 
+// The validator for `set_governance` as an SNS generic function, so a DAO can
+// rotate or clear its own approver by proposal. Read-only and unguarded, and an
+// update for the same reason as the other validators.
+#[update]
+fn validate_set_governance(approver: Option<Principal>) -> Result<String, String> {
+    canister_core::validate_set_governance(approver)
+}
+
 #[query]
 fn proposed_state() -> ProposedState {
     canister_core::proposed_state()

@@ -347,6 +347,12 @@ pub fn commit_proposed_state(state_hash_hex: String) {
 pub fn validate_commit_proposed_state(state_hash_hex: String) -> Result<String, String> {
     let expected = governance::parse_state_hash(&state_hash_hex)?;
     let rendered = hex::encode(expected);
+    let Version {
+        major,
+        minor,
+        patch,
+    } = wire_types::VERSION;
+    let version = format!("{major}.{minor}.{patch}");
     match STATE.with_borrow(|s| s.proposed_state()) {
         ProposedState::Staged {
             prospective_state_hash,
@@ -357,8 +363,12 @@ pub fn validate_commit_proposed_state(state_hash_hex: String) -> Result<String, 
              State hash: {rendered}\n\
              Assets changed by this commit: {changed_assets}\n\n\
              Verify by reproducing the build from source and running \
-             `state-hash <dist>`; it must print exactly the state hash above. \
-             After execution, `state_hash()` on this canister returns the same value."
+             `state-hash <dist>`, built from this canister's own release \
+             (the hash depends on it):\n\n\
+             cargo install --git https://github.com/dfinity/certified-assets \
+             --tag v{version} --locked state-hash-cli\n\n\
+             It must print exactly the state hash above. After execution, \
+             `state_hash()` on this canister returns the same value."
         )),
         ProposedState::Staged {
             prospective_state_hash,
@@ -371,6 +381,42 @@ pub fn validate_commit_proposed_state(state_hash_hex: String) -> Result<String, 
         }
         ProposedState::None => Err("no prepared batch to commit".to_string()),
     }
+}
+
+/// Renders a `set_governance` payload for voters — the `validator_method` of
+/// the SNS generic function that wraps it, so a DAO can rotate or clear its own
+/// approver by proposal (see [`validate_authorize`] for why one must exist).
+///
+/// Refuses while a batch is prepared, as `set_governance` itself does, so a
+/// proposal that could only fail never reaches a vote.
+pub fn validate_set_governance(approver: Option<Principal>) -> Result<String, String> {
+    STATE.with_borrow(|s| {
+        if s.proposed_state() != ProposedState::None {
+            return Err(
+                "a prepared batch is pending; commit or discard it before changing governance"
+                    .to_string(),
+            );
+        }
+        let current = match s.governance_approver() {
+            Some(current) => current.to_string(),
+            None => "none, by-proposal deploys are off".to_string(),
+        };
+        Ok(match approver {
+            Some(approver) => format!(
+                "Make {approver} the governance approver of this canister.\n\n\
+                 Current approver: {current}.\n\n\
+                 With an approver, every sync prepares instead of publishing, and \
+                 only the approver can make a prepared state live."
+            ),
+            None => format!(
+                "Clear the governance approver of this canister, turning \
+                 by-proposal deploys off.\n\n\
+                 Current approver: {current}.\n\n\
+                 Afterwards a sync by any controller or authorized principal \
+                 publishes immediately, with no proposal."
+            ),
+        })
+    })
 }
 
 /// Discards the prepared state and frees the content it staged.

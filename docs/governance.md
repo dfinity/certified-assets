@@ -92,23 +92,38 @@ functions:
 The validator renders the payload for voters: the state hash, how many assets the
 commit touches, and how to reproduce the hash from source.
 
-If you also want the DAO to manage who may sync, register one function per
-method the same way — `authorize` with `validate_authorize`, and `deauthorize`
-with `validate_deauthorize`. A generic function is rejected without a validator,
-which is why the canister exposes one for each.
+Every other method a DAO may want to call is registered the same way, one
+function per method, each with the validator of the same name:
+
+| Target method | Validator | What it lets the DAO do |
+|---|---|---|
+| `authorize` | `validate_authorize` | let a principal prepare |
+| `deauthorize` | `validate_deauthorize` | stop a principal preparing |
+| `set_governance` | `validate_set_governance` | rotate its own approver, or turn governance off |
+
+A generic function is rejected without a validator, which is why the canister
+exposes one for each.
 
 ## The release flow
 
-**1. Prepare.** The developer deploys as usual. In governance mode the sync
+**1. Prepare.** The developer syncs as usual. In governance mode the sync
 prepares instead of publishing, and says so:
 
 ```sh
-icp deploy
+icp sync frontend -e ic
 # prepared 12 asset(s) for governance approval — nothing is live yet.
 #   state hash: 8150a65e…
 #   Check it reproduces from your build with `state-hash <dir>`, then propose it
 #   as the payload of `commit_proposed_state`. …
 ```
+
+Use `icp sync`, not `icp deploy`. Once the DAO owns the canister, SNS root is
+its only controller and the developer is merely [authorized](#setup) to sync.
+`icp deploy` also installs code and updates canister settings, which only a
+controller may do, so it fails. (While you are still a controller, `icp deploy`
+prepares just the same.) icp-cli 1.7.0 and earlier also need the developer listed
+as a [status viewer](#2-configure-it-while-you-are-still-the-controller), because
+their `icp sync` reads the canister's status first.
 
 Nothing served changes. `state_hash` still returns the old value, and keeps
 returning it for the whole voting period, so the *live* site stays verifiable
@@ -127,6 +142,51 @@ icp canister call frontend proposed_state '()'
 **3. Propose**, with that hash as the payload, and publish the tag and build
 steps in the proposal summary so voters can reproduce it.
 
+A proposal is a `manage_neuron` call to the SNS governance canister, made by a
+principal that holds the submit-proposal permission on a neuron: its
+controller, or a hotkey granted that permission. Any `icp` identity can be that
+principal; no PEM file or other tool is needed. Find the neuron's id first, as
+a blob in the reply:
+
+```sh
+icp canister call <sns-governance-canister> list_neurons \
+  '(record { of_principal = opt principal "<your-principal>"; limit = 10 })' -n ic --query
+```
+
+The payload is the Candid encoding of the method's one `text` argument. For a
+64-character hash that encoding is always the same 8-byte prefix followed by the
+hash's characters, so it can be written as a literal: `DIDL`, then the bytes
+`00 01 71 40`, which Candid text spells `\00\01q@`. Put the proposal in a file,
+say `proposal.did`:
+
+```candid
+(record {
+  subaccount = blob "<neuron id>";
+  command = opt variant { MakeProposal = record {
+    title = "Release v1.4.0 of the frontend";
+    url = "https://github.com/<org>/<repo>/releases/tag/v1.4.0";
+    summary = "Reproduce: git checkout v1.4.0; npm ci && npm run build; state-hash ./dist";
+    action = opt variant { ExecuteGenericNervousSystemFunction = record {
+      function_id = <the id you registered> : nat64;
+      payload = blob "DIDL\00\01q@8150a65e854b9bbb…";
+    } };
+  } };
+})
+```
+
+and submit it:
+
+```sh
+icp canister call <sns-governance-canister> manage_neuron --args-file proposal.did -n ic
+```
+
+Governance runs `validate_commit_proposed_state` on submission, so a hash the
+canister has not staged is refused before the proposal exists. If the neuron's
+key is kept offline, add `--sign-only proposal.json` on the signing machine and
+submit the file elsewhere with `icp message send proposal.json`, which shows
+what it carries before sending. `quill sns make-proposal` works too, if you
+already use it.
+
 **4. The proposal executes.** Governance calls `commit_proposed_state`, and the
 new content goes live in that one message.
 
@@ -142,12 +202,19 @@ icp canister call frontend discard_proposed_state '()'
 ```
 
 This is authorized like a sync, so the developer who prepared the batch can clean
-up without another proposal.
+up without another proposal, and so can any other principal authorized to sync.
+
+There is deliberately no way to discard by proposal. `discard_proposed_state`
+takes no argument and clears whichever batch is prepared when it runs, and a
+proposal executes days after it was submitted: if the batch it was meant for
+were replaced in the meantime, adopting it would throw away the new one. If a
+batch is stuck because whoever prepared it is gone, have the DAO `authorize` a
+principal by proposal, and let that principal discard it.
 
 ## Things to know
 
 **A prepared batch blocks further syncs.** Only one can be staged at a time, so a
-second `icp deploy` fails, naming the staged hash and pointing at
+second sync fails, naming the staged hash and pointing at
 `discard_proposed_state`. That is deliberate — it is the same guarantee that makes
 the proposal's hash binding — but it means a forgotten batch stalls your release
 train.
@@ -275,7 +342,7 @@ icp canister call frontend state_hash '()'   # must match
 
 ### 2. Configure it, while you are still the controller
 
-Order matters here — both of these need controller rights that you are about to
+Order matters here — all of these need controller rights that you are about to
 give up.
 
 ```sh
@@ -284,9 +351,13 @@ icp canister call frontend authorize '(principal "<your-deploy-principal>")'
 
 # The DAO's governance canister, as the approver.
 icp canister call frontend set_governance '(opt principal "<sns-governance-canister>")'
+
+# Only with icp-cli 1.7.0 or earlier: let the deploy principal read the canister's
+# status, which their `icp sync` checks first. An SNS cannot grant this later.
+icp canister settings update frontend --add-status-viewer <your-deploy-principal>
 ```
 
-From here on `icp deploy` prepares instead of publishing.
+From here on a sync prepares instead of publishing.
 
 ### 3. Hand it to the DAO
 
@@ -296,18 +367,19 @@ controls the canister), then remove yourself. Then, by proposal:
 - `RegisterDappCanisters` with the new canister id.
 - One generic nervous system function, as in [Setup](#setup): target
   `commit_proposed_state`, validator `validate_commit_proposed_state`.
-- Optionally one more per method — `authorize` / `validate_authorize` and
-  `deauthorize` / `validate_deauthorize` — so the DAO can rotate deploy
-  principals by proposal later.
+- Optionally one more per method in the [table under Setup](#setup), so the DAO
+  can rotate deploy principals or change its approver by proposal later. (A
+  staged batch is not cleared by proposal; see
+  [the release flow](#the-release-flow) for how the DAO recovers from a stuck one.)
 
-Rotating the approver later needs no special handling: the approver is accepted
-wherever a controller is, so the DAO can call `set_governance` on itself by
-proposal if its governance canister ever changes.
+Rotating the approver later needs no special handling beyond that function: the
+approver is accepted wherever a controller is, so the DAO can call
+`set_governance` on itself by proposal if its governance canister ever changes.
 
 ### 4. Run one full cycle before cutting over
 
-Do a real prepare → proposal → commit on the new canister while the old frontend
-is still live. That exercises the part you cannot rehearse any other way: whether
+Do a real prepare (`icp sync`, as the deploy principal) → proposal → commit on the
+new canister while the old frontend is still live. That exercises the part you cannot rehearse any other way: whether
 voters can reproduce your build's state hash.
 
 ### 5. Retire the old canister

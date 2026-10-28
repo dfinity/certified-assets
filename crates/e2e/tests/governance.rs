@@ -135,6 +135,18 @@ fn a_prepared_deploy_goes_live_only_when_committed() {
     );
     assert!(rendered.contains(&staged), "{rendered}");
     assert!(rendered.contains("state-hash"), "{rendered}");
+    // It names the verifier release that reproduces the hash, pinned with
+    // `--locked`: any other build of `state-hash` may compute another number.
+    assert!(
+        rendered.contains(&format!("--tag v{}", env!("CARGO_PKG_VERSION"))),
+        "{rendered}"
+    );
+    assert!(rendered.contains("--locked"), "{rendered}");
+
+    // With a batch staged the DAO may not change governance (`set_governance`
+    // would trap), and its validator says so before a vote.
+    let refused = call(project, "validate_set_governance", "(null)");
+    assert!(refused.contains("a prepared batch is pending"), "{refused}");
 
     // And it refuses a payload the staged batch does not commit to, so a
     // proposal carrying the wrong hash cannot even be submitted.
@@ -389,4 +401,13 @@ fn documented_calls_are_accepted_by_the_canister() {
     );
     assert!(rendered.contains(subject), "{rendered}");
     assert!(rendered.contains("Revoke"), "{rendered}");
+
+    // And the one that lets a DAO manage its own approver.
+    let rendered = call(
+        project,
+        "validate_set_governance",
+        &format!("(opt principal \"{subject}\")"),
+    );
+    assert!(rendered.contains(subject), "{rendered}");
+    assert!(rendered.contains("approver"), "{rendered}");
 }

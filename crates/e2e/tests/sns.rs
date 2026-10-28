@@ -12,6 +12,9 @@
 //! - whether the payload governance forwards — a raw candid blob it never
 //!   inspects — decodes as the `text` our method takes;
 //! - whether an adopted proposal actually reaches us and lands.
+//! - whether the developer can still prepare once SNS root is the canister's
+//!   only controller and the developer holds nothing but sync authorization —
+//!   the shape every DAO-owned frontend is in.
 //!
 //! Those are wiring mistakes that pass every unit test and fail the first time a
 //! DAO tries it, which is the worst possible moment to find them.
@@ -431,13 +434,70 @@ fn an_adopted_sns_proposal_publishes_the_prepared_state() {
         .assert()
         .success();
 
-    // Prepare a change. Nothing should move until the DAO says so.
+    // Hand the canister to the DAO the way production does: SNS root becomes
+    // its only controller, and the developer stays on as a principal the
+    // canister merely *authorizes* to sync. Everything the developer does from
+    // here on has to work without controller rights.
+    let root = deployed
+        .canisters
+        .as_ref()
+        .and_then(|c| c.root)
+        .unwrap_or_else(|| panic!("no root canister in {deployed:?}"));
+    icp_cmd(project)
+        .args([
+            "canister",
+            "call",
+            "frontend",
+            "authorize",
+            &format!("(principal \"{developer}\")"),
+        ])
+        .assert()
+        .success();
+    // The status viewer works around icp-cli <= 1.7.0, whose `icp sync` reads
+    // `canister_status` before syncing and so refuses a non-controller
+    // (dfinity/icp-cli#855). It has to be granted here, while the developer is
+    // still a controller: SNS `ManageDappCanisterSettings` cannot set it.
+    // Drop it once that fix is in the released icp-cli.
+    icp_cmd(project)
+        .args([
+            "canister",
+            "settings",
+            "update",
+            "frontend",
+            "--add-controller",
+            &root.to_text(),
+            "--remove-controller",
+            &developer.to_text(),
+            "--add-status-viewer",
+            &developer.to_text(),
+            "--force",
+        ])
+        .assert()
+        .success();
+
+    // The handover took: the developer can no longer administer the canister.
+    let refused = icp_cmd(project)
+        .args(["canister", "call", "frontend", "set_governance", "(null)"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let refused = String::from_utf8_lossy(&refused);
+    assert!(refused.contains("Caller is not a controller"), "{refused}");
+
+    // Prepare a change as the authorized non-controller — `icp sync`, since
+    // `icp deploy` would also try to install and update settings, which only a
+    // controller may. Nothing should move until the DAO says so.
     std::fs::write(
         project.join("dist/index.html"),
         "<!DOCTYPE html><html><body>adopted by the DAO</body></html>",
     )
     .unwrap();
-    icp_cmd(project).arg("deploy").assert().success();
+    icp_cmd(project)
+        .args(["sync", "frontend"])
+        .assert()
+        .success();
 
     let staged = match proposed_state(project) {
         ProposedState::Staged {
@@ -474,6 +534,46 @@ fn an_adopted_sns_proposal_publishes_the_prepared_state() {
                 },
             )),
         }),
+    );
+
+    // The DAO's other lever: rotating or clearing its own approver. Registering
+    // it proves governance accepts the validator's shape.
+    const SET_GOVERNANCE_FUNCTION_ID: u64 = 1_001;
+    propose(
+        &pic,
+        governance,
+        developer,
+        Action::AddGenericNervousSystemFunction(NervousSystemFunction {
+            id: SET_GOVERNANCE_FUNCTION_ID,
+            name: "Set the frontend's governance approver".to_string(),
+            description: None,
+            function_type: Some(FunctionType::GenericNervousSystemFunction(
+                GenericNervousSystemFunction {
+                    target_canister_id: Some(asset_canister),
+                    target_method_name: Some("set_governance".to_string()),
+                    validator_canister_id: Some(asset_canister),
+                    validator_method_name: Some("validate_set_governance".to_string()),
+                    topic: Some(Topic::DappCanisterManagement),
+                },
+            )),
+        }),
+    );
+
+    // While a batch is staged, `set_governance` would trap, so its validator
+    // must keep that proposal from reaching a vote at all.
+    let rejected = try_propose(
+        &pic,
+        governance,
+        developer,
+        Action::ExecuteGenericNervousSystemFunction(ExecuteGenericNervousSystemFunction {
+            function_id: SET_GOVERNANCE_FUNCTION_ID,
+            payload: Encode!(&None::<Principal>).expect("encode a cleared approver"),
+        }),
+    )
+    .expect_err("changing governance over a staged batch must not be proposable");
+    assert!(
+        rejected.contains("a prepared batch is pending"),
+        "governance should surface our validator's own words, got: {rejected}"
     );
 
     // Before the real one: a payload the canister did not stage must be refused
