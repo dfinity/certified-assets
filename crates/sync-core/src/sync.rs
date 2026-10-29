@@ -6,15 +6,16 @@
 
 use candid::Principal;
 use serde_bytes::ByteBuf;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::canister::{
     CallType, CanisterCall, authorize_via_proxy, can_sync, execute_operations, list_all_assets,
     list_all_redirect_rules, preparation_canary, proposed_state, start_sync, version,
 };
+use asset_prep::glob::KeyPattern;
 use asset_prep::{
     Compressors, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, ProjectPlan,
-    plan_project,
+    plan_project, preserve,
 };
 use wire_types::{
     AssetDetails, ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding,
@@ -367,10 +368,24 @@ pub fn sync<C: CanisterCall>(
         // Already in canonical stored form — 3xx rules carry their resolved
         // `_headers`. Used directly in the diff; no re-resolution.
         redirect_rules: project_rules,
+        preserve,
     } = plan;
 
-    let canister_assets: HashMap<String, AssetDetails> = list_all_assets(canister)?;
+    let mut canister_assets: HashMap<String, AssetDetails> = list_all_assets(canister)?;
     println!("canister currently has {} asset(s)", canister_assets.len());
+
+    // Canister assets the project no longer ships but `_preserve` names are taken
+    // out of the diff entirely, so the delete step never sees them.
+    let preserved = take_preserved(&mut canister_assets, &planned_assets, &preserve);
+    if !preserved.is_empty() {
+        let mut keys: Vec<&str> = preserved.iter().map(|a| a.key.as_str()).collect();
+        keys.sort_unstable();
+        println!(
+            "keeping {} preserved asset(s) not present in {dir}: {}",
+            keys.len(),
+            keys.join(", ")
+        );
+    }
 
     let canister_rules = list_all_redirect_rules(canister)?;
     println!(
@@ -406,8 +421,14 @@ pub fn sync<C: CanisterCall>(
     // record that, or the next sync repeats the full pass. Appended last so it
     // rides in the `is_final` group: a sync that dies partway leaves the old
     // canary in place, and the next one re-prepares everything, as it must.
+    //
+    // Preserved assets are the exception: their bytes aren't local, so they
+    // can't be re-prepared. Their compressed encodings are dropped instead, which
+    // keeps the canary's claim true — otherwise a preserved file that later
+    // returns to `dist/` would have old-compressor encodings reused as in place.
     let record_canary = |mut ops: Vec<Operation>| {
         if !compressors_agree {
+            ops.extend(unset_compressed_encodings(&preserved));
             ops.push(Operation::SetPreparationCanary(
                 SetPreparationCanaryArguments {
                     canary: ByteBuf::from(local_canary.to_vec()),
@@ -497,6 +518,47 @@ pub fn sync<C: CanisterCall>(
         ),
         (false, None) => format!("synced {n} asset(s) to canister"),
     })
+}
+
+/// Removes from `canister_assets`, and returns, every asset the project doesn't
+/// ship whose key matches a `_preserve` pattern. A preserved key the project
+/// *does* ship stays in the diff and syncs like any other asset.
+fn take_preserved(
+    canister_assets: &mut HashMap<String, AssetDetails>,
+    planned_assets: &[PlannedAsset],
+    preserve: &[KeyPattern],
+) -> Vec<AssetDetails> {
+    if preserve.is_empty() {
+        return Vec::new();
+    }
+    let local: HashSet<&str> = planned_assets.iter().map(|a| a.key.as_str()).collect();
+    let keys: Vec<String> = canister_assets
+        .keys()
+        .filter(|key| !local.contains(key.as_str()) && preserve::is_preserved(key, preserve))
+        .cloned()
+        .collect();
+    keys.iter()
+        .filter_map(|key| canister_assets.remove(key))
+        .collect()
+}
+
+/// `UnsetAssetContent` for every non-identity encoding of `assets`.
+fn unset_compressed_encodings(assets: &[AssetDetails]) -> Vec<Operation> {
+    assets
+        .iter()
+        .flat_map(|asset| {
+            asset
+                .encodings
+                .iter()
+                .filter(|enc| !enc.encoding.is_identity())
+                .map(|enc| {
+                    Operation::UnsetAssetContent(UnsetAssetContentArguments {
+                        key: asset.key.clone(),
+                        encoding: enc.encoding,
+                    })
+                })
+        })
+        .collect()
 }
 
 /// Whether the canister already holds this exact encoding (same `content_type`
@@ -3322,5 +3384,156 @@ mod tests {
         let project = diff_assets(plan.assets, &canister, true).unwrap();
 
         assert!(was_encoded(&project, "/index.html"));
+    }
+
+    // ── `_preserve` ──────────────────────────────────────────────────────────
+
+    const ORIGINS_KEY: &str = "/.well-known/ii-alternative-origins";
+
+    /// The redirect rules a project with no `404.html` and no `_redirects` leaves
+    /// on the canister: the branded 404's html-handling rules plus the catch-all.
+    fn branded_404_rules() -> Vec<RedirectRule> {
+        let mut rules = asset_prep::html_handling::synthesize(&[not_found::ROOT_404_KEY.into()]);
+        rules.push(not_found::catchall_rule());
+        rules
+    }
+
+    /// Runs `sync()` over `dir` against a canister holding `canister_assets` plus
+    /// the branded 404 and its rules. `canary_matches` decides whether the
+    /// canister's preparation canary agrees with the canonical registry. Returns
+    /// the sync result and every operation executed (none if it short-circuited).
+    fn sync_with_canister(
+        dir: &std::path::Path,
+        canister_assets: Vec<AssetDetails>,
+        canary_matches: bool,
+    ) -> (Result<String, String>, Vec<Operation>) {
+        let dir_str = dir.to_str().unwrap();
+        let mut assets = canister_assets;
+        assets.push(branded_404_canister_asset(dir_str));
+
+        let mock = SyncMock::new();
+        push_sync_preamble(&mock);
+        if canary_matches {
+            push_matching_canary(&mock);
+        } else {
+            mock.push_ok("preparation_canary", ByteBuf::from(vec![0u8; 32]));
+        }
+        mock.push_ok("get_asset_details", assets);
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", branded_404_rules());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        // Only consumed if the sync has something to commit.
+        mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        push_direct_mode(&mock);
+        mock.push_ok("execute_operations", None::<ByteBuf>);
+
+        let result = sync(
+            &mock,
+            &[dir_str.to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+            &Compressors::canonical(),
+        );
+        (result, mock.executed_operations())
+    }
+
+    fn deleted_keys(ops: &[Operation]) -> Vec<String> {
+        ops.iter()
+            .filter_map(|op| match op {
+                Operation::DeleteAsset(a) => Some(a.key.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn preserved_asset_absent_from_project_is_left_in_place() {
+        // The project ships only `_preserve`; the canister also holds the
+        // preserved file. Nothing else differs, so the sync must find nothing to
+        // commit — in particular, no delete.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_preserve"), format!("{ORIGINS_KEY}\n")).unwrap();
+        let (_, origins) = mk_canister_asset(
+            ORIGINS_KEY,
+            "application/json",
+            &[("identity", vec![1; 32])],
+        );
+
+        let (result, ops) = sync_with_canister(dir.path(), vec![origins], true);
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+        assert!(ops.is_empty(), "expected no operations, got: {ops:?}");
+    }
+
+    #[test]
+    fn unpreserved_asset_absent_from_project_is_still_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_preserve"), format!("{ORIGINS_KEY}\n")).unwrap();
+        let (_, origins) = mk_canister_asset(
+            ORIGINS_KEY,
+            "application/json",
+            &[("identity", vec![1; 32])],
+        );
+        let (_, stale) =
+            mk_canister_asset("/stale.txt", "text/plain", &[("identity", vec![2; 32])]);
+
+        let (result, ops) = sync_with_canister(dir.path(), vec![origins, stale], true);
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+        assert_eq!(deleted_keys(&ops), vec!["/stale.txt".to_string()]);
+    }
+
+    #[test]
+    fn preserved_asset_present_locally_syncs_normally() {
+        // A preserved key the project ships is not special: its new content
+        // replaces the canister's.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_preserve"), format!("{ORIGINS_KEY}\n")).unwrap();
+        std::fs::create_dir(dir.path().join(".well-known")).unwrap();
+        std::fs::write(dir.path().join(".well-known/ii-alternative-origins"), b"{}").unwrap();
+        let (_, origins) = mk_canister_asset(
+            ORIGINS_KEY,
+            "application/octet-stream",
+            &[("identity", vec![1; 32])],
+        );
+
+        let (result, ops) = sync_with_canister(dir.path(), vec![origins], true);
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                Operation::SetAssetContent(a) if a.key == ORIGINS_KEY
+            )),
+            "expected new content for the preserved key; got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn compressor_change_drops_preserved_compressed_encodings() {
+        // The canister's canary doesn't match, so the sync re-prepares and records
+        // a new one. A preserved asset can't be re-prepared — its bytes aren't
+        // local — so its stale gzip is unset rather than left behind as if this
+        // build's compressors wrote it. Its identity encoding stays.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_preserve"), format!("{ORIGINS_KEY}\n")).unwrap();
+        let (_, origins) = mk_canister_asset(
+            ORIGINS_KEY,
+            "application/json",
+            &[("identity", vec![1; 32]), ("gzip", vec![2; 32])],
+        );
+
+        let (result, ops) = sync_with_canister(dir.path(), vec![origins], false);
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+        assert!(deleted_keys(&ops).is_empty(), "got: {ops:?}");
+        let unset: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Operation::UnsetAssetContent(a) if a.key == ORIGINS_KEY => Some(a.encoding),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unset, vec![Encoding::Gzip]);
+        assert!(matches!(
+            ops.last(),
+            Some(Operation::SetPreparationCanary(_))
+        ));
     }
 }

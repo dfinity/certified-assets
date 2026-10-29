@@ -28,6 +28,7 @@ pub mod glob;
 pub mod headers;
 pub mod html_handling;
 pub mod not_found;
+pub mod preserve;
 pub mod redirects;
 pub mod scan;
 
@@ -39,8 +40,8 @@ pub use prepare::{
     ProjectPlan, manifest, plan_project, prepare_project, state_hash_for_dir,
 };
 
-/// Strips a Netlify-style trailing comment from a single line of a `_redirects`
-/// or `_headers` file. A `#` only starts a comment when it sits at the start of
+/// Strips a Netlify-style trailing comment from a single line of a `_redirects`,
+/// `_headers` or `_preserve` file. A `#` only starts a comment when it sits at the start of
 /// the line or is preceded by whitespace; a `#` inside a token (e.g. the URL
 /// fragment in `/to/#topic`, or a CSP `report-uri /csp#endpoint`) is preserved.
 fn strip_comment(line: &str) -> &str {
