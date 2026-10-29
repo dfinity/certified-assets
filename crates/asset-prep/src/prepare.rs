@@ -27,7 +27,9 @@ use wire_types::{Encoding, RedirectRule, RulePattern};
 
 use crate::compressors::Compressors;
 use crate::content::{Content, is_compressible};
+use crate::glob::KeyPattern;
 use crate::headers::{self, HEADERS_FILENAME, HeaderRule};
+use crate::preserve::{self, PRESERVE_FILENAME};
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::{self, AssetSource};
 use crate::{html_handling, not_found};
@@ -78,6 +80,9 @@ pub struct PreparedAsset {
 pub struct PreparedProject {
     pub assets: Vec<PreparedAsset>,
     pub redirect_rules: Vec<RedirectRule>,
+    /// Patterns from `_preserve`. Not part of the manifest: they name canister
+    /// assets *outside* this project that a sync leaves in place.
+    pub preserve: Vec<KeyPattern>,
 }
 
 /// One asset discovered in `dist/`: loaded, its media type and headers
@@ -169,6 +174,9 @@ impl PlannedAsset {
 pub struct ProjectPlan {
     pub assets: Vec<PlannedAsset>,
     pub redirect_rules: Vec<RedirectRule>,
+    /// Patterns from `_preserve`: canister assets absent from this project that
+    /// match one are left in place rather than deleted.
+    pub preserve: Vec<KeyPattern>,
 }
 
 /// Prepares a project's `dist/` directory in full: [`plan_project`] followed by
@@ -182,6 +190,7 @@ pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedP
     let ProjectPlan {
         assets,
         redirect_rules,
+        preserve,
     } = plan_project(dir, compressors)?;
 
     let assets = assets
@@ -192,10 +201,11 @@ pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedP
     Ok(PreparedProject {
         assets,
         redirect_rules,
+        preserve,
     })
 }
 
-/// Scans assets, parses `_redirects` and `_headers`, synthesizes the
+/// Scans assets, parses `_redirects`, `_headers` and `_preserve`, synthesizes the
 /// html-handling and 404 rules, then loads each asset's content, resolves its
 /// media type and headers, and hashes its uncompressed bytes.
 ///
@@ -242,6 +252,7 @@ pub fn plan_project(dir: &str, compressors: &Compressors) -> Result<ProjectPlan,
     Ok(ProjectPlan {
         assets,
         redirect_rules,
+        preserve: load_preserve_patterns(dir)?,
     })
 }
 
@@ -356,6 +367,18 @@ fn load_header_rules(dir: &str) -> Result<Vec<HeaderRule>, String> {
     let content =
         std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     headers::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Reads and parses `_preserve` from `dir`, if present. A missing file means
+/// "preserve nothing"; parse errors carry the file path and line number.
+fn load_preserve_patterns(dir: &str) -> Result<Vec<KeyPattern>, String> {
+    let path = Path::new(dir).join(PRESERVE_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    preserve::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn is_3xx(status: u16) -> bool {
@@ -936,5 +959,29 @@ mod tests {
         let did = with.assets.iter().find(|a| a.key == "/ic.did").unwrap();
         assert_eq!(did.content_type, "text/plain; charset=utf-8");
         assert!(encodings_of(&with, "/ic.did").contains(&Encoding::Gzip));
+    }
+
+    #[test]
+    fn preserve_file_is_parsed_and_leaves_the_manifest_alone() {
+        // `_preserve` is configuration: it's not uploaded, and it names keys
+        // *outside* the project, so it must not move the state hash.
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<h1>hi</h1>");
+        let without = state_hash_for_dir(&dir_str(&dir), &Compressors::canonical()).unwrap();
+
+        write(&dir, "_preserve", b"/.well-known/ii-alternative-origins\n");
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
+        assert_eq!(prepared.preserve.len(), 1);
+        assert!(prepared.preserve[0].matches("/.well-known/ii-alternative-origins"));
+        assert!(prepared.assets.iter().all(|a| a.key != "/_preserve"));
+        assert_eq!(manifest(&prepared).digest(), without);
+    }
+
+    #[test]
+    fn preserve_parse_error_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "_preserve", b"not-absolute\n");
+        let err = plan_project(&dir_str(&dir), &Compressors::canonical()).unwrap_err();
+        assert!(err.contains("_preserve: line 1"), "got: {err}");
     }
 }

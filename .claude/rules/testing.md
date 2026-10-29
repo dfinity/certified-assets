@@ -7,7 +7,7 @@ Tests are organized around these components. Each runs independently.
 - **Location**: inline `#[cfg(test)]` modules in each [`crates/asset-prep/src/`](../../crates/asset-prep/src/)`*.rs` file
 - **Run**: `cargo test -p asset-prep`
 
-`asset-prep` is the native, local-only crate that turns a `dist/` directory into prepared assets + redirect rules + the canonical `state-hash::Manifest` (shared by `sync-core` and the `state-hash-cli` verifier). It owns directory scanning, MIME detection, encoding selection, `_headers`/`_redirects` parsing, html-handling synthesis, the 404 convention, content chunking/hashing, the compression canary, and the `dist → Manifest` builder.
+`asset-prep` is the native, local-only crate that turns a `dist/` directory into prepared assets + redirect rules + the canonical `state-hash::Manifest` (shared by `sync-core` and the `state-hash-cli` verifier). It owns directory scanning, MIME detection, encoding selection, `_headers`/`_redirects`/`_preserve` parsing, html-handling synthesis, the 404 convention, content chunking/hashing, the compression canary, and the `dist → Manifest` builder.
 
 **Add tests here when** you change how files are discovered, how MIME/encodings are chosen, how `_headers`/`_redirects` parse, how html-handling/404 rules are synthesised, or how content is chunked/hashed into a manifest.
 
