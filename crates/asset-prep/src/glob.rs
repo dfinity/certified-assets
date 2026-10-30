@@ -1,5 +1,6 @@
 //! Glob pattern matched against asset keys, used by `_headers` to attach
-//! both response headers and Content-Type overrides to assets.
+//! both response headers and Content-Type overrides to assets, and by
+//! `_preserve` to name canister assets a sync must not delete.
 //!
 //! Syntax: leading `/`, then literal characters and a single greedy `*`.
 //! `*` matches any sequence of characters including `/` and empty; every

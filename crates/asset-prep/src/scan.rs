@@ -9,6 +9,7 @@
 //! consumed by the sync layer and excluded from the upload set.
 
 use crate::headers::HEADERS_FILENAME;
+use crate::preserve::PRESERVE_FILENAME;
 use crate::redirects::REDIRECTS_FILENAME;
 use std::path::{Path, PathBuf};
 
@@ -17,7 +18,7 @@ const KNOWN_DIRECTORIES: &[&str] = &[".well-known"];
 /// Filenames whose presence is configuration, not asset content. Loaded for
 /// their side effects (redirect rules, header rules, etc.) and excluded from
 /// the upload set.
-const CONFIG_FILENAMES: &[&str] = &[REDIRECTS_FILENAME, HEADERS_FILENAME];
+const CONFIG_FILENAMES: &[&str] = &[REDIRECTS_FILENAME, HEADERS_FILENAME, PRESERVE_FILENAME];
 
 #[derive(Debug)]
 pub struct AssetSource {
@@ -161,6 +162,15 @@ mod tests {
     fn redirects_file_skipped() {
         let dir = tmp();
         fs::write(dir.path().join(REDIRECTS_FILENAME), b"").unwrap();
+        fs::write(dir.path().join("index.html"), b"hi").unwrap();
+        let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
+        assert_eq!(keys, vec!["/index.html"]);
+    }
+
+    #[test]
+    fn preserve_file_skipped() {
+        let dir = tmp();
+        fs::write(dir.path().join(PRESERVE_FILENAME), b"/a.json\n").unwrap();
         fs::write(dir.path().join("index.html"), b"hi").unwrap();
         let keys = sorted_keys(scan(&dir_str(&dir)).unwrap());
         assert_eq!(keys, vec!["/index.html"]);
