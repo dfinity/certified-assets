@@ -243,6 +243,11 @@ pub fn proposed_state(c: &impl CanisterCall) -> Result<ProposedState, String> {
     c.call("proposed_state", (), CallType::Query, true)
 }
 
+/// The canister's governance approver, or `None` when by-proposal deploys are off.
+pub fn governance(c: &impl CanisterCall) -> Result<Option<Principal>, String> {
+    c.call("governance", (), CallType::Query, true)
+}
+
 /// Stage content chunks under the sync. Takes ownership of the chunk bytes:
 /// Candid copies them into the request buffer on encode regardless, so moving
 /// them in (rather than borrowing) costs nothing and lets the caller hand off

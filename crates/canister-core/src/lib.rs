@@ -28,7 +28,7 @@ pub use protection::{IssueTokenArgs, ProtectionStatus, TokenInfo};
 pub use serde_bytes::ByteBuf;
 pub use wire_types::{
     AssetDetails, ChunkId, ExecuteOperationsArguments, InitArgs, RedirectRule, StartSyncResult,
-    UploadChunksArguments, Version,
+    UploadAssetArguments, UploadChunksArguments, Version,
 };
 
 thread_local! {
@@ -146,6 +146,39 @@ pub async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteB
     STATE.with_borrow_mut(|s| certified_data_set(s.root_hash()));
 
     state_hash.map(|hash| ByteBuf::from(hash.to_vec()))
+}
+
+/// Writes one asset outside a sync, and returns the canonical state hash
+/// recomputed over the result.
+///
+/// Discouraged: the asset is in no project's `dist/`, so the canister's hash no
+/// longer reproduces from source, and the next sync deletes it unless the
+/// project's `_preserve` names it. It exists for platforms that deploy a fixed
+/// bundle and must customize one file afterwards without a build step.
+///
+/// Internally a one-asset sync — it takes the sync lock and runs a single final
+/// `execute_operations` call — so it certifies, re-certifies redirect rules and
+/// recomputes the hash exactly as a deploy does. See
+/// [`State::begin_upload_asset`] for when it is refused.
+pub async fn upload_asset(arg: UploadAssetArguments) -> ByteBuf {
+    let system_context = SystemContext::new();
+    let caller = msg_caller();
+
+    let call = STATE.with_borrow_mut(|s| {
+        let call = s.begin_upload_asset(caller, arg, &system_context);
+        // As in `start_sync`: capture the env before any asset is certified, so
+        // an uploaded HTML asset carries the current `ic_env` cookie.
+        if call.is_ok() {
+            s.capture_env_at_sync_start(&CanisterEnv::load());
+            certified_data_set(s.root_hash());
+        }
+        call
+    });
+    let call = call.unwrap_or_else(|msg| trap(&msg));
+
+    execute_operations(call)
+        .await
+        .unwrap_or_else(|| trap("upload did not finalize"))
 }
 
 pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {

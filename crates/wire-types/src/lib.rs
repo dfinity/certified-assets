@@ -278,6 +278,21 @@ pub struct UploadChunksArguments {
     pub chunks: Vec<ByteBuf>,
 }
 
+/// Write one asset outside a sync — the `upload_asset` endpoint.
+///
+/// A deliberate escape hatch, not a deploy path: an asset written this way is
+/// not in any project's `dist/`, so the canister's state hash stops being
+/// reproducible from source, and the next sync deletes it unless the project's
+/// `_preserve` names it. The canister stores `content` as the identity encoding
+/// only (no compressed copies) and computes its hash itself.
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
+pub struct UploadAssetArguments {
+    pub key: String,
+    pub content_type: String,
+    pub headers: Vec<(String, String)>,
+    pub content: ByteBuf,
+}
+
 /// One encoding of an asset, as the `get_asset_details` query reports it.
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
 pub struct AssetEncodingDetails {

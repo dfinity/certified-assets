@@ -185,6 +185,15 @@ type ExecuteOperationsArguments = record {
   is_final: bool;
 };
 
+// One asset to write outside a sync; see `upload_asset`. `content` becomes the
+// asset's identity encoding (no compressed copies), hashed by the canister.
+type UploadAssetArguments = record {
+  key: Key;
+  content_type: text;
+  headers: vec HeaderField;
+  content: blob;
+};
+
 // ───────── Access protection ─────────
 
 // Reported by `check_protection_status`. Distinguishes a public app from a
@@ -333,6 +342,20 @@ service: (opt InitArgs) -> {
   // then reports); every other call returns `null`. Returning it here saves a
   // finishing sync a second round trip.
   execute_operations: (ExecuteOperationsArguments) -> (opt blob);
+
+  // Write one asset outside a sync, replacing any asset at the same key, and
+  // return the state hash recomputed over the result. DISCOURAGED: deploy by
+  // syncing a directory instead. An asset written this way is in no build, so
+  // the state hash stops reproducing from source, and the next sync deletes it
+  // unless the project's `_preserve` file names it. It exists for platforms that
+  // deploy a fixed bundle and must customize one file afterwards.
+  //
+  // Internally a one-asset sync: it needs no session, but takes the sync lock
+  // for its duration. Rejected while another sync is in progress, in
+  // by-proposal mode (every content change goes through a proposal there), and
+  // for a key not starting with `/`. The content must fit in one ingress
+  // message (~2 MB).
+  upload_asset: (UploadAssetArguments) -> (blob);
 
   // ───────── Authorization ─────────
   // A set of extra principals authorized to sync assets. Canister controllers
