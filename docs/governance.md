@@ -291,8 +291,15 @@ else:
 (opt record {
   governance : opt principal;          // the approver
   authorize  : opt vec principal;      // who may prepare
+  stable_memory_bucket_mib : opt int;  // optional, see below
 })
 ```
+
+`stable_memory_bucket_mib` is unrelated to governance: it sets how stable memory
+is allocated (see
+[How much stable memory a site can use](how-it-works.md#how-much-stable-memory-a-site-can-use)).
+If the canister was installed with a non-default value, pass the same value in
+every reinstall proposal, or the reinstalled canister falls back to the default.
 
 It applies on install and reinstall, never on upgrade — the approver is ordinary
 stable state and survives an upgrade untouched. An ordinary `icp deploy` passes

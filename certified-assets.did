@@ -224,10 +224,12 @@ type TokenInfo = record {
 
 // ───────── Install argument ─────────
 
-// Everything here is also settable afterwards (`set_governance`, `authorize`),
-// so an ordinary deploy passes no argument at all and gets the defaults.
+// The governance fields can also be set afterwards (`set_governance`,
+// `authorize`), so an ordinary deploy passes no argument at all and gets the
+// defaults. `stable_memory_bucket_mib` is the exception: it can only be chosen
+// here.
 //
-// It exists for the one situation where "afterwards" never comes. A canister
+// The governance fields exist for the one situation where "afterwards" never comes. A canister
 // owned by an SNS has root as its only controller, and root performs canister
 // management but never relays a method call — so configuration that does not
 // arrive *with* the install cannot arrive. That makes this the mechanism behind
@@ -242,6 +244,14 @@ type InitArgs = record {
   // canister wants at least one from the start: it cannot be deployed to
   // otherwise, and once handed over only the approver could add one.
   authorize : opt vec principal;
+  // Size, in MiB, of the buckets in which the canister allocates stable memory.
+  // Each MiB of bucket adds 32 GiB to the canister's stable-memory ceiling, and
+  // an empty canister holds about 14 buckets. Absent means 1 MiB: 32 GiB, which
+  // is plenty for a static site. Accepted range: 1-16. Only takes effect on
+  // install and reinstall, so changing it needs a reinstall and a full re-sync.
+  // An `int` because a plain `opt 4` on the command line is encoded as `int`,
+  // and an `opt` field decodes a mismatched type as null, silently.
+  stable_memory_bucket_mib : opt int;
 };
 
 // ───────── Governance mode ─────────

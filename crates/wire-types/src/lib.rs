@@ -320,8 +320,11 @@ pub struct AssetDetails {
 
 /// The canister's install argument.
 ///
-/// Everything in it is also settable afterwards (`set_governance`, `authorize`),
-/// so an ordinary deploy passes nothing and gets the defaults. It exists for the
+/// The governance fields can also be set afterwards (`set_governance`,
+/// `authorize`), so an ordinary deploy passes nothing and gets the defaults.
+/// `stable_memory_bucket_mib` is the exception: it can only be chosen here.
+///
+/// The governance fields exist for the
 /// one situation where "afterwards" never comes: a canister that belongs to an
 /// SNS has root as its only controller, and root performs canister management
 /// but never relays a method call — so unless configuration arrives *with* the
@@ -343,6 +346,21 @@ pub struct InitArgs {
     /// canister needs at least one from the start: it cannot be deployed to
     /// otherwise, and after handover nobody can add one except the approver.
     pub authorize: Option<Vec<Principal>>,
+    /// Size, in MiB, of the buckets in which the canister allocates stable
+    /// memory. Each MiB of bucket adds 32 GiB to the canister's stable-memory
+    /// ceiling, and an empty canister holds about 14 buckets. `None` means 1 MiB:
+    /// 32 GiB, which is plenty for a static site. Accepted range: 1–16.
+    ///
+    /// Only takes effect when the canister's stable memory is empty, which is
+    /// always true on install and reinstall. An upgrade never takes an argument,
+    /// so it keeps the size the canister was created with. Changing the size
+    /// therefore requires a reinstall and a full re-sync.
+    ///
+    /// An `int` rather than a `nat16` because a value typed on the command line
+    /// as plain `opt 4` is encoded as `int`, and an `opt` field silently decodes
+    /// a mismatched type as `null`. With `nat16` the argument would be ignored
+    /// unless written `opt (4 : nat16)`.
+    pub stable_memory_bucket_mib: Option<candid::Int>,
 }
 
 /// What the `proposed_state` query reports under governance mode (by-proposal

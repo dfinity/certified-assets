@@ -168,3 +168,53 @@ This ties into how releases are versioned: a **patch** release can be applied as
 in-place upgrade that keeps all state, while a **breaking** release reinstalls and a
 fresh sync re-uploads everything. See
 [Releasing](https://github.com/dfinity/certified-assets/blob/main/README.md#releasing) for the details.
+
+### How much stable memory a site can use
+
+Stable memory is split into about fourteen regions (asset content, metadata,
+redirect rules, settings, and so on), and each region grows in fixed-size
+**buckets**. The bucket size is chosen when the canister is installed and fixed
+for the canister's lifetime. It sets two numbers:
+
+| Bucket size | Empty canister | Ceiling |
+|---|---|---|
+| 1 MiB (default) | about 14 MiB | 32 GiB |
+| 4 MiB | about 56 MiB | 128 GiB |
+| 16 MiB (largest) | about 224 MiB | 512 GiB |
+
+The empty-canister cost is paid for the canister's whole life, because stable
+memory never shrinks. The default suits almost every static site.
+
+Two separate limits cap how much a canister can store, and they fail with
+different errors:
+
+- **The canister's ceiling**, from the table above. It is a limit of the
+  canister's own memory layout, which can hold at most 32,768 buckets. A sync
+  that reaches it fails with the canister's
+  `out of stable memory: … reached its stable-memory ceiling` error. Reinstalling
+  with a larger bucket raises it.
+- **The IC's limits**: at most 500 GiB of stable memory per canister, room on
+  the subnet, and enough cycles to pay for the storage. When one of these is hit,
+  the error comes from the IC or the stable-memory library, for example
+  `grow failed`, and a larger bucket does not help. Below 16 MiB buckets, the
+  canister's ceiling is always reached before the IC's 500 GiB limit.
+
+Either way, the failing call is rolled back, but a sync is many calls, and the
+changes made by the calls before it stay. With an ordinary deploy, those changes
+are already live, so the site can be left partly updated until a later deploy
+completes. With [by-proposal deploys](governance.md), they are staged and nothing
+goes live.
+
+To choose a larger bucket, pass `stable_memory_bucket_mib` (1 to 16) in the
+install argument:
+
+```bash
+icp canister install frontend --mode reinstall \
+  --args '(opt record { stable_memory_bucket_mib = opt 4 })'
+icp deploy
+```
+
+The argument only applies on install and reinstall. Changing it on an existing
+canister means a reinstall, which wipes its state, followed by a full sync.
+Canisters installed by release 0.4.2 or earlier keep the 8 MiB buckets they were
+created with until they are reinstalled.

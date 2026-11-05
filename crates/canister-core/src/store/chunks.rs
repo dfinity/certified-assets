@@ -285,10 +285,31 @@ impl<M: Memory> ChunkStore<M> {
     }
 
     /// Grows the data region so it spans at least `end` bytes.
+    ///
+    /// Traps if the region cannot grow. The trap rolls back this message (not
+    /// the earlier messages of the same sync); the panic just says why, rather
+    /// than leaving the next write to fail with a bare out-of-bounds error.
+    ///
+    /// This only catches the canister's **own** ceiling. With
+    /// `M = VirtualMemory`, `grow` returns `-1` only when the `MemoryManager`
+    /// has no buckets left (32 768 of the size chosen at install). When the
+    /// IC refuses to grow stable memory (the 500 GiB per-canister limit, subnet
+    /// capacity, cycles), the manager panics with its own `grow failed` before
+    /// returning. A larger bucket would not help there, so that case must not get
+    /// this message's advice.
     fn ensure_capacity(&self, end: u64) {
         let have = self.data.size() * WASM_PAGE_SIZE;
         if end > have {
-            self.data.grow((end - have).div_ceil(WASM_PAGE_SIZE));
+            let pages = (end - have).div_ceil(WASM_PAGE_SIZE);
+            if self.data.grow(pages) < 0 {
+                panic!(
+                    "out of stable memory: asset content needs {pages} more 64 KiB pages, \
+                     but the canister has reached its stable-memory ceiling: all 32768 \
+                     buckets of the size chosen at install are in use. This is the \
+                     canister's own limit, not the IC's. Delete content, or reinstall with \
+                     a larger `stable_memory_bucket_mib` and sync again."
+                );
+            }
         }
     }
 }
@@ -299,9 +320,18 @@ mod tests {
     use ic_stable_structures::DefaultMemoryImpl;
     use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
 
+    /// A manager laid out like the canister's (see [`super::super::Store::new`]),
+    /// so allocations here cross bucket boundaries the same way.
+    fn manager() -> MemoryManager<DefaultMemoryImpl> {
+        MemoryManager::init_with_bucket_size(
+            DefaultMemoryImpl::default(),
+            super::super::DEFAULT_BUCKET_SIZE_IN_PAGES,
+        )
+    }
+
     fn store() -> ChunkStore<ic_stable_structures::memory_manager::VirtualMemory<DefaultMemoryImpl>>
     {
-        let mm = MemoryManager::init(DefaultMemoryImpl::default());
+        let mm = manager();
         ChunkStore::init(mm.get(MemoryId::new(0)), mm.get(MemoryId::new(1)))
     }
 
@@ -452,7 +482,7 @@ mod tests {
 
     #[test]
     fn rebuild_reconstructs_free_layout_from_index() {
-        let mm = MemoryManager::init(DefaultMemoryImpl::default());
+        let mm = manager();
         let (idx, dat) = (MemoryId::new(0), MemoryId::new(1));
 
         // Populate, then poke holes.
@@ -512,10 +542,54 @@ mod tests {
         assert!(s.free.is_empty());
     }
 
+    /// A memory that refuses to grow past `max_pages`, standing in for a
+    /// `MemoryManager` that has run out of buckets.
+    #[derive(Clone)]
+    struct CappedMemory {
+        inner: DefaultMemoryImpl,
+        max_pages: u64,
+    }
+
+    impl Memory for CappedMemory {
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+        fn grow(&self, pages: u64) -> i64 {
+            if self.inner.size() + pages > self.max_pages {
+                -1
+            } else {
+                self.inner.grow(pages)
+            }
+        }
+        fn read(&self, offset: u64, dst: &mut [u8]) {
+            self.inner.read(offset, dst)
+        }
+        fn write(&self, offset: u64, src: &[u8]) {
+            self.inner.write(offset, src)
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "out of stable memory")]
+    fn running_out_of_stable_memory_fails_with_a_clear_message() {
+        let index = CappedMemory {
+            inner: DefaultMemoryImpl::default(),
+            max_pages: u64::MAX,
+        };
+        let data = CappedMemory {
+            inner: DefaultMemoryImpl::default(),
+            max_pages: 2,
+        };
+        let mut s = ChunkStore::init(index, data);
+        s.insert(1, 0, &[0u8; 100_000]); // fits in two 64 KiB pages
+        s.insert(2, 0, &[0u8; 100_000]); // needs a third
+    }
+
     #[test]
     fn allocation_spanning_many_pages_reads_back() {
         let mut s = store();
-        // ~1.9 MB — larger than a 64 KiB wasm page and a manager bucket boundary.
+        // ~1.9 MB — spans many 64 KiB wasm pages and crosses a 1 MiB manager bucket
+        // boundary.
         let big = vec![0xABu8; 1_900_000];
         s.insert(7, 0, &big);
         assert_eq!(s.get(7, 0), Some(big));

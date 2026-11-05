@@ -522,6 +522,10 @@ pub fn init(args: Option<InitArgs>) {
     let Some(args) = args else {
         return;
     };
+    if let Some(mib) = args.stable_memory_bucket_mib {
+        let pages = store::bucket_size_in_pages(&mib).unwrap_or_else(|e| trap(e));
+        init_state_with_bucket_size(pages);
+    }
     STATE.with_borrow_mut(|s| {
         for principal in args.authorize.into_iter().flatten() {
             s.authorize(principal);
@@ -533,6 +537,23 @@ pub fn init(args: Option<InitArgs>) {
                 .expect("a freshly installed canister cannot have a prepared batch");
         }
     })
+}
+
+/// Installs a `State` whose stable memory uses `pages`-page buckets.
+///
+/// The bucket size is fixed when the `MemoryManager` header is first written,
+/// which `State::default` does the first time anything touches `STATE`. So this
+/// must run before any such access, and it uses `LocalKey::set`, which does not
+/// run the lazy default. The size check guards that ordering: if the header
+/// already exists, the requested size would be silently ignored, so trap
+/// instead.
+fn init_state_with_bucket_size(pages: u16) {
+    use ic_stable_structures::{DefaultMemoryImpl, Memory};
+    let memory = DefaultMemoryImpl::default();
+    if memory.size() != 0 {
+        trap("stable_memory_bucket_mib can only be applied to empty stable memory");
+    }
+    STATE.set(State::with_bucket_size(memory, pages));
 }
 
 /// Rebuilds derived heap state (the certified-response tree) from the durable
