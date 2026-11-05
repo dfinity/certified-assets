@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::canister::{
     CallType, CanisterCall, authorize_via_proxy, can_sync, discard_proposed_state,
-    execute_operations, list_all_assets, list_all_redirect_rules, preparation_canary,
+    execute_operations, governance, list_all_assets, list_all_redirect_rules, preparation_canary,
     proposed_state, start_sync, version,
 };
 use asset_prep::{
@@ -455,6 +455,12 @@ pub fn sync<C: CanisterCall>(
     ))
     .is_empty()
     {
+        // No batch opens on this path, so the post-`start_sync` mode check
+        // below never runs. Ask the setting instead: nothing is written either
+        // way, so a stale read can't let a kept asset into a proposal.
+        if !kept.is_empty() && governance(canister)?.is_some() {
+            return Err(refuse_keep_by_proposal(dir, &kept));
+        }
         println!("canister is up to date, nothing to commit");
         // No sync was started, so this run neither published nor prepared
         // anything — and that is the whole of what it can claim. Whether the
@@ -486,13 +492,7 @@ pub fn sync<C: CanisterCall>(
     // nothing yet, so discarding it (which also ends the session) loses nothing.
     if by_proposal && !kept.is_empty() {
         discard_proposed_state(canister)?;
-        return Err(format!(
-            "this canister deploys by proposal, so its state hash must reproduce \
-             from {dir} alone, but `_preserve` would keep {} asset(s) that aren't \
-             in it ({}); add them to {dir} or remove them from `_preserve`",
-            kept.len(),
-            summarize_keys(&kept)
-        ));
+        return Err(refuse_keep_by_proposal(dir, &kept));
     }
     if by_proposal {
         println!("governance mode: this run prepares a state change; it will not go live");
@@ -546,6 +546,18 @@ pub fn sync<C: CanisterCall>(
 
 /// How many keys a log line or error names before it summarizes the rest: a
 /// pattern like `/uploads/*` can match thousands.
+/// Why a by-proposal canister can't keep `kept`: voters reproduce the proposed
+/// state hash from source, and a kept asset is in no source.
+fn refuse_keep_by_proposal(dir: &str, kept: &[String]) -> String {
+    format!(
+        "this canister deploys by proposal, so its state hash must reproduce \
+         from {dir} alone, but `_preserve` would keep {} asset(s) that aren't \
+         in it ({}); add them to {dir} or remove them from `_preserve`",
+        kept.len(),
+        summarize_keys(kept)
+    )
+}
+
 const MAX_KEYS_SHOWN: usize = 5;
 
 /// `keys` (already sorted) as one short line: the first [`MAX_KEYS_SHOWN`], then
@@ -3449,6 +3461,8 @@ mod tests {
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
         mock.push_ok("get_redirect_rules", canister_rules);
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        // Governance off. Only consumed by an up-to-date sync that keeps an asset.
+        mock.push_ok("governance", None::<Principal>);
         // Only consumed if the sync has something to commit.
         mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
         push_direct_mode(&mock);
@@ -3648,6 +3662,43 @@ mod tests {
         );
         let ops = mock.executed_operations();
         assert!(ops.is_empty(), "nothing may be executed; got: {ops:?}");
+    }
+
+    /// An otherwise up-to-date deploy opens no batch, so the mode check after
+    /// `start_sync` never runs; the setting is asked instead.
+    #[test]
+    fn keeping_an_asset_is_refused_in_by_proposal_mode_with_nothing_to_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+        std::fs::write(dir.path().join("_preserve"), format!("{ORIGINS_KEY}\n")).unwrap();
+        let (_, origins) = mk_canister_asset(
+            ORIGINS_KEY,
+            "application/json",
+            &[("identity", vec![1; 32])],
+        );
+
+        let mock = SyncMock::new();
+        push_sync_preamble(&mock);
+        push_matching_canary(&mock);
+        mock.push_ok(
+            "get_asset_details",
+            vec![origins, branded_404_canister_asset(dir_str)],
+        );
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", branded_404_rules());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok("governance", Some(Principal::anonymous()));
+
+        let err = sync(
+            &mock,
+            &[dir_str.to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+            &Compressors::canonical(),
+        )
+        .unwrap_err();
+        assert!(err.contains("by proposal"), "got: {err}");
+        assert!(err.contains(ORIGINS_KEY), "got: {err}");
     }
 
     #[test]

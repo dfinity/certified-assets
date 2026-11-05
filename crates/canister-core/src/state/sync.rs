@@ -173,6 +173,23 @@ impl State {
         if !arg.key.starts_with('/') {
             return Err(format!("asset key must start with '/': {:?}", arg.key));
         }
+        // A 404/410 page is served only from a single chunk; a bigger one would
+        // silently give way to the built-in 404. A sync refuses the same.
+        if arg.content.len() > MAX_CHUNK_SIZE
+            && let Some(rule) = self
+                .store
+                .redirect_rules()
+                .iter()
+                .find(|r| matches!(r.status, 404 | 410) && r.to == arg.key)
+        {
+            return Err(format!(
+                "{} is served as a {} error page, which must fit in one chunk \
+                 ({MAX_CHUNK_SIZE} bytes), but this upload is {} bytes",
+                arg.key,
+                rule.status,
+                arg.content.len()
+            ));
+        }
         if let Some(active) = &self.sync_session {
             let idle = system_context
                 .current_timestamp_ns

@@ -5566,6 +5566,14 @@ mod upload_asset {
         let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
         assert_eq!(response.status_code, 404);
         assert_eq!(response.body.as_ref(), b"custom");
+
+        // An error page is served only from a single chunk, so a page too big
+        // for one is refused rather than silently replaced by the built-in 404.
+        let big = vec![b'x'; wire_types::MAX_CHUNK_SIZE + 1];
+        let err = upload(&mut state, args("/404.html", "text/html", &big), &ctx).unwrap_err();
+        assert!(err.contains("error page"), "got: {err}");
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(response.body.as_ref(), b"custom");
     }
 
     #[test]

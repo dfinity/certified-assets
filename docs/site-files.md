@@ -79,7 +79,8 @@ icp canister call frontend upload_asset '(record { key = "/.well-known/ii-altern
 It replaces any file at the same path, takes effect immediately, and returns the
 canister's new state hash. Things to know:
 
-- **One message, about 2 MB at most.** The whole file travels in a single call.
+- **One message, about 2 MB at most.** The whole file travels in a single call. A
+  file served as an error page, such as `/404.html`, must be under 1.9 MB.
 - **Stored uncompressed.** The file is served as uploaded, with no gzip or brotli copy.
 - **You set the headers.** `_headers` rules don't apply: pass any response headers
   in `headers`, and the content type in `content_type`.
