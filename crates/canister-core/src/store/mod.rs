@@ -44,6 +44,26 @@ use wire_types::{RedirectRule, SessionId};
 
 type Mem = VirtualMemory<DefaultMemoryImpl>;
 
+/// Size, in 64 KiB wasm pages, of the buckets the `MemoryManager` hands out to
+/// each virtual memory: 16 pages = 1 MiB.
+///
+/// Every memory that is touched holds at least one bucket, and stable memory
+/// never shrinks. A fresh store touches 14 memories. With the library's default
+/// of 128 pages (8 MiB), that added 112 MiB of stable memory to every canister,
+/// mostly empty, however small the site. With 1 MiB buckets the floor is 14 MiB.
+/// The large memories (content bytes, metadata) just span more buckets, so they
+/// take the same total space.
+///
+/// The trade-off is the ceiling. The manager has at most 32 768 buckets, so
+/// total stable memory is capped at 32 GiB (it was 256 GiB). That is still far
+/// more than a static site needs.
+///
+/// **This only takes effect on a fresh install.** The bucket size is written
+/// into the manager's header when the header is created, and loading an
+/// existing header ignores this argument. So a canister upgraded in place keeps
+/// the 8 MiB buckets it was created with, and its state loads unchanged.
+const BUCKET_SIZE_IN_PAGES: u16 = 16;
+
 // `MemoryId` layout. Ids need only be unique and in range 0..=254; gaps are
 // free — the manager reserves all 255 header slots up front and allocates
 // buckets lazily per id, so an unused id costs nothing. We number by tens so
@@ -236,7 +256,15 @@ impl Store {
     /// to a shared byte buffer, so a test can build two states over the same
     /// memory to simulate an upgrade.
     pub fn new(memory: DefaultMemoryImpl) -> Self {
-        let mm = MemoryManager::init(memory);
+        Self::with_bucket_size(memory, BUCKET_SIZE_IN_PAGES)
+    }
+
+    /// [`Store::new`] with an explicit bucket size. That size only applies when
+    /// `memory` holds no manager header yet (see [`BUCKET_SIZE_IN_PAGES`]).
+    /// Tests use it to rebuild the layout of a canister created by a build that
+    /// used the 128-page default.
+    fn with_bucket_size(memory: DefaultMemoryImpl, bucket_size_in_pages: u16) -> Self {
+        let mm = MemoryManager::init_with_bucket_size(memory, bucket_size_in_pages);
         Self {
             // Access control.
             authorized: StableCell::init(mm.get(AUTHORIZED_MEMORY), AuthorizedSet::default()),
@@ -739,6 +767,7 @@ impl Storable for ContentChunkKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ic_stable_structures::Memory;
 
     #[test]
     fn content_chunk_key_roundtrips_and_orders_by_bytes() {
@@ -768,4 +797,66 @@ mod tests {
         let restored = RedirectRules::from_bytes(rules.to_bytes());
         assert_eq!(restored.0, rules.0);
     }
+
+    /// The `MemoryManager` header takes exactly one wasm page; every allocated
+    /// bucket comes after it.
+    const HEADER_PAGES: u64 = 1;
+
+    /// A fresh store must not reserve a large bucket for every memory: the fixed
+    /// stable-memory cost of an empty canister has to stay small (issue #145).
+    #[test]
+    fn fresh_store_uses_small_buckets() {
+        let memory = DefaultMemoryImpl::default();
+        let _store = Store::new(memory.clone());
+
+        let bucket_pages = BUCKET_SIZE_IN_PAGES as u64;
+        let data_pages = memory.size() - HEADER_PAGES;
+        assert_eq!(data_pages % bucket_pages, 0);
+        let buckets = data_pages / bucket_pages;
+        assert!(buckets > 0, "the store initialises some memories");
+        assert!(
+            memory.size() * WASM_PAGE_SIZE <= 32 * MIB,
+            "an empty store occupies {} MiB of stable memory ({buckets} buckets)",
+            memory.size() * WASM_PAGE_SIZE / MIB,
+        );
+    }
+
+    /// A canister created by an earlier build has 128-page buckets in its manager
+    /// header. Upgrading it must load that layout as it is, with every value
+    /// intact and new growth still in 128-page buckets, rather than reading the
+    /// memory as if it had the new bucket size.
+    #[test]
+    fn store_created_with_legacy_buckets_survives_upgrade() {
+        const LEGACY_BUCKET_PAGES: u16 = 128;
+        let memory = DefaultMemoryImpl::default();
+        let principal = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        let big = vec![0x5Au8; 3 * MIB as usize];
+
+        let mut old = Store::with_bucket_size(memory.clone(), LEGACY_BUCKET_PAGES);
+        old.authorize(principal);
+        old.set_preparation_canary([7; 32]);
+        old.content.insert(1, 0, &big);
+        drop(old);
+        let size_before = memory.size();
+        assert_eq!((size_before - HEADER_PAGES) % LEGACY_BUCKET_PAGES as u64, 0);
+
+        let mut upgraded = Store::new(memory.clone());
+        assert!(upgraded.is_authorized(&principal));
+        assert_eq!(upgraded.preparation_canary(), [7; 32]);
+        assert_eq!(upgraded.content.get(1, 0), Some(big.clone()));
+
+        // New writes still allocate legacy-sized buckets.
+        upgraded
+            .content
+            .insert(2, 0, &vec![0xA5u8; 10 * MIB as usize]);
+        assert_eq!(
+            (memory.size() - HEADER_PAGES) % LEGACY_BUCKET_PAGES as u64,
+            0
+        );
+        assert!(memory.size() > size_before);
+        assert_eq!(upgraded.content.get(1, 0), Some(big));
+    }
+
+    const WASM_PAGE_SIZE: u64 = 64 * 1024;
+    const MIB: u64 = 1024 * 1024;
 }

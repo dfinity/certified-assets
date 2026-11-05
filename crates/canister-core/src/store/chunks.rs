@@ -299,9 +299,18 @@ mod tests {
     use ic_stable_structures::DefaultMemoryImpl;
     use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
 
+    /// A manager laid out like the canister's (see [`super::super::Store::new`]),
+    /// so allocations here cross bucket boundaries the same way.
+    fn manager() -> MemoryManager<DefaultMemoryImpl> {
+        MemoryManager::init_with_bucket_size(
+            DefaultMemoryImpl::default(),
+            super::super::BUCKET_SIZE_IN_PAGES,
+        )
+    }
+
     fn store() -> ChunkStore<ic_stable_structures::memory_manager::VirtualMemory<DefaultMemoryImpl>>
     {
-        let mm = MemoryManager::init(DefaultMemoryImpl::default());
+        let mm = manager();
         ChunkStore::init(mm.get(MemoryId::new(0)), mm.get(MemoryId::new(1)))
     }
 
@@ -452,7 +461,7 @@ mod tests {
 
     #[test]
     fn rebuild_reconstructs_free_layout_from_index() {
-        let mm = MemoryManager::init(DefaultMemoryImpl::default());
+        let mm = manager();
         let (idx, dat) = (MemoryId::new(0), MemoryId::new(1));
 
         // Populate, then poke holes.
@@ -515,7 +524,8 @@ mod tests {
     #[test]
     fn allocation_spanning_many_pages_reads_back() {
         let mut s = store();
-        // ~1.9 MB — larger than a 64 KiB wasm page and a manager bucket boundary.
+        // ~1.9 MB — spans many 64 KiB wasm pages and crosses a 1 MiB manager bucket
+        // boundary.
         let big = vec![0xABu8; 1_900_000];
         s.insert(7, 0, &big);
         assert_eq!(s.get(7, 0), Some(big));
