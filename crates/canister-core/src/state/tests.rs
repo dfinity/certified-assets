@@ -1255,6 +1255,72 @@ mod hashing {
         );
         assert_ne!(canister_hash, [0u8; 32]);
     }
+
+    /// An `upload_asset` is stored exactly as a sync of the same file would
+    /// store it, chunk layout included, so the canister's state hash matches
+    /// the verifier's for a `dist/` that holds the file. Covers a file over one
+    /// chunk, split at `MAX_CHUNK_SIZE`, and an empty file, stored as one empty
+    /// chunk.
+    #[test]
+    fn upload_asset_stores_the_chunk_layout_a_sync_would() {
+        use std::fs;
+
+        let big: Vec<u8> = (0u8..=255)
+            .cycle()
+            .take(wire_types::MAX_CHUNK_SIZE + 1000)
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("index.html"), b"<h1>hi</h1>").unwrap();
+        fs::write(dir.path().join("big.bin"), &big).unwrap();
+        fs::write(dir.path().join("empty.txt"), b"").unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+        // Identity only: an upload stores no compressed encodings.
+        let compressors = asset_prep::Compressors::none();
+        let prepared = asset_prep::prepare_project(dir_str, &compressors).unwrap();
+        let big_chunks = prepared
+            .assets
+            .iter()
+            .find(|a| a.key == "/big.bin")
+            .unwrap()
+            .encodings[0]
+            .chunks
+            .len();
+        assert_eq!(big_chunks, 2, "the fixture must span two chunks");
+
+        // Sync everything but the two files, then upload those.
+        let mut synced_first = prepared.clone();
+        synced_first
+            .assets
+            .retain(|a| a.key != "/big.bin" && a.key != "/empty.txt");
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        apply_prepared(&mut state, &ctx, &synced_first);
+        for (key, content) in [("/big.bin", &big[..]), ("/empty.txt", &b""[..])] {
+            let asset = prepared.assets.iter().find(|a| a.key == key).unwrap();
+            let call = state
+                .begin_upload_asset(
+                    some_principal(),
+                    wire_types::UploadAssetArguments {
+                        key: key.to_string(),
+                        content_type: asset.content_type.clone(),
+                        headers: asset.headers.clone(),
+                        content: ByteBuf::from(content.to_vec()),
+                    },
+                    &ctx,
+                )
+                .unwrap();
+            run_computation_until_completion(|progress| {
+                state.execute_operations(&call, progress, &ctx)
+            })
+            .unwrap();
+        }
+
+        let verifier_hash = asset_prep::state_hash_for_dir(dir_str, &compressors).unwrap();
+        assert_eq!(
+            hex::encode(state.cached_state_hash()),
+            hex::encode(verifier_hash)
+        );
+    }
 }
 
 mod serving {

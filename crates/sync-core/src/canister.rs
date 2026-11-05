@@ -243,9 +243,9 @@ pub fn proposed_state(c: &impl CanisterCall) -> Result<ProposedState, String> {
     c.call("proposed_state", (), CallType::Query, true)
 }
 
-/// The canister's governance approver, or `None` when by-proposal deploys are off.
-pub fn governance(c: &impl CanisterCall) -> Result<Option<Principal>, String> {
-    c.call("governance", (), CallType::Query, true)
+/// Abandons the canister's prepared batch, ending the preparing sync with it.
+pub fn discard_proposed_state(c: &impl CanisterCall) -> Result<(), String> {
+    c.call("discard_proposed_state", (), CallType::Update, true)
 }
 
 /// Stage content chunks under the sync. Takes ownership of the chunk bytes:

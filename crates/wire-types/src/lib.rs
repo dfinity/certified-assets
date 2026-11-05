@@ -19,6 +19,13 @@ use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
+/// Maximum bytes per stored chunk: the boundary content is split at, by a sync
+/// preparing `dir` and by the canister storing an `upload_asset`. **Part of the
+/// frozen state-hash contract**: per-chunk hashes depend on it, so a verifier
+/// must use a `state-hash-cli` built with this same value. Stays safely under
+/// the canister's ~2 MB ingress message limit.
+pub const MAX_CHUNK_SIZE: usize = 1_900_000;
+
 mod version;
 pub use version::{VERSION, Version};
 

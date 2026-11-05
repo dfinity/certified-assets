@@ -18,8 +18,8 @@ use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use wire_types::{
     ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments,
-    Operation, SessionId, SetAssetContentArguments, StartSyncResult, UploadAssetArguments,
-    UploadChunksArguments,
+    MAX_CHUNK_SIZE, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
+    UploadAssetArguments, UploadChunksArguments,
 };
 
 impl State {
@@ -204,10 +204,35 @@ impl State {
             content,
         } = arg;
         // Hashed here rather than trusted: unlike a sync, no client prepared
-        // these bytes, and one SHA-256 over a single ingress message is cheap.
+        // these bytes, and hashing a single ingress message is cheap.
         let sha256 = Sha256::digest(&content).to_vec();
-        let chunk_id = self.chunks.len() as ChunkId;
-        self.chunks.push(Some(content));
+        // Split at the boundary a sync preparing the same file from `dir` would
+        // use. The state hash folds in the chunk layout, so one oversized chunk
+        // would never reproduce from source, and a later sync whose whole-content
+        // hash matches would keep it rather than re-upload it.
+        // An empty file is one empty chunk, as `asset-prep` stores it.
+        let pieces: Vec<&[u8]> = if content.is_empty() {
+            vec![&[][..]]
+        } else {
+            content.chunks(MAX_CHUNK_SIZE).collect()
+        };
+        // The per-chunk hashes are only read for a multi-chunk encoding.
+        let chunk_sha256: Vec<ByteBuf> = if pieces.len() > 1 {
+            pieces
+                .iter()
+                .map(|piece| ByteBuf::from(Sha256::digest(piece).to_vec()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let chunk_ids: Vec<ChunkId> = pieces
+            .into_iter()
+            .map(|piece| {
+                let id = self.chunks.len() as ChunkId;
+                self.chunks.push(Some(ByteBuf::from(piece.to_vec())));
+                id
+            })
+            .collect();
 
         let mut operations = Vec::with_capacity(3);
         if self.effective_contains_asset(&key) {
@@ -223,9 +248,9 @@ impl State {
         operations.push(Operation::SetAssetContent(SetAssetContentArguments {
             key,
             encoding: Encoding::Identity,
-            chunk_ids: vec![chunk_id],
+            chunk_ids,
             sha256: ByteBuf::from(sha256),
-            chunk_sha256: Vec::new(),
+            chunk_sha256,
         }));
 
         Ok(ExecuteOperationsArguments {

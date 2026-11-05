@@ -9,9 +9,9 @@ use serde_bytes::ByteBuf;
 use std::collections::HashMap;
 
 use crate::canister::{
-    CallType, CanisterCall, authorize_via_proxy, can_sync, execute_operations, governance,
-    list_all_assets, list_all_redirect_rules, preparation_canary, proposed_state, start_sync,
-    version,
+    CallType, CanisterCall, authorize_via_proxy, can_sync, discard_proposed_state,
+    execute_operations, list_all_assets, list_all_redirect_rules, preparation_canary,
+    proposed_state, start_sync, version,
 };
 use asset_prep::{
     Compressors, MAX_CHUNK_SIZE, PlannedAsset, PreparedAsset, PreparedChunk, ProjectPlan,
@@ -372,19 +372,6 @@ pub fn sync<C: CanisterCall>(
         .filter_map(|key| canister_assets.remove(key))
         .collect();
     if !kept.is_empty() {
-        // In by-proposal mode every change goes through a vote on a state hash
-        // that voters reproduce from source, and a kept asset is in no source.
-        // Asked only when something would be kept, so an ordinary sync pays no
-        // extra round trip.
-        if governance(canister)?.is_some() {
-            return Err(format!(
-                "this canister deploys by proposal, so its state hash must reproduce \
-                 from {dir} alone, but `_preserve` would keep {} asset(s) that aren't \
-                 in it ({}); add them to {dir} or remove them from `_preserve`",
-                kept.len(),
-                summarize_keys(&kept)
-            ));
-        }
         println!(
             "keeping {} preserved asset(s) not present in {dir}: {}",
             kept.len(),
@@ -492,6 +479,21 @@ pub fn sync<C: CanisterCall>(
     // switch in that window and the summary claims a prepare went live, or that
     // a published deploy did not.
     let by_proposal = matches!(proposed_state(canister)?, ProposedState::Preparing { .. });
+    // A by-proposal change is voted on by a state hash that voters reproduce
+    // from source, and a kept asset is in no source. Checked here, on the mode
+    // `start_sync` fixed, rather than on an earlier read of the setting that
+    // governance could be switched on after. The batch just opened holds
+    // nothing yet, so discarding it (which also ends the session) loses nothing.
+    if by_proposal && !kept.is_empty() {
+        discard_proposed_state(canister)?;
+        return Err(format!(
+            "this canister deploys by proposal, so its state hash must reproduce \
+             from {dir} alone, but `_preserve` would keep {} asset(s) that aren't \
+             in it ({}); add them to {dir} or remove them from `_preserve`",
+            kept.len(),
+            summarize_keys(&kept)
+        ));
+    }
     if by_proposal {
         println!("governance mode: this run prepares a state change; it will not go live");
     }
@@ -3423,17 +3425,16 @@ mod tests {
     ) -> (Result<String, String>, Vec<Operation>) {
         let mut assets = canister_assets;
         assets.push(branded_404_canister_asset(dir.to_str().unwrap()));
-        sync_against(dir, assets, branded_404_rules(), canary_matches, None)
+        sync_against(dir, assets, branded_404_rules(), canary_matches)
     }
 
     /// [`sync_with_canister`] with the canister's whole asset list and rules
-    /// given verbatim, and a governance approver (`None`: by-proposal off).
+    /// given verbatim.
     fn sync_against(
         dir: &std::path::Path,
         canister_assets: Vec<AssetDetails>,
         canister_rules: Vec<RedirectRule>,
         canary_matches: bool,
-        approver: Option<Principal>,
     ) -> (Result<String, String>, Vec<Operation>) {
         let dir_str = dir.to_str().unwrap();
 
@@ -3446,8 +3447,6 @@ mod tests {
         }
         mock.push_ok("get_asset_details", canister_assets);
         mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
-        // Only consumed if the sync keeps a preserved asset.
-        mock.push_ok("governance", approver);
         mock.push_ok("get_redirect_rules", canister_rules);
         mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
         // Only consumed if the sync has something to commit.
@@ -3574,13 +3573,7 @@ mod tests {
         let (_, custom_404) =
             mk_canister_asset("/404.html", "text/html", &[("identity", vec![9; 32])]);
 
-        let (result, ops) = sync_against(
-            dir.path(),
-            vec![custom_404],
-            branded_404_rules(),
-            true,
-            None,
-        );
+        let (result, ops) = sync_against(dir.path(), vec![custom_404], branded_404_rules(), true);
         assert!(result.is_ok(), "expected success, got: {result:?}");
         // The rules already serve it, and its content is left alone.
         assert!(ops.is_empty(), "expected no operations, got: {ops:?}");
@@ -3604,33 +3597,56 @@ mod tests {
             branded_404_canister_asset(dir.path().to_str().unwrap()),
         ];
 
-        let (result, ops) = sync_against(dir.path(), assets, rules, true, None);
+        let (result, ops) = sync_against(dir.path(), assets, rules, true);
         assert!(result.is_ok(), "expected success, got: {result:?}");
         assert!(ops.is_empty(), "expected no operations, got: {ops:?}");
     }
 
+    /// The mode is the one `start_sync` fixed, not an earlier read of the
+    /// setting: the run discovers it is preparing only after opening the batch,
+    /// and must discard that batch rather than leave it blocking deploys.
     #[test]
     fn keeping_an_asset_is_refused_in_by_proposal_mode() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap();
         std::fs::write(dir.path().join("_preserve"), format!("{ORIGINS_KEY}\n")).unwrap();
+        // Something to commit, so the run gets as far as `start_sync`.
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
         let (_, origins) = mk_canister_asset(
             ORIGINS_KEY,
             "application/json",
             &[("identity", vec![1; 32])],
         );
-        let mut assets = vec![origins];
-        assets.push(branded_404_canister_asset(dir.path().to_str().unwrap()));
 
-        let (result, ops) = sync_against(
-            dir.path(),
-            assets,
-            branded_404_rules(),
-            true,
-            Some(Principal::anonymous()),
+        let mock = SyncMock::new();
+        push_sync_preamble(&mock);
+        push_matching_canary(&mock);
+        mock.push_ok(
+            "get_asset_details",
+            vec![origins, branded_404_canister_asset(dir_str)],
         );
-        let err = result.unwrap_err();
+        mock.push_ok("get_asset_details", Vec::<AssetDetails>::new());
+        mock.push_ok("get_redirect_rules", branded_404_rules());
+        mock.push_ok("get_redirect_rules", Vec::<RedirectRule>::new());
+        mock.push_ok("start_sync", StartSyncOk::Started { session_id: 1 });
+        push_prepare_mode(&mock);
+        mock.push_ok("discard_proposed_state", ());
+
+        let err = sync(
+            &mock,
+            &[dir_str.to_string()],
+            &Principal::anonymous().to_text(),
+            None,
+            &Compressors::canonical(),
+        )
+        .unwrap_err();
         assert!(err.contains("by proposal"), "got: {err}");
         assert!(err.contains(ORIGINS_KEY), "got: {err}");
+        assert!(
+            mock.queue.borrow()["discard_proposed_state"].is_empty(),
+            "the opened batch must be discarded"
+        );
+        let ops = mock.executed_operations();
         assert!(ops.is_empty(), "nothing may be executed; got: {ops:?}");
     }
 

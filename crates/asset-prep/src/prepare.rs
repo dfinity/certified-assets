@@ -21,6 +21,7 @@
 //! agree by construction.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::Path;
 
 use wire_types::{Encoding, RedirectRule, RulePattern};
@@ -34,11 +35,7 @@ use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::{self, AssetSource};
 use crate::{html_handling, not_found};
 
-/// Maximum bytes per uploaded chunk — the boundary the canister stores content
-/// at. **Part of the frozen state-hash contract**: per-chunk hashes depend on
-/// it, so a verifier must use a `state-hash-cli` built with this same value.
-/// Stays safely under the canister's ~2 MB ingress message limit.
-pub const MAX_CHUNK_SIZE: usize = 1_900_000;
+pub use wire_types::MAX_CHUNK_SIZE;
 
 /// One chunk of a prepared encoding: its length and SHA-256 (folded into the
 /// state hash for multi-chunk encodings) plus the bytes themselves (consumed by
@@ -208,9 +205,10 @@ impl ProjectPlan {
             return Vec::new();
         }
         let local = self.local_keys();
+        let local_set: HashSet<&str> = local.iter().map(String::as_str).collect();
         let mut kept: Vec<String> = canister_keys
             .into_iter()
-            .filter(|key| !local.iter().any(|l| l == key))
+            .filter(|key| !local_set.contains(key))
             .filter(|key| preserve::is_preserved(key, &self.preserve))
             .map(str::to_string)
             .collect();
