@@ -134,8 +134,18 @@ impl State {
     /// to a shared byte buffer, so a test can build two `State`s over the same
     /// memory to simulate an upgrade.
     pub fn new(memory: DefaultMemoryImpl) -> Self {
+        Self::from_store(Store::new(memory))
+    }
+
+    /// [`State::new`] with the stable-memory bucket size chosen at install, in
+    /// pages. Only takes effect over empty memory (see [`Store::with_bucket_size`]).
+    pub fn with_bucket_size(memory: DefaultMemoryImpl, bucket_size_in_pages: u16) -> Self {
+        Self::from_store(Store::with_bucket_size(memory, bucket_size_in_pages))
+    }
+
+    fn from_store(store: Store) -> Self {
         Self {
-            store: Store::new(memory),
+            store,
             chunks: Vec::new(),
             sync_session: None,
             certifier: Certifier::default(),

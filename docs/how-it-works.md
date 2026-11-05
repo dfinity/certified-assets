@@ -168,3 +168,36 @@ This ties into how releases are versioned: a **patch** release can be applied as
 in-place upgrade that keeps all state, while a **breaking** release reinstalls and a
 fresh sync re-uploads everything. See
 [Releasing](https://github.com/dfinity/certified-assets/blob/main/README.md#releasing) for the details.
+
+### How much stable memory a site can use
+
+Stable memory is split into about fourteen regions (asset content, metadata,
+redirect rules, settings, and so on), and each region grows in fixed-size
+**buckets**. The bucket size is chosen when the canister is installed and fixed
+for the canister's lifetime. It sets two numbers:
+
+| Bucket size | Empty canister | Ceiling |
+|---|---|---|
+| 1 MiB (default) | about 14 MiB | 32 GiB |
+| 4 MiB | about 56 MiB | 128 GiB |
+| 16 MiB (largest) | about 224 MiB | 512 GiB |
+
+The empty-canister cost is paid for the canister's whole life, because stable
+memory never shrinks. The ceiling is the most the canister can store; the IC
+itself allows up to 500 GiB of stable memory per canister. The default suits
+almost every static site. A sync that would go past the ceiling fails with an
+"out of stable memory" error, and nothing it uploaded is kept.
+
+To choose a larger bucket, pass `stable_memory_bucket_mib` (1 to 16) in the
+install argument:
+
+```bash
+icp canister install frontend --mode reinstall \
+  --args '(opt record { stable_memory_bucket_mib = opt 4 })'
+icp deploy
+```
+
+The argument only applies on install and reinstall. Changing it on an existing
+canister means a reinstall, which wipes its state, followed by a full sync.
+Canisters installed by release 0.4.2 or earlier keep the 8 MiB buckets they were
+created with until they are reinstalled.

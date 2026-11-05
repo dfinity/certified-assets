@@ -285,10 +285,23 @@ impl<M: Memory> ChunkStore<M> {
     }
 
     /// Grows the data region so it spans at least `end` bytes.
+    ///
+    /// Traps if the region cannot grow, which means the canister has reached its
+    /// stable-memory ceiling. The trap rolls the whole message back, so nothing
+    /// is half-written; the message just says why, rather than leaving the
+    /// next write to fail with a bare out-of-bounds error.
     fn ensure_capacity(&self, end: u64) {
         let have = self.data.size() * WASM_PAGE_SIZE;
         if end > have {
-            self.data.grow((end - have).div_ceil(WASM_PAGE_SIZE));
+            let pages = (end - have).div_ceil(WASM_PAGE_SIZE);
+            if self.data.grow(pages) < 0 {
+                panic!(
+                    "out of stable memory: asset content needs {pages} more 64 KiB pages, \
+                     but the canister has reached its stable-memory ceiling (32 768 buckets \
+                     of the size chosen at install). Delete content, or reinstall with a \
+                     larger `stable_memory_bucket_mib` and sync again."
+                );
+            }
         }
     }
 }
@@ -304,7 +317,7 @@ mod tests {
     fn manager() -> MemoryManager<DefaultMemoryImpl> {
         MemoryManager::init_with_bucket_size(
             DefaultMemoryImpl::default(),
-            super::super::BUCKET_SIZE_IN_PAGES,
+            super::super::DEFAULT_BUCKET_SIZE_IN_PAGES,
         )
     }
 
@@ -519,6 +532,49 @@ mod tests {
         // Old [0,1000) freed, new one reused it → still a single 1000-byte region.
         assert_eq!(s.bump, 1000);
         assert!(s.free.is_empty());
+    }
+
+    /// A memory that refuses to grow past `max_pages`, standing in for a
+    /// `MemoryManager` that has run out of buckets.
+    #[derive(Clone)]
+    struct CappedMemory {
+        inner: DefaultMemoryImpl,
+        max_pages: u64,
+    }
+
+    impl Memory for CappedMemory {
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+        fn grow(&self, pages: u64) -> i64 {
+            if self.inner.size() + pages > self.max_pages {
+                -1
+            } else {
+                self.inner.grow(pages)
+            }
+        }
+        fn read(&self, offset: u64, dst: &mut [u8]) {
+            self.inner.read(offset, dst)
+        }
+        fn write(&self, offset: u64, src: &[u8]) {
+            self.inner.write(offset, src)
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "out of stable memory")]
+    fn running_out_of_stable_memory_fails_with_a_clear_message() {
+        let index = CappedMemory {
+            inner: DefaultMemoryImpl::default(),
+            max_pages: u64::MAX,
+        };
+        let data = CappedMemory {
+            inner: DefaultMemoryImpl::default(),
+            max_pages: 2,
+        };
+        let mut s = ChunkStore::init(index, data);
+        s.insert(1, 0, &[0u8; 100_000]); // fits in two 64 KiB pages
+        s.insert(2, 0, &[0u8; 100_000]); // needs a third
     }
 
     #[test]
