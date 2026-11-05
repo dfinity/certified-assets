@@ -286,10 +286,17 @@ impl<M: Memory> ChunkStore<M> {
 
     /// Grows the data region so it spans at least `end` bytes.
     ///
-    /// Traps if the region cannot grow, which means the canister has reached its
-    /// stable-memory ceiling. The trap rolls the whole message back, so nothing
-    /// is half-written; the message just says why, rather than leaving the
-    /// next write to fail with a bare out-of-bounds error.
+    /// Traps if the region cannot grow. The trap rolls back this message (not
+    /// the earlier messages of the same sync); the panic just says why, rather
+    /// than leaving the next write to fail with a bare out-of-bounds error.
+    ///
+    /// This only catches the canister's **own** ceiling. With
+    /// `M = VirtualMemory`, `grow` returns `-1` only when the `MemoryManager`
+    /// has no buckets left (32 768 of the size chosen at install). When the
+    /// IC refuses to grow stable memory (the 500 GiB per-canister limit, subnet
+    /// capacity, cycles), the manager panics with its own `grow failed` before
+    /// returning. A larger bucket would not help there, so that case must not get
+    /// this message's advice.
     fn ensure_capacity(&self, end: u64) {
         let have = self.data.size() * WASM_PAGE_SIZE;
         if end > have {
@@ -297,9 +304,10 @@ impl<M: Memory> ChunkStore<M> {
             if self.data.grow(pages) < 0 {
                 panic!(
                     "out of stable memory: asset content needs {pages} more 64 KiB pages, \
-                     but the canister has reached its stable-memory ceiling (32 768 buckets \
-                     of the size chosen at install). Delete content, or reinstall with a \
-                     larger `stable_memory_bucket_mib` and sync again."
+                     but the canister has reached its stable-memory ceiling: all 32768 \
+                     buckets of the size chosen at install are in use. This is the \
+                     canister's own limit, not the IC's. Delete content, or reinstall with \
+                     a larger `stable_memory_bucket_mib` and sync again."
                 );
             }
         }

@@ -183,10 +183,27 @@ for the canister's lifetime. It sets two numbers:
 | 16 MiB (largest) | about 224 MiB | 512 GiB |
 
 The empty-canister cost is paid for the canister's whole life, because stable
-memory never shrinks. The ceiling is the most the canister can store; the IC
-itself allows up to 500 GiB of stable memory per canister. The default suits
-almost every static site. A sync that would go past the ceiling fails with an
-"out of stable memory" error, and nothing it uploaded is kept.
+memory never shrinks. The default suits almost every static site.
+
+Two separate limits cap how much a canister can store, and they fail with
+different errors:
+
+- **The canister's ceiling**, from the table above. It is a limit of the
+  canister's own memory layout, which can hold at most 32,768 buckets. A sync
+  that reaches it fails with the canister's
+  `out of stable memory: … reached its stable-memory ceiling` error. Reinstalling
+  with a larger bucket raises it.
+- **The IC's limits**: at most 500 GiB of stable memory per canister, room on
+  the subnet, and enough cycles to pay for the storage. When one of these is hit,
+  the error comes from the IC or the stable-memory library, for example
+  `grow failed`, and a larger bucket does not help. Below 16 MiB buckets, the
+  canister's ceiling is always reached before the IC's 500 GiB limit.
+
+Either way, the failing call is rolled back, but a sync is many calls, and the
+changes made by the calls before it stay. With an ordinary deploy, those changes
+are already live, so the site can be left partly updated until a later deploy
+completes. With [by-proposal deploys](governance.md), they are staged and nothing
+goes live.
 
 To choose a larger bucket, pass `stable_memory_bucket_mib` (1 to 16) in the
 install argument:
