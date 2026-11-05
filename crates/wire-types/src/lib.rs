@@ -19,6 +19,13 @@ use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
+/// Maximum bytes per stored chunk: the boundary content is split at, by a sync
+/// preparing `dir` and by the canister storing an `upload_asset`. **Part of the
+/// frozen state-hash contract**: per-chunk hashes depend on it, so a verifier
+/// must use a `state-hash-cli` built with this same value. Stays safely under
+/// the canister's ~2 MB ingress message limit.
+pub const MAX_CHUNK_SIZE: usize = 1_900_000;
+
 mod version;
 pub use version::{VERSION, Version};
 
@@ -276,6 +283,21 @@ pub enum StartSyncResult {
 pub struct UploadChunksArguments {
     pub session_id: SessionId,
     pub chunks: Vec<ByteBuf>,
+}
+
+/// Write one asset outside a sync — the `upload_asset` endpoint.
+///
+/// A deliberate escape hatch, not a deploy path: an asset written this way is
+/// not in any project's `dist/`, so the canister's state hash stops being
+/// reproducible from source, and the next sync deletes it unless the project's
+/// `_preserve` names it. The canister stores `content` as the identity encoding
+/// only (no compressed copies) and computes its hash itself.
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Serialize, Deserialize)]
+pub struct UploadAssetArguments {
+    pub key: String,
+    pub content_type: String,
+    pub headers: Vec<(String, String)>,
+    pub content: ByteBuf,
 }
 
 /// One encoding of an asset, as the `get_asset_details` query reports it.

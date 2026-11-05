@@ -21,22 +21,21 @@
 //! agree by construction.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::Path;
 
 use wire_types::{Encoding, RedirectRule, RulePattern};
 
 use crate::compressors::Compressors;
 use crate::content::{Content, is_compressible};
+use crate::glob::KeyPattern;
 use crate::headers::{self, HEADERS_FILENAME, HeaderRule};
+use crate::preserve::{self, PRESERVE_FILENAME};
 use crate::redirects::{self, REDIRECTS_FILENAME};
 use crate::scan::{self, AssetSource};
 use crate::{html_handling, not_found};
 
-/// Maximum bytes per uploaded chunk — the boundary the canister stores content
-/// at. **Part of the frozen state-hash contract**: per-chunk hashes depend on
-/// it, so a verifier must use a `state-hash-cli` built with this same value.
-/// Stays safely under the canister's ~2 MB ingress message limit.
-pub const MAX_CHUNK_SIZE: usize = 1_900_000;
+pub use wire_types::MAX_CHUNK_SIZE;
 
 /// One chunk of a prepared encoding: its length and SHA-256 (folded into the
 /// state hash for multi-chunk encodings) plus the bytes themselves (consumed by
@@ -169,6 +168,76 @@ impl PlannedAsset {
 pub struct ProjectPlan {
     pub assets: Vec<PlannedAsset>,
     pub redirect_rules: Vec<RedirectRule>,
+    /// Patterns from `_preserve`: canister assets absent from this project that
+    /// match one are left in place rather than deleted. Not part of the
+    /// manifest — see [`ProjectPlan::keep_preserved`].
+    pub preserve: Vec<KeyPattern>,
+    /// The inputs rule synthesis ran on, kept so [`ProjectPlan::keep_preserved`]
+    /// can re-run it over a larger key set.
+    user_rules: Vec<RedirectRule>,
+    header_rules: Vec<HeaderRule>,
+    /// Whether `assets` holds the injected branded `/404.html` rather than one
+    /// the project ships.
+    branded_404: bool,
+}
+
+impl ProjectPlan {
+    /// Decides which of the canister's assets survive this sync because
+    /// `_preserve` names them, and re-plans the project as if they were part of
+    /// it. Returns their keys, sorted; the caller leaves those assets alone.
+    ///
+    /// A key the project ships is never kept: it syncs like any other asset.
+    /// Kept keys otherwise count as present for everything derived from the key
+    /// set, so a kept asset behaves as it did when it was deployed:
+    ///
+    /// - A kept `/404.html` stands in for the project's own, so the branded
+    ///   default is not injected over it.
+    /// - A kept `.html` keeps its clean-URL rules (`/about` for `/about.html`),
+    ///   which are replaced wholesale on every sync and would otherwise vanish.
+    ///
+    /// Only rules and the injected 404 change. A kept asset's own content and
+    /// headers are whatever the canister holds; the project does not touch them.
+    pub fn keep_preserved<'a>(
+        &mut self,
+        canister_keys: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        if self.preserve.is_empty() {
+            return Vec::new();
+        }
+        let local = self.local_keys();
+        let local_set: HashSet<&str> = local.iter().map(String::as_str).collect();
+        let mut kept: Vec<String> = canister_keys
+            .into_iter()
+            .filter(|key| !local_set.contains(key))
+            .filter(|key| preserve::is_preserved(key, &self.preserve))
+            .map(str::to_string)
+            .collect();
+        if kept.is_empty() {
+            return kept;
+        }
+        kept.sort_unstable();
+
+        let keys: Vec<String> = local.into_iter().chain(kept.iter().cloned()).collect();
+        let (rules, not_found_plan) = derive_rules(&keys, &self.user_rules, &self.header_rules);
+        self.redirect_rules = rules;
+        // Adding keys can only satisfy the 404 convention, never un-satisfy it,
+        // so the branded page can drop out here but never newly appear.
+        if self.branded_404 && !not_found_plan.inject_branded_asset {
+            self.assets.retain(|a| a.key != not_found::ROOT_404_KEY);
+            self.branded_404 = false;
+        }
+        kept
+    }
+
+    /// Keys of the assets the project itself ships — excluding the injected
+    /// branded 404, which only stands in for a missing one.
+    fn local_keys(&self) -> Vec<String> {
+        self.assets
+            .iter()
+            .map(|a| a.key.clone())
+            .filter(|key| !(self.branded_404 && key == not_found::ROOT_404_KEY))
+            .collect()
+    }
 }
 
 /// Prepares a project's `dist/` directory in full: [`plan_project`] followed by
@@ -182,6 +251,7 @@ pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedP
     let ProjectPlan {
         assets,
         redirect_rules,
+        ..
     } = plan_project(dir, compressors)?;
 
     let assets = assets
@@ -195,7 +265,7 @@ pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedP
     })
 }
 
-/// Scans assets, parses `_redirects` and `_headers`, synthesizes the
+/// Scans assets, parses `_redirects`, `_headers` and `_preserve`, synthesizes the
 /// html-handling and 404 rules, then loads each asset's content, resolves its
 /// media type and headers, and hashes its uncompressed bytes.
 ///
@@ -204,27 +274,12 @@ pub fn prepare_project(dir: &str, compressors: &Compressors) -> Result<PreparedP
 /// compression work.
 pub fn plan_project(dir: &str, compressors: &Compressors) -> Result<ProjectPlan, String> {
     let sources = scan::scan(dir)?;
-    let user_rules = load_redirect_rules(dir)?;
+    let user_rules = load_config(dir, REDIRECTS_FILENAME, redirects::parse)?;
+    let header_rules = load_config(dir, HEADERS_FILENAME, headers::parse)?;
+    let preserve = load_config(dir, PRESERVE_FILENAME, preserve::parse)?;
 
-    // Asset-key set drives html-handling synthesis. The branded 404, when
-    // injected, is added before synthesis so it picks up the same `/404`
-    // clean-URL rules a user-supplied `404.html` would. (See `not_found`.)
-    let mut asset_keys: Vec<String> = sources.iter().map(|s| s.key.clone()).collect();
-    let not_found_plan = not_found::plan(&asset_keys, &user_rules);
-    if not_found_plan.inject_branded_asset {
-        asset_keys.push(not_found::ROOT_404_KEY.to_string());
-    }
-
-    // Synthesised auto-trailing-slash rules first, then the user's `_redirects`,
-    // then the lowest-priority 404 catch-all. Order is semantic (first match
-    // wins) — see the long note in `sync-core`'s `sync()`.
-    let mut project_rules = html_handling::synthesize(&asset_keys);
-    project_rules.extend(user_rules);
-    if not_found_plan.append_catchall {
-        project_rules.push(not_found::catchall_rule());
-    }
-
-    let header_rules = load_header_rules(dir)?;
+    let asset_keys: Vec<String> = sources.iter().map(|s| s.key.clone()).collect();
+    let (redirect_rules, not_found_plan) = derive_rules(&asset_keys, &user_rules, &header_rules);
 
     let mut assets = Vec::with_capacity(sources.len() + 1);
     for source in sources {
@@ -234,15 +289,49 @@ pub fn plan_project(dir: &str, compressors: &Compressors) -> Result<ProjectPlan,
         assets.push(plan_branded_404(&header_rules, compressors)?);
     }
 
-    // 3xx rules synthesize their own response (no target asset to inherit
-    // headers from), so inline `_headers` into them now — the canonical stored
-    // form a re-sync diffs cleanly against.
-    let redirect_rules = resolve_3xx_rule_headers(&project_rules, &header_rules);
-
     Ok(ProjectPlan {
         assets,
         redirect_rules,
+        preserve,
+        user_rules,
+        header_rules,
+        branded_404: not_found_plan.inject_branded_asset,
     })
+}
+
+/// The final redirect rules for a project whose assets are `asset_keys`, and the
+/// 404 convention's decision for it.
+///
+/// `asset_keys` excludes the branded 404: whether to inject it is decided here,
+/// and when it is, its key is added before synthesis so it picks up the same
+/// `/404` clean-URL rules a user-supplied `404.html` would (see `not_found`).
+fn derive_rules(
+    asset_keys: &[String],
+    user_rules: &[RedirectRule],
+    header_rules: &[HeaderRule],
+) -> (Vec<RedirectRule>, not_found::Plan) {
+    let not_found_plan = not_found::plan(asset_keys, user_rules);
+    let mut keys = asset_keys.to_vec();
+    if not_found_plan.inject_branded_asset {
+        keys.push(not_found::ROOT_404_KEY.to_string());
+    }
+
+    // Synthesised auto-trailing-slash rules first, then the user's `_redirects`,
+    // then the lowest-priority 404 catch-all. Order is semantic (first match
+    // wins) — see the long note in `sync-core`'s `sync()`.
+    let mut rules = html_handling::synthesize(&keys);
+    rules.extend(user_rules.iter().cloned());
+    if not_found_plan.append_catchall {
+        rules.push(not_found::catchall_rule());
+    }
+
+    // 3xx rules synthesize their own response (no target asset to inherit
+    // headers from), so inline `_headers` into them now — the canonical stored
+    // form a re-sync diffs cleanly against.
+    (
+        resolve_3xx_rule_headers(&rules, header_rules),
+        not_found_plan,
+    )
 }
 
 fn plan_asset(
@@ -336,26 +425,21 @@ fn prepare_encoding(encoding: Encoding, data: Vec<u8>) -> PreparedEncoding {
     }
 }
 
-fn load_redirect_rules(dir: &str) -> Result<Vec<RedirectRule>, String> {
-    let path = Path::new(dir).join(REDIRECTS_FILENAME);
+/// Reads and parses the config file `filename` (`_redirects`, `_headers`,
+/// `_preserve`) at the root of `dir`. A missing file means "no configuration";
+/// parse errors carry the file path and line number.
+fn load_config<T: Default, E: std::fmt::Display>(
+    dir: &str,
+    filename: &str,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> Result<T, String> {
+    let path = Path::new(dir).join(filename);
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(T::default());
     }
     let content =
         std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    redirects::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// Reads and parses `_headers` from `dir`, if present. A missing file means "no
-/// rules"; parse errors carry the file path and line number.
-fn load_header_rules(dir: &str) -> Result<Vec<HeaderRule>, String> {
-    let path = Path::new(dir).join(HEADERS_FILENAME);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    headers::parse(&content).map_err(|e| format!("{}: {e}", path.display()))
+    parse(&content).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn is_3xx(status: u16) -> bool {
@@ -936,5 +1020,119 @@ mod tests {
         let did = with.assets.iter().find(|a| a.key == "/ic.did").unwrap();
         assert_eq!(did.content_type, "text/plain; charset=utf-8");
         assert!(encodings_of(&with, "/ic.did").contains(&Encoding::Gzip));
+    }
+
+    #[test]
+    fn preserve_file_is_parsed_and_leaves_the_manifest_alone() {
+        // `_preserve` is configuration: it's not uploaded, and it names keys
+        // *outside* the project, so it must not move the state hash.
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"<h1>hi</h1>");
+        let without = state_hash_for_dir(&dir_str(&dir), &Compressors::canonical()).unwrap();
+
+        write(&dir, "_preserve", b"/.well-known/ii-alternative-origins\n");
+        let plan = plan_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
+        assert_eq!(plan.preserve.len(), 1);
+        assert!(plan.preserve[0].matches("/.well-known/ii-alternative-origins"));
+        let prepared = prepare_project(&dir_str(&dir), &Compressors::canonical()).unwrap();
+        assert!(prepared.assets.iter().all(|a| a.key != "/_preserve"));
+        assert_eq!(manifest(&prepared).digest(), without);
+    }
+
+    #[test]
+    fn preserve_parse_error_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "_preserve", b"not-absolute\n");
+        let err = plan_project(&dir_str(&dir), &Compressors::canonical()).unwrap_err();
+        assert!(err.contains("_preserve: line 1"), "got: {err}");
+    }
+
+    // ── keep_preserved ──────────────────────────────────────────────────────
+
+    fn plan_of(dir: &TempDir) -> ProjectPlan {
+        plan_project(&dir_str(dir), &Compressors::canonical()).unwrap()
+    }
+
+    fn rule_froms(plan: &ProjectPlan) -> Vec<String> {
+        plan.redirect_rules
+            .iter()
+            .map(|r| match &r.from {
+                RulePattern::Exact(p) | RulePattern::Subtree(p) => p.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keeps_only_absent_keys_that_match() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"hi");
+        write(&dir, "_preserve", b"/uploads/*\n/index.html\n");
+        let mut plan = plan_of(&dir);
+
+        let kept = plan.keep_preserved([
+            "/uploads/b.png",
+            "/stale.txt",
+            "/index.html",
+            "/uploads/a.png",
+        ]);
+        // Sorted; a key the project ships is never kept; unmatched keys are not.
+        assert_eq!(kept, vec!["/uploads/a.png", "/uploads/b.png"]);
+    }
+
+    #[test]
+    fn no_preserve_file_keeps_nothing_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"hi");
+        let mut plan = plan_of(&dir);
+        let rules = plan.redirect_rules.clone();
+
+        assert!(plan.keep_preserved(["/about.html"]).is_empty());
+        assert_eq!(plan.redirect_rules, rules);
+    }
+
+    #[test]
+    fn kept_404_replaces_the_branded_default() {
+        // The project ships no 404.html, so the branded one is injected — but the
+        // canister holds a preserved one, which must win, not be overwritten.
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"hi");
+        write(&dir, "_preserve", b"/404.html\n");
+        let mut plan = plan_of(&dir);
+        assert!(plan.assets.iter().any(|a| a.key == "/404.html"));
+        let rules = plan.redirect_rules.clone();
+
+        assert_eq!(plan.keep_preserved(["/404.html"]), vec!["/404.html"]);
+        assert!(plan.assets.iter().all(|a| a.key != "/404.html"));
+        // The kept page is served by the same `/404` aliases and catch-all the
+        // branded one had.
+        assert_eq!(plan.redirect_rules, rules);
+    }
+
+    #[test]
+    fn shipped_404_is_not_displaced_by_a_kept_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "404.html", b"mine");
+        write(&dir, "_preserve", b"/*\n");
+        let mut plan = plan_of(&dir);
+
+        assert!(plan.keep_preserved(["/404.html"]).is_empty());
+        assert!(plan.assets.iter().any(|a| a.key == "/404.html"));
+    }
+
+    #[test]
+    fn kept_html_keeps_its_clean_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "index.html", b"hi");
+        write(&dir, "_preserve", b"/about.html\n");
+        let mut plan = plan_of(&dir);
+        assert!(!rule_froms(&plan).contains(&"/about".to_string()));
+
+        plan.keep_preserved(["/about.html"]);
+        let froms = rule_froms(&plan);
+        assert!(froms.contains(&"/about".to_string()), "got: {froms:?}");
+        assert!(froms.contains(&"/about/".to_string()), "got: {froms:?}");
+        // The synthesised rules match what shipping the file would produce.
+        write(&dir, "about.html", b"about");
+        assert_eq!(plan.redirect_rules, plan_of(&dir).redirect_rules);
     }
 }

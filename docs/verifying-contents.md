@@ -49,6 +49,13 @@ re-hashed. Two things a visitor receives are outside the model:
   is replaced with `no-store`. A matching hash says the canister holds your build,
   not that a visitor can reach it.
 
+**Files written outside a deploy** are the opposite case: they're in the hash but not
+in the build. A file written with [`upload_asset`](site-files.md#uploading-a-single-file),
+or kept by [`_preserve`](site-files.md#listing-files-in-_preserve) while missing from
+the site directory, is part of the canister's `state_hash`, but hashing the reproduced
+directory can't account for it, so the two won't match. That canister can't be
+verified from source alone. A canister that deploys by proposal refuses both.
+
 ## How to verify
 
 You need the canister's id, its public source (the repo and the build steps that

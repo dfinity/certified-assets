@@ -1255,6 +1255,72 @@ mod hashing {
         );
         assert_ne!(canister_hash, [0u8; 32]);
     }
+
+    /// An `upload_asset` is stored exactly as a sync of the same file would
+    /// store it, chunk layout included, so the canister's state hash matches
+    /// the verifier's for a `dist/` that holds the file. Covers a file over one
+    /// chunk, split at `MAX_CHUNK_SIZE`, and an empty file, stored as one empty
+    /// chunk.
+    #[test]
+    fn upload_asset_stores_the_chunk_layout_a_sync_would() {
+        use std::fs;
+
+        let big: Vec<u8> = (0u8..=255)
+            .cycle()
+            .take(wire_types::MAX_CHUNK_SIZE + 1000)
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("index.html"), b"<h1>hi</h1>").unwrap();
+        fs::write(dir.path().join("big.bin"), &big).unwrap();
+        fs::write(dir.path().join("empty.txt"), b"").unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+        // Identity only: an upload stores no compressed encodings.
+        let compressors = asset_prep::Compressors::none();
+        let prepared = asset_prep::prepare_project(dir_str, &compressors).unwrap();
+        let big_chunks = prepared
+            .assets
+            .iter()
+            .find(|a| a.key == "/big.bin")
+            .unwrap()
+            .encodings[0]
+            .chunks
+            .len();
+        assert_eq!(big_chunks, 2, "the fixture must span two chunks");
+
+        // Sync everything but the two files, then upload those.
+        let mut synced_first = prepared.clone();
+        synced_first
+            .assets
+            .retain(|a| a.key != "/big.bin" && a.key != "/empty.txt");
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        apply_prepared(&mut state, &ctx, &synced_first);
+        for (key, content) in [("/big.bin", &big[..]), ("/empty.txt", &b""[..])] {
+            let asset = prepared.assets.iter().find(|a| a.key == key).unwrap();
+            let call = state
+                .begin_upload_asset(
+                    some_principal(),
+                    wire_types::UploadAssetArguments {
+                        key: key.to_string(),
+                        content_type: asset.content_type.clone(),
+                        headers: asset.headers.clone(),
+                        content: ByteBuf::from(content.to_vec()),
+                    },
+                    &ctx,
+                )
+                .unwrap();
+            run_computation_until_completion(|progress| {
+                state.execute_operations(&call, progress, &ctx)
+            })
+            .unwrap();
+        }
+
+        let verifier_hash = asset_prep::state_hash_for_dir(dir_str, &compressors).unwrap();
+        assert_eq!(
+            hex::encode(state.cached_state_hash()),
+            hex::encode(verifier_hash)
+        );
+    }
 }
 
 mod serving {
@@ -5351,5 +5417,214 @@ mod governance {
         );
         assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"hi"[..]));
         assert!(matches!(state.proposed_state(), ProposedState::None));
+    }
+}
+
+mod upload_asset {
+    use super::*;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments, UploadAssetArguments};
+
+    fn args(key: &str, content_type: &str, content: &[u8]) -> UploadAssetArguments {
+        UploadAssetArguments {
+            key: key.to_string(),
+            content_type: content_type.to_string(),
+            headers: vec![],
+            content: ByteBuf::from(content.to_vec()),
+        }
+    }
+
+    /// Drives `upload_asset` the way the canister does: open the one-asset sync,
+    /// then run its final `execute_operations` call to completion.
+    fn upload(
+        state: &mut State,
+        arg: UploadAssetArguments,
+        ctx: &SystemContext,
+    ) -> Result<[u8; 32], String> {
+        let call = state.begin_upload_asset(some_principal(), arg, ctx)?;
+        run_computation_until_completion(|progress| state.execute_operations(&call, progress, ctx))
+            .map(|hash| hash.expect("an upload is a final call, so it returns the hash"))
+    }
+
+    fn encodings_of(state: &State, key: &str) -> Vec<Encoding> {
+        state
+            .get_asset_details(None)
+            .into_iter()
+            .find(|a| a.key == key)
+            .map(|a| a.encodings.into_iter().map(|e| e.encoding).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn serves_a_new_asset_certified_and_reports_the_new_hash() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec!["hi"]),
+            ],
+        );
+        let before = state.cached_state_hash();
+
+        const ORIGINS: &[u8] = br#"{"alternativeOrigins":["https://example.com"]}"#;
+        let mut arg = args(
+            "/.well-known/ii-alternative-origins",
+            "application/json",
+            ORIGINS,
+        );
+        arg.headers = vec![("Access-Control-Allow-Origin".into(), "*".into())];
+        let hash = upload(&mut state, arg, &ctx).unwrap();
+
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/.well-known/ii-alternative-origins").build(),
+        );
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body.as_ref(), ORIGINS);
+        assert_eq!(
+            lookup_header(&response, "Access-Control-Allow-Origin"),
+            Some("*")
+        );
+        // The hash covers the new asset, is the one cached, and was hashed by
+        // the canister itself (it matches a from-scratch recompute).
+        assert_ne!(hash, before);
+        assert_eq!(state.cached_state_hash(), hash);
+        assert_eq!(state.recompute_state_hash(), hash);
+        // The lock is released: an ordinary sync can start straight away.
+        start_session(&mut state, &ctx);
+    }
+
+    #[test]
+    fn replaces_an_existing_asset_and_drops_its_compressed_copies() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/app.js", "text/javascript")
+                    .with_header("Cache-Control", "max-age=60")
+                    .with_encoding("identity", vec!["old"])
+                    .with_encoding("gzip", vec!["old-gz"]),
+            ],
+        );
+
+        upload(
+            &mut state,
+            args("/app.js", "application/javascript", b"new"),
+            &ctx,
+        )
+        .unwrap();
+
+        // Compressed bytes of the old content must not survive under the new
+        // content, and nothing from the old asset carries over.
+        assert_eq!(encodings_of(&state, "/app.js"), vec![Encoding::Identity]);
+        let details = state.get_asset_details(None);
+        assert_eq!(details[0].content_type, "application/javascript");
+        assert!(details[0].headers.is_empty());
+        let response = certified_http_request(
+            &state,
+            RequestBuilder::get("/app.js")
+                .with_header("Accept-Encoding", "gzip")
+                .build(),
+        );
+        assert_eq!(response.body.as_ref(), b"new");
+    }
+
+    #[test]
+    fn an_uploaded_404_page_is_served_by_the_catchall_rule() {
+        // The catch-all certifies its target's body into the rule's own tree
+        // entry, so replacing the target must re-certify the rule too.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/404.html", "text/html")
+                    .with_encoding("identity", vec!["branded"]),
+            ],
+        );
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Subtree("/".into()),
+                    to: "/404.html".into(),
+                    status: 404,
+                    headers: vec![],
+                }],
+            })],
+            &ctx,
+        );
+
+        upload(&mut state, args("/404.html", "text/html", b"custom"), &ctx).unwrap();
+
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response.body.as_ref(), b"custom");
+
+        // An error page is served only from a single chunk, so a page too big
+        // for one is refused rather than silently replaced by the built-in 404.
+        let big = vec![b'x'; wire_types::MAX_CHUNK_SIZE + 1];
+        let err = upload(&mut state, args("/404.html", "text/html", &big), &ctx).unwrap_err();
+        assert!(err.contains("error page"), "got: {err}");
+        let response = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(response.body.as_ref(), b"custom");
+    }
+
+    #[test]
+    fn refused_while_a_sync_is_in_progress_even_the_callers_own() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        start_session(&mut state, &ctx);
+
+        let err = upload(&mut state, args("/a.txt", "text/plain", b"a"), &ctx).unwrap_err();
+        assert!(err.contains("in progress"), "got: {err}");
+        assert_eq!(state.get_asset_details(None), vec![]);
+    }
+
+    #[test]
+    fn takes_over_a_stale_sync() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        start_session(&mut state, &ctx);
+
+        let later = SystemContext {
+            current_timestamp_ns: ctx.current_timestamp_ns + SYNC_IDLE_TIMEOUT_NANOS,
+        };
+        upload(&mut state, args("/a.txt", "text/plain", b"a"), &later).unwrap();
+        assert_eq!(encodings_of(&state, "/a.txt"), vec![Encoding::Identity]);
+    }
+
+    #[test]
+    fn refused_in_by_proposal_mode() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        state
+            .set_governance_approver(Some(
+                Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            ))
+            .unwrap();
+
+        let err = upload(&mut state, args("/a.txt", "text/plain", b"a"), &ctx).unwrap_err();
+        assert!(err.contains("by-proposal"), "got: {err}");
+        // Refused before taking the lock, so a deploy is not blocked by it.
+        assert!(matches!(
+            state.start_sync(some_principal(), &ctx),
+            StartSyncResult::Started { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_a_relative_key() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        let err = upload(&mut state, args("a.txt", "text/plain", b"a"), &ctx).unwrap_err();
+        assert!(err.contains("must start with '/'"), "got: {err}");
+        start_session(&mut state, &ctx);
     }
 }

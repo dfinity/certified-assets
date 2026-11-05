@@ -14,9 +14,12 @@ use crate::sync::{
     ComputationStatus, ExecuteOperationsProgress, SYNC_IDLE_TIMEOUT_NANOS, SyncSession,
 };
 use candid::Principal;
+use serde_bytes::ByteBuf;
+use sha2::{Digest, Sha256};
 use wire_types::{
-    ChunkId, ExecuteOperationsArguments, Operation, SessionId, StartSyncResult,
-    UploadChunksArguments,
+    ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments,
+    MAX_CHUNK_SIZE, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
+    UploadAssetArguments, UploadChunksArguments,
 };
 
 impl State {
@@ -131,6 +134,147 @@ impl State {
         });
 
         StartSyncResult::Started { session_id }
+    }
+
+    /// Opens a one-asset sync for the `upload_asset` endpoint and returns the
+    /// final `execute_operations` call that writes it. The caller drives that
+    /// call to completion exactly as it would a sync's own, so the write, the
+    /// redirect-rule re-certification and the state-hash recompute all go
+    /// through the one tested path rather than a second copy of it.
+    ///
+    /// Stricter than [`Self::start_sync`] about who goes first: an upload never
+    /// reclaims a live sync, not even the caller's own, since landing between a
+    /// deploy's diff and its commit would leave that deploy working from a stale
+    /// view of the canister. Only a stale session is taken over.
+    ///
+    /// Refused outright in by-proposal mode. There every change to served
+    /// content goes through a proposal whose hash voters reproduce from source;
+    /// a direct write would bypass the vote, and an asset that no build
+    /// contains could never be reproduced anyway.
+    ///
+    /// The content becomes the asset's identity encoding and nothing else: any
+    /// existing asset at `key` is deleted first, so stale compressed copies go
+    /// with it. Keeping no compressed encoding is also what keeps the
+    /// preparation canary truthful, since the canary vouches only for encodings
+    /// a client's compressors produced.
+    pub fn begin_upload_asset(
+        &mut self,
+        owner: Principal,
+        arg: UploadAssetArguments,
+        system_context: &SystemContext,
+    ) -> Result<ExecuteOperationsArguments, String> {
+        if self.governance_enabled() {
+            return Err(
+                "upload_asset is disabled in by-proposal mode: add the file to the \
+                 project and deploy it through a proposal"
+                    .to_string(),
+            );
+        }
+        if !arg.key.starts_with('/') {
+            return Err(format!("asset key must start with '/': {:?}", arg.key));
+        }
+        // A 404/410 page is served only from a single chunk; a bigger one would
+        // silently give way to the built-in 404. A sync refuses the same.
+        if arg.content.len() > MAX_CHUNK_SIZE
+            && let Some(rule) = self
+                .store
+                .redirect_rules()
+                .iter()
+                .find(|r| matches!(r.status, 404 | 410) && r.to == arg.key)
+        {
+            return Err(format!(
+                "{} is served as a {} error page, which must fit in one chunk \
+                 ({MAX_CHUNK_SIZE} bytes), but this upload is {} bytes",
+                arg.key,
+                rule.status,
+                arg.content.len()
+            ));
+        }
+        if let Some(active) = &self.sync_session {
+            let idle = system_context
+                .current_timestamp_ns
+                .saturating_sub(active.last_activity_ns);
+            if idle < SYNC_IDLE_TIMEOUT_NANOS {
+                return Err(format!(
+                    "a sync by {} is in progress; retry once it finishes",
+                    active.owner
+                ));
+            }
+        }
+
+        let session_id = match self.start_sync(owner, system_context) {
+            StartSyncResult::Started { session_id } => session_id,
+            // Unreachable after the check above (no live session, and no
+            // prepared batch outside governance mode), but `Busy` is the one
+            // outcome that must never be mistaken for a lock.
+            StartSyncResult::Busy { owner, .. } => {
+                return Err(format!(
+                    "a sync by {owner} is in progress; retry once it finishes"
+                ));
+            }
+        };
+
+        let UploadAssetArguments {
+            key,
+            content_type,
+            headers,
+            content,
+        } = arg;
+        // Hashed here rather than trusted: unlike a sync, no client prepared
+        // these bytes, and hashing a single ingress message is cheap.
+        let sha256 = Sha256::digest(&content).to_vec();
+        // Split at the boundary a sync preparing the same file from `dir` would
+        // use. The state hash folds in the chunk layout, so one oversized chunk
+        // would never reproduce from source, and a later sync whose whole-content
+        // hash matches would keep it rather than re-upload it.
+        // An empty file is one empty chunk, as `asset-prep` stores it.
+        let pieces: Vec<&[u8]> = if content.is_empty() {
+            vec![&[][..]]
+        } else {
+            content.chunks(MAX_CHUNK_SIZE).collect()
+        };
+        // The per-chunk hashes are only read for a multi-chunk encoding.
+        let chunk_sha256: Vec<ByteBuf> = if pieces.len() > 1 {
+            pieces
+                .iter()
+                .map(|piece| ByteBuf::from(Sha256::digest(piece).to_vec()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let chunk_ids: Vec<ChunkId> = pieces
+            .into_iter()
+            .map(|piece| {
+                let id = self.chunks.len() as ChunkId;
+                self.chunks.push(Some(ByteBuf::from(piece.to_vec())));
+                id
+            })
+            .collect();
+
+        let mut operations = Vec::with_capacity(3);
+        if self.effective_contains_asset(&key) {
+            operations.push(Operation::DeleteAsset(DeleteAssetArguments {
+                key: key.clone(),
+            }));
+        }
+        operations.push(Operation::CreateAsset(CreateAssetArguments {
+            key: key.clone(),
+            content_type,
+            headers,
+        }));
+        operations.push(Operation::SetAssetContent(SetAssetContentArguments {
+            key,
+            encoding: Encoding::Identity,
+            chunk_ids,
+            sha256: ByteBuf::from(sha256),
+            chunk_sha256,
+        }));
+
+        Ok(ExecuteOperationsArguments {
+            session_id,
+            operations,
+            is_final: true,
+        })
     }
 
     /// Checks that `session_id` still names the active sync and that the sync is

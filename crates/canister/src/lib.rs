@@ -2,8 +2,8 @@ use candid::Principal;
 use canister_core::{
     AssetDetails, ByteBuf, ChunkId, ExecuteOperationsArguments, HttpRequest, HttpResponse,
     InitArgs, IssueTokenArgs, ProposedState, ProtectionStatus, RedirectRule, StartSyncResult,
-    TokenInfo, UploadChunksArguments, Version, guard_can_sync, guard_is_controller,
-    guard_is_governance,
+    TokenInfo, UploadAssetArguments, UploadChunksArguments, Version, guard_can_sync,
+    guard_is_controller, guard_is_governance,
 };
 use ic_cdk::{init, post_upgrade, query, update};
 
@@ -136,6 +136,15 @@ fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
 #[update(guard = "guard_can_sync")]
 async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteBuf> {
     canister_core::execute_operations(arg).await
+}
+
+// Writes one asset outside a sync. Discouraged — see `docs/site-files.md`:
+// the asset is not in any build, so the state hash stops reproducing from
+// source, and the next sync deletes it unless `_preserve` names it. Refused in
+// by-proposal mode and while a sync is in progress.
+#[update(guard = "guard_can_sync")]
+async fn upload_asset(arg: UploadAssetArguments) -> ByteBuf {
+    canister_core::upload_asset(arg).await
 }
 
 // ───────── Access protection ─────────
