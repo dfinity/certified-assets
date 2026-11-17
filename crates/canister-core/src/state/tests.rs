@@ -5433,16 +5433,25 @@ mod upload_asset {
         }
     }
 
-    /// Drives `upload_assets` the way the canister does: open the sync, then run
-    /// its final `execute_operations` call to completion.
+    /// Drives `upload_assets` the way the canister does: open the sync, apply
+    /// every operation without yielding, then run the state-hash recompute to
+    /// completion.
     fn upload_all(
         state: &mut State,
         assets: Vec<UploadAssetArguments>,
         ctx: &SystemContext,
     ) -> Result<[u8; 32], String> {
         let call = state.begin_upload_assets(some_principal(), assets, ctx)?;
-        run_computation_until_completion(|progress| state.execute_operations(&call, progress, ctx))
-            .map(|hash| hash.expect("an upload is a final call, so it returns the hash"))
+        let mut progress = state.apply_upload_operations(&call, ctx)?;
+        loop {
+            match state.execute_operations(&call, progress, ctx) {
+                ComputationStatus::Done(hash) => {
+                    return Ok(hash.expect("an upload is a final call, so it returns the hash"));
+                }
+                ComputationStatus::InProgress(next) => progress = next,
+                ComputationStatus::Error(e) => return Err(e),
+            }
+        }
     }
 
     /// `upload_asset`: an `upload_assets` of one, exactly as the canister
@@ -5678,6 +5687,50 @@ mod upload_asset {
         assert_eq!(state.cached_state_hash(), hash);
         assert_eq!(state.recompute_state_hash(), hash);
         start_session(&mut state, &ctx);
+    }
+
+    /// The driver yields between `execute_operations` steps, and a yield commits
+    /// what has been applied so far. So an upload applies every operation before
+    /// its first yield point: by the time `apply_upload_operations` returns, the
+    /// whole batch is served and certified, and all that is left to resume is
+    /// the state-hash recompute, which no visitor can observe.
+    #[test]
+    fn the_whole_batch_is_applied_before_the_first_yield_point() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/app.js", "text/javascript")
+                    .with_encoding("identity", vec!["old"]),
+            ],
+        );
+        let assets: Vec<_> = (0..50)
+            .map(|i| args(&format!("/f{i}.txt"), "text/plain", b"x"))
+            .chain([args("/app.js", "text/javascript", b"new")])
+            .collect();
+
+        let call = state
+            .begin_upload_assets(some_principal(), assets, &ctx)
+            .unwrap();
+        // Staging alone serves nothing new.
+        assert_eq!(body_of(&state, "/app.js").as_deref(), Some(&b"old"[..]));
+        assert_eq!(body_of(&state, "/f0.txt"), None);
+
+        let progress = state.apply_upload_operations(&call, &ctx).unwrap();
+
+        assert!(
+            matches!(progress, ExecuteOperationsProgress::HashingState { .. }),
+            "no operation may be left for a later message; got {progress:?}"
+        );
+        assert_eq!(body_of(&state, "/app.js").as_deref(), Some(&b"new"[..]));
+        for i in 0..50 {
+            assert_eq!(
+                body_of(&state, &format!("/f{i}.txt")).as_deref(),
+                Some(&b"x"[..])
+            );
+        }
     }
 
     /// A batch is stored exactly as the same assets uploaded one call at a

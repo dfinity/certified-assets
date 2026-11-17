@@ -368,9 +368,10 @@ service: (opt InitArgs) -> {
   upload_asset: (UploadAssetArguments) -> (blob);
 
   // `upload_asset` for several assets at once, with the same caveats and
-  // rejections. All or nothing: the assets are written in a single step, and
-  // one invalid entry (or a key listed twice) rejects the whole call. The
-  // assets must fit in one ingress message (~2 MB) together.
+  // rejections. All or nothing: the assets are written in a single message, so
+  // a call with one invalid entry (or a key listed twice), or with too many
+  // assets to write in one message, is rejected and writes nothing. The assets
+  // must fit in one ingress message (~2 MB) together.
   upload_assets: (vec UploadAssetArguments) -> (blob);
 
   // ───────── Authorization ─────────

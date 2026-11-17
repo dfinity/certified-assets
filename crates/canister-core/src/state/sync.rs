@@ -139,14 +139,14 @@ impl State {
 
     /// Opens a sync for the `upload_assets` endpoint (and `upload_asset`, its
     /// one-asset form) and returns the final `execute_operations` call that
-    /// writes every asset in `assets`. The caller drives that call to completion
-    /// exactly as it would a sync's own, so the writes, the redirect-rule
-    /// re-certification and the state-hash recompute all go through the one
-    /// tested path rather than a second copy of it.
+    /// writes every asset in `assets`. The caller applies it with
+    /// [`Self::apply_upload_operations`] and then drives the state-hash
+    /// recompute to completion, so the writes, the redirect-rule
+    /// re-certification and the hash all go through the one tested
+    /// `execute_operations` path rather than a second copy of it.
     ///
-    /// All or nothing: every asset is validated before the lock is taken or a
-    /// byte is staged, so one bad entry refuses the whole upload, and the
-    /// accepted ones land together in a single final call.
+    /// Every asset is validated before the lock is taken or a byte is staged,
+    /// so one bad entry refuses the whole upload.
     ///
     /// Stricter than [`Self::start_sync`] about who goes first: an upload never
     /// reclaims a live sync, not even the caller's own, since landing between a
@@ -241,6 +241,39 @@ impl State {
             operations,
             is_final: true,
         })
+    }
+
+    /// Applies every operation of an upload's `call` (from
+    /// [`Self::begin_upload_assets`]) without yielding, and returns the progress
+    /// from which `execute_operations` resumes: the state-hash recompute.
+    ///
+    /// This is what makes an upload all or nothing. A sync's driver yields to a
+    /// self-call between operations when the instruction budget runs low, which
+    /// commits the operations applied so far: visitors can see half of them,
+    /// and a later failure can't undo them. A sync accepts that, since it is
+    /// resumable; an upload must not. So its operations all run in the message
+    /// that opened it: if they fail, or don't fit in one message's instruction
+    /// limit, the caller traps and the whole message rolls back, the lock
+    /// included. Only the hashing that follows, which changes nothing a visitor
+    /// sees, is left to the yielding driver.
+    pub fn apply_upload_operations(
+        &mut self,
+        call: &ExecuteOperationsArguments,
+        system_context: &SystemContext,
+    ) -> Result<ExecuteOperationsProgress, String> {
+        let mut progress = ExecuteOperationsProgress::Starting;
+        loop {
+            match self.execute_operations(call, progress, system_context) {
+                ComputationStatus::InProgress(
+                    hashing @ ExecuteOperationsProgress::HashingState { .. },
+                ) => return Ok(hashing),
+                ComputationStatus::InProgress(next) => progress = next,
+                // An upload's call is final, so it never completes before the
+                // hashing phase.
+                ComputationStatus::Done(_) => return Err("upload did not finalize".to_string()),
+                ComputationStatus::Error(e) => return Err(e),
+            }
+        }
     }
 
     /// Stages one uploaded asset's content as chunks of the open sync and

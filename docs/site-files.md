@@ -104,7 +104,8 @@ Everything above applies to each file, plus:
 - **All or nothing.** If any file is rejected, none are written. Visitors never see
   some of the files updated and others not.
 - **One message for all of them.** The files have to fit in a single call together,
-  about 2 MB in total.
+  about 2 MB in total. A call with so many small files that the canister can't write
+  them in one step is rejected as a whole; split it into smaller calls.
 - **Each path once.** A call that lists the same path twice is rejected.
 
 ### Listing files in `_preserve`
