@@ -313,8 +313,8 @@ The canister ID is preserved, so custom domains, links and bookmarks are
 untouched. The cost is downtime: the reinstall wipes the canister, and the first
 content can only go live through a commit proposal, so the frontend is dark for
 roughly one voting period. It is also the path every future **breaking release**
-will take: while the version is `0.x` a breaking change is a *series* bump — a
-minor, `0.3.x` → `0.4.0` — and a series bump reinstalls by design. So this is not
+will take: a breaking change is a *series* bump — a major, `1.x.y` → `2.0.0` (or
+any move from `0.x` to `1.0.0`) — and a series bump reinstalls by design. So this is not
 a one-off migration step but the shape of every breaking upgrade from here on.
 
 **Onto a new canister**, configured while you are still its controller and handed

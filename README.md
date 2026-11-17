@@ -62,14 +62,15 @@ Every crate shares one semver, and that version doubles as the canister↔plugin
 release identity: the canister returns it from the `version` query and the
 plugin refuses to sync unless it matches its own exactly (they're a locked
 pair). The version *value* also says whether moving the canister between two
-releases keeps its state — following Cargo's 0.x rule while `major` is `0`:
+releases keeps its state:
 
 | Change | Bump | Canister switch |
 | --- | --- | --- |
-| **Non-breaking** | patch (`0.1.0 → 0.1.1`) | in-place `upgrade`; `post_upgrade` recovers all state |
-| **Breaking** | minor (`0.1.x → 0.2.0`) | `reinstall`; state is wiped, a fresh sync re-uploads everything |
+| **Non-breaking** | minor or patch (`1.0.0 → 1.1.0`, `1.0.0 → 1.0.1`) | in-place `upgrade`; `post_upgrade` recovers all state |
+| **Breaking** | major (`1.x.y → 2.0.0`) | `reinstall`; state is wiped, a fresh sync re-uploads everything |
 
-(From `1.0.0` on, a major bump is the breaking one.) Choosing breaking vs
+(Before `1.0.0` it followed Cargo's 0.x rule: a minor bump was the breaking one,
+so `0.4.x → 1.0.0` is itself a breaking switch.) Choosing breaking vs
 non-breaking is a deliberate call — the axis is canister *state* upgradability —
 so bump it by hand:
 
