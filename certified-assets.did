@@ -185,7 +185,7 @@ type ExecuteOperationsArguments = record {
   is_final: bool;
 };
 
-// One asset to write outside a sync; see `upload_asset`. `content` becomes the
+// One asset to write outside a sync; see `upload_asset` and `upload_assets`. `content` becomes the
 // asset's identity encoding (no compressed copies), hashed by the canister.
 type UploadAssetArguments = record {
   key: Key;
@@ -366,6 +366,12 @@ service: (opt InitArgs) -> {
   // for a key not starting with `/`. The content must fit in one ingress
   // message (~2 MB).
   upload_asset: (UploadAssetArguments) -> (blob);
+
+  // `upload_asset` for several assets at once, with the same caveats and
+  // rejections. All or nothing: the assets are written in a single step, and
+  // one invalid entry (or a key listed twice) rejects the whole call. The
+  // assets must fit in one ingress message (~2 MB) together.
+  upload_assets: (vec UploadAssetArguments) -> (blob);
 
   // ───────── Authorization ─────────
   // A set of extra principals authorized to sync assets. Canister controllers

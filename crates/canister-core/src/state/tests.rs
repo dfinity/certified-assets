@@ -1298,14 +1298,14 @@ mod hashing {
         for (key, content) in [("/big.bin", &big[..]), ("/empty.txt", &b""[..])] {
             let asset = prepared.assets.iter().find(|a| a.key == key).unwrap();
             let call = state
-                .begin_upload_asset(
+                .begin_upload_assets(
                     some_principal(),
-                    wire_types::UploadAssetArguments {
+                    vec![wire_types::UploadAssetArguments {
                         key: key.to_string(),
                         content_type: asset.content_type.clone(),
                         headers: asset.headers.clone(),
                         content: ByteBuf::from(content.to_vec()),
-                    },
+                    }],
                     &ctx,
                 )
                 .unwrap();
@@ -5433,16 +5433,26 @@ mod upload_asset {
         }
     }
 
-    /// Drives `upload_asset` the way the canister does: open the one-asset sync,
-    /// then run its final `execute_operations` call to completion.
+    /// Drives `upload_assets` the way the canister does: open the sync, then run
+    /// its final `execute_operations` call to completion.
+    fn upload_all(
+        state: &mut State,
+        assets: Vec<UploadAssetArguments>,
+        ctx: &SystemContext,
+    ) -> Result<[u8; 32], String> {
+        let call = state.begin_upload_assets(some_principal(), assets, ctx)?;
+        run_computation_until_completion(|progress| state.execute_operations(&call, progress, ctx))
+            .map(|hash| hash.expect("an upload is a final call, so it returns the hash"))
+    }
+
+    /// `upload_asset`: an `upload_assets` of one, exactly as the canister
+    /// endpoint forwards it.
     fn upload(
         state: &mut State,
         arg: UploadAssetArguments,
         ctx: &SystemContext,
     ) -> Result<[u8; 32], String> {
-        let call = state.begin_upload_asset(some_principal(), arg, ctx)?;
-        run_computation_until_completion(|progress| state.execute_operations(&call, progress, ctx))
-            .map(|hash| hash.expect("an upload is a final call, so it returns the hash"))
+        upload_all(state, vec![arg], ctx)
     }
 
     fn encodings_of(state: &State, key: &str) -> Vec<Encoding> {
@@ -5452,6 +5462,11 @@ mod upload_asset {
             .find(|a| a.key == key)
             .map(|a| a.encodings.into_iter().map(|e| e.encoding).collect())
             .unwrap_or_default()
+    }
+
+    fn body_of(state: &State, url: &str) -> Option<Vec<u8>> {
+        let response = certified_http_request(state, RequestBuilder::get(url).build());
+        (response.status_code == 200).then(|| response.body.to_vec())
     }
 
     #[test]
@@ -5625,6 +5640,133 @@ mod upload_asset {
         let ctx = mock_system_context();
         let err = upload(&mut state, args("a.txt", "text/plain", b"a"), &ctx).unwrap_err();
         assert!(err.contains("must start with '/'"), "got: {err}");
+        start_session(&mut state, &ctx);
+    }
+
+    #[test]
+    fn several_assets_land_in_one_step() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/app.js", "text/javascript")
+                    .with_encoding("identity", vec!["old"])
+                    .with_encoding("gzip", vec!["old-gz"]),
+            ],
+        );
+
+        // One replaces an existing asset, one is new, one spans two chunks.
+        let big = vec![b'x'; wire_types::MAX_CHUNK_SIZE + 1];
+        let hash = upload_all(
+            &mut state,
+            vec![
+                args("/app.js", "text/javascript", b"new"),
+                args("/a.txt", "text/plain", b"a"),
+                args("/big.bin", "application/octet-stream", &big),
+            ],
+            &ctx,
+        )
+        .unwrap();
+
+        assert_eq!(body_of(&state, "/app.js").as_deref(), Some(&b"new"[..]));
+        assert_eq!(body_of(&state, "/a.txt").as_deref(), Some(&b"a"[..]));
+        for key in ["/app.js", "/a.txt", "/big.bin"] {
+            assert_eq!(encodings_of(&state, key), vec![Encoding::Identity]);
+        }
+        assert_eq!(state.cached_state_hash(), hash);
+        assert_eq!(state.recompute_state_hash(), hash);
+        start_session(&mut state, &ctx);
+    }
+
+    /// A batch is stored exactly as the same assets uploaded one call at a
+    /// time, so `upload_asset` and `upload_assets` can't drift apart.
+    #[test]
+    fn a_batch_matches_the_same_assets_uploaded_one_by_one() {
+        let ctx = mock_system_context();
+        let assets = || {
+            vec![
+                args("/a.txt", "text/plain", b"a"),
+                args("/b.json", "application/json", b"{}"),
+                args("/empty.txt", "text/plain", b""),
+            ]
+        };
+
+        let mut batched = State::default();
+        let batched_hash = upload_all(&mut batched, assets(), &ctx).unwrap();
+
+        let mut one_by_one = State::default();
+        let mut last = [0u8; 32];
+        for arg in assets() {
+            last = upload(&mut one_by_one, arg, &ctx).unwrap();
+        }
+
+        assert_eq!(hex::encode(batched_hash), hex::encode(last));
+        assert_eq!(
+            batched.get_asset_details(None),
+            one_by_one.get_asset_details(None)
+        );
+    }
+
+    #[test]
+    fn one_invalid_asset_rejects_the_whole_batch() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        let err = upload_all(
+            &mut state,
+            vec![
+                args("/a.txt", "text/plain", b"a"),
+                args("b.txt", "text/plain", b"b"),
+            ],
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("must start with '/'"), "got: {err}");
+        // Nothing was written and the lock was never taken.
+        assert_eq!(state.get_asset_details(None), vec![]);
+        start_session(&mut state, &ctx);
+    }
+
+    #[test]
+    fn rejects_a_key_listed_twice() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+
+        let err = upload_all(
+            &mut state,
+            vec![
+                args("/a.txt", "text/plain", b"first"),
+                args("/a.txt", "text/plain", b"second"),
+            ],
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+        assert_eq!(state.get_asset_details(None), vec![]);
+        start_session(&mut state, &ctx);
+    }
+
+    /// An empty batch writes nothing; like any finalized sync it still reports
+    /// the hash and releases the lock.
+    #[test]
+    fn an_empty_batch_changes_nothing() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec!["hi"]),
+            ],
+        );
+        let before = state.cached_state_hash();
+
+        let hash = upload_all(&mut state, vec![], &ctx).unwrap();
+
+        assert_eq!(hash, before);
+        assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"hi"[..]));
         start_session(&mut state, &ctx);
     }
 }

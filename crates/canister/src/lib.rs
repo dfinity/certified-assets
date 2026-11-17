@@ -147,6 +147,13 @@ async fn upload_asset(arg: UploadAssetArguments) -> ByteBuf {
     canister_core::upload_asset(arg).await
 }
 
+// Writes several assets outside a sync in one step: all of them land, or none
+// do. `upload_asset` is this with a single entry, and the same caveats apply.
+#[update(guard = "guard_can_sync")]
+async fn upload_assets(assets: Vec<UploadAssetArguments>) -> ByteBuf {
+    canister_core::upload_assets(assets).await
+}
+
 // ───────── Access protection ─────────
 // Controller-only configuration for the "private app" gate. None of these touch
 // the serving hot path; all serving (including login validation) stays in the

@@ -285,7 +285,8 @@ pub struct UploadChunksArguments {
     pub chunks: Vec<ByteBuf>,
 }
 
-/// Write one asset outside a sync — the `upload_asset` endpoint.
+/// One asset to write outside a sync — the argument of the `upload_asset`
+/// endpoint, and the element type of `upload_assets`' vector.
 ///
 /// A deliberate escape hatch, not a deploy path: an asset written this way is
 /// not in any project's `dist/`, so the canister's state hash stops being

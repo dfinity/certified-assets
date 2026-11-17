@@ -1,4 +1,4 @@
-//! `upload_asset` + `_preserve`: the discouraged escape hatch for a file that is
+//! `upload_asset` / `upload_assets` + `_preserve`: the discouraged escape hatch for a file that is
 //! written outside a deploy and kept across later ones.
 
 use e2e::{LocalNetwork, committed_doc, documented_calls, http_fetch, icp_cmd, setup_example};
@@ -63,4 +63,36 @@ fn uploaded_file_survives_deploys_only_while_preserved() {
     fs::remove_file(project.join("dist/_preserve")).unwrap();
     deploy(project);
     assert_eq!(http_fetch(project, ORIGINS).status(), StatusCode::NOT_FOUND);
+}
+
+/// Upload two files with the `upload_assets` call `docs/site-files.md`
+/// documents: both are served, and the batch replaces the file a single
+/// `upload_asset` wrote earlier.
+#[test]
+fn several_files_upload_in_one_call() {
+    let tmp = setup_example("static-site");
+    let project = tmp.path();
+    let _network = LocalNetwork::start(project);
+    deploy(project);
+
+    let doc = committed_doc("docs/site-files.md");
+    let single = documented_calls(&doc, &["upload_asset"]);
+    let batch = documented_calls(&doc, &["upload_assets"]);
+    assert_eq!(batch.len(), 1, "expected one documented upload_assets call");
+    for (method, args) in single.iter().chain(&batch) {
+        icp_cmd(project)
+            .args(["canister", "call", "frontend", method, args])
+            .assert()
+            .success();
+    }
+
+    let response = http_fetch(project, ORIGINS);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.text().unwrap(),
+        r#"{"alternativeOrigins":["https://example.com"]}"#
+    );
+    let response = http_fetch(project, "/uploads/banner.txt");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().unwrap(), "Back soon");
 }
