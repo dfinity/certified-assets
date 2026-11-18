@@ -234,7 +234,7 @@ type TokenInfo = record {
 // management but never relays a method call — so configuration that does not
 // arrive *with* the install cannot arrive. That makes this the mechanism behind
 // reinstalling a governed frontend in place (which every breaking series bump
-// requires pre-1.0, since a reinstall wipes state) and behind an SNS creating frontend
+// requires, since a reinstall wipes state) and behind an SNS creating frontend
 // for itself, governed from birth.
 type InitArgs = record {
   // The approver, as `set_governance` would set it. Absent leaves by-proposal
@@ -291,7 +291,8 @@ service: (opt InitArgs) -> {
   // state-upgradability between releases: while major is 0, a minor change is
   // breaking (reinstall + re-upload all state) and a patch-only change is
   // non-breaking (in-place upgrade preserves state); from 1.0.0 the major plays
-  // that role.
+  // that role. 0.4.x counts as part of the 1.x series, so it upgrades to 1.x in
+  // place.
   version: () -> (record { major: nat32; minor: nat32; patch: nat32 }) query;
 
   // ───────── HTTP gateway ─────────

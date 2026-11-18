@@ -266,7 +266,7 @@ fn a_rejected_proposal_is_cleared_by_discarding() {
 
 /// Reinstalling a governed frontend **in place**, which is what every breaking
 /// release of this canister will require of each SNS running one — a *series*
-/// bump reinstalls by design, and while the version is `0.x` that is a minor.
+/// bump reinstalls by design, and from `1.0.0` on that is a major.
 ///
 /// A reinstall wipes stable state, so the canister comes back unconfigured — and
 /// on an SNS that is terminal: root is the only controller and relays no method
