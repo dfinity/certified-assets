@@ -14,7 +14,8 @@ The compatibility contract is the one the release machinery already encodes — 
   (`1.0.0 → 1.1.0`, `1.0.0 → 1.0.1`) is a non-breaking, in-place `upgrade`:
   `post_upgrade` must recover state written by any earlier build in the same series.
   Don't land a stable-state shape change that a minor or patch release couldn't
-  deserialize.
+  deserialize. The `0.4.x` releases count as part of the `1.x` series (`1.0.0`
+  kept their stable state), so `1.x` must also recover state written by `0.4.x`.
 - **Breaking changes are allowed, but are a deliberate, disruptive event.** A *series*
   bump (a major: `1.x.y → 2.0.0`) reinstalls the canister and wipes its state;
   a fresh sync re-uploads every asset. That is the sanctioned mechanism for changing

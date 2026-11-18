@@ -28,6 +28,10 @@
 //!   reinstall), a **patch** bump is non-breaking (`0.1.0 → 0.1.1`, upgrade);
 //! - from `1.0.0` on: a **major** bump is breaking, minor/patch are non-breaking.
 //!
+//! One exception bridges the two: the `0.4` series belongs to series `1`.
+//! `1.0.0` was cut from `0.4.3` without touching stable state, so a `0.4.x`
+//! canister upgrades to any `1.x` in place, just as `1.0.0` would.
+//!
 //! Bumping is a deliberate human decision — the relevant axis is canister *state*
 //! upgradability, which a conventional-commit marker can't infer on its own.
 //!
@@ -107,9 +111,12 @@ impl Version {
     /// match; crossing a series boundary is breaking and requires a reinstall
     /// plus a full re-upload. Cargo's 0.x rule: pre-1.0 the minor is the breaking
     /// axis so the series is `(0, minor)`; from 1.0 the major alone is, so it's
-    /// `(major, 0)`.
+    /// `(major, 0)`. The `0.4` series is the exception: its stable state is
+    /// exactly what `1.0.0` shipped, so it belongs to series `(1, 0)`.
     pub const fn series(self) -> (u32, u32) {
-        if self.major == 0 {
+        if self.major == 0 && self.minor == 4 {
+            (1, 0)
+        } else if self.major == 0 {
             (0, self.minor)
         } else {
             (self.major, 0)
@@ -177,5 +184,17 @@ mod tests {
         // From 1.0: minor/patch are non-breaking, major is breaking.
         assert!(v(1, 0, 0).upgrade_compatible_with(v(1, 4, 2)));
         assert!(!v(1, 9, 0).upgrade_compatible_with(v(2, 0, 0)));
+    }
+
+    #[test]
+    fn the_0_4_series_upgrades_in_place_to_1x() {
+        // 1.0.0 kept 0.4's stable state, so 0.4.x joins series 1 ...
+        assert!(v(1, 0, 0).upgrade_compatible_with(v(0, 4, 0)));
+        assert!(v(1, 0, 0).upgrade_compatible_with(v(0, 4, 3)));
+        assert!(v(1, 7, 2).upgrade_compatible_with(v(0, 4, 3)));
+        // ... and stays out of every other series.
+        assert!(!v(1, 0, 0).upgrade_compatible_with(v(0, 3, 9)));
+        assert!(!v(0, 4, 3).upgrade_compatible_with(v(0, 3, 0)));
+        assert!(!v(2, 0, 0).upgrade_compatible_with(v(0, 4, 3)));
     }
 }

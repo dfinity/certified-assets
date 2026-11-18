@@ -69,8 +69,10 @@ releases keeps its state:
 | **Non-breaking** | minor or patch (`1.0.0 → 1.1.0`, `1.0.0 → 1.0.1`) | in-place `upgrade`; `post_upgrade` recovers all state |
 | **Breaking** | major (`1.x.y → 2.0.0`) | `reinstall`; state is wiped, a fresh sync re-uploads everything |
 
-(Before `1.0.0` it followed Cargo's 0.x rule: a minor bump was the breaking one,
-so `0.4.x → 1.0.0` is itself a breaking switch.) Choosing breaking vs
+(Before `1.0.0` it followed Cargo's 0.x rule: a minor bump was the breaking one.
+The last pre-1.0 series, `0.4.x`, is the exception: `1.0.0` keeps its stable-state
+layout, so `0.4.x` counts as part of the `1.x` series and `0.4.x → 1.x` is an
+in-place upgrade.) Choosing breaking vs
 non-breaking is a deliberate call — the axis is canister *state* upgradability —
 so bump it by hand:
 
