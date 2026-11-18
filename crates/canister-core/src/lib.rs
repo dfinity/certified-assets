@@ -148,37 +148,56 @@ pub async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteB
     state_hash.map(|hash| ByteBuf::from(hash.to_vec()))
 }
 
-/// Writes one asset outside a sync, and returns the canonical state hash
-/// recomputed over the result.
+/// Writes a group of assets outside a sync, all in one step, and returns the
+/// canonical state hash recomputed over the result.
 ///
-/// Discouraged: the asset is in no project's `dist/`, so the canister's hash no
-/// longer reproduces from source, and the next sync deletes it unless the
-/// project's `_preserve` names it. It exists for platforms that deploy a fixed
-/// bundle and must customize one file afterwards without a build step.
+/// Discouraged: the assets are in no project's `dist/`, so the canister's hash
+/// no longer reproduces from source, and the next sync deletes them unless the
+/// project's `_preserve` names them. It exists for platforms that deploy a fixed
+/// bundle and must customize a few files afterwards without a build step.
 ///
-/// Internally a one-asset sync — it takes the sync lock and runs a single final
-/// `execute_operations` call — so it certifies, re-certifies redirect rules and
-/// recomputes the hash exactly as a deploy does. See
-/// [`State::begin_upload_asset`] for when it is refused.
-pub async fn upload_asset(arg: UploadAssetArguments) -> ByteBuf {
+/// All or nothing: every asset is written in this call's first message, so a
+/// batch that is invalid, or too large to apply within one message's
+/// instruction limit, traps and leaves the canister exactly as it was. See
+/// [`State::apply_upload_operations`].
+///
+/// Internally a sync of just these assets — it takes the sync lock and runs a
+/// single final `execute_operations` call — so it certifies, re-certifies
+/// redirect rules and recomputes the hash exactly as a deploy does. See
+/// [`State::begin_upload_assets`] for when it is refused.
+pub async fn upload_assets(assets: Vec<UploadAssetArguments>) -> ByteBuf {
     let system_context = SystemContext::new();
     let caller = msg_caller();
 
-    let call = STATE.with_borrow_mut(|s| {
-        let call = s.begin_upload_asset(caller, arg, &system_context);
-        // As in `start_sync`: capture the env before any asset is certified, so
-        // an uploaded HTML asset carries the current `ic_env` cookie.
-        if call.is_ok() {
+    let (call, hashing) = STATE
+        .with_borrow_mut(|s| {
+            let call = s.begin_upload_assets(caller, assets, &system_context)?;
+            // As in `start_sync`: capture the env before any asset is certified,
+            // so an uploaded HTML asset carries the current `ic_env` cookie.
             s.capture_env_at_sync_start(&CanisterEnv::load());
+            let hashing = s.apply_upload_operations(&call, &system_context)?;
+            // Every asset is written: certify them before the first yield.
             certified_data_set(s.root_hash());
-        }
-        call
-    });
-    let call = call.unwrap_or_else(|msg| trap(&msg));
+            Ok((call, hashing))
+        })
+        .unwrap_or_else(|msg: String| trap(&msg));
 
-    execute_operations(call)
-        .await
-        .unwrap_or_else(|| trap("upload did not finalize"))
+    // Only the state-hash recompute is left, which changes nothing served, so
+    // it is safe to spread across messages.
+    let call_ref = &call;
+    let state_hash = loop_with_message_extension_from(hashing, |progress| {
+        STATE.with_borrow_mut(|s| s.execute_operations(call_ref, progress, &system_context))
+    })
+    .await
+    .unwrap_or_else(|msg| trap(&msg))
+    .unwrap_or_else(|| trap("upload did not finalize"));
+
+    ByteBuf::from(state_hash.to_vec())
+}
+
+/// Writes one asset outside a sync: [`upload_assets`] with a single entry.
+pub async fn upload_asset(arg: UploadAssetArguments) -> ByteBuf {
+    upload_assets(vec![arg]).await
 }
 
 pub fn get_asset_details(start_after: Option<String>) -> Vec<AssetDetails> {
@@ -578,13 +597,24 @@ pub fn post_upgrade() {
 
 /// Loops calling a state machine function until completion, periodically async-calling
 /// self to reset the instruction counter when needed.
-async fn loop_with_message_extension_until_completion<F, D, P, E>(mut compute_fn: F) -> Result<D, E>
+async fn loop_with_message_extension_until_completion<F, D, P, E>(compute_fn: F) -> Result<D, E>
 where
     F: FnMut(P) -> ComputationStatus<D, P, E>,
     P: Default,
 {
+    loop_with_message_extension_from(P::default(), compute_fn).await
+}
+
+/// [`loop_with_message_extension_until_completion`], resuming from `progress`
+/// rather than from the start.
+async fn loop_with_message_extension_from<F, D, P, E>(
+    mut progress: P,
+    mut compute_fn: F,
+) -> Result<D, E>
+where
+    F: FnMut(P) -> ComputationStatus<D, P, E>,
+{
     const INSTRUCTION_THRESHOLD: u64 = 35_000_000_000; // At the time of writing, 40b instructions are the limit for single message
-    let mut progress = P::default();
 
     loop {
         match compute_fn(progress) {

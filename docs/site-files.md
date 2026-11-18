@@ -64,7 +64,8 @@ A sync makes the canister match your directory: by default, any asset on the can
 that isn't in `dir` is deleted. Two pieces work together to change that for chosen
 files:
 
-- the `upload_asset` canister method writes a single file outside a deploy, and
+- the `upload_asset` canister method writes a single file outside a deploy
+  (`upload_assets` writes several), and
 - a `_preserve` file in `dir` stops later deploys from deleting it.
 
 ### Uploading a single file
@@ -89,6 +90,23 @@ canister's new state hash. Things to know:
   rejects it, since every content change there has to go through a vote.
 
 The next deploy deletes the file, unless `_preserve` names it.
+
+### Uploading several files at once
+
+`upload_assets` takes a list of the same records and writes them in one step:
+
+```bash
+icp canister call frontend upload_assets '(vec { record { key = "/.well-known/ii-alternative-origins"; content_type = "application/json"; headers = vec {}; content = blob "{\"alternativeOrigins\":[\"https://example.com\"]}" }; record { key = "/uploads/banner.txt"; content_type = "text/plain"; headers = vec {}; content = blob "Back soon" } })'
+```
+
+Everything above applies to each file, plus:
+
+- **All or nothing.** If any file is rejected, none are written. Visitors never see
+  some of the files updated and others not.
+- **One message for all of them.** The files have to fit in a single call together,
+  about 2 MB in total. A call with so many small files that the canister can't write
+  them in one step is rejected as a whole; split it into smaller calls.
+- **Each path once.** A call that lists the same path twice is rejected.
 
 ### Listing files in `_preserve`
 

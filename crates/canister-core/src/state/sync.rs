@@ -16,6 +16,7 @@ use crate::sync::{
 use candid::Principal;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use wire_types::{
     ChunkId, CreateAssetArguments, DeleteAssetArguments, Encoding, ExecuteOperationsArguments,
     MAX_CHUNK_SIZE, Operation, SessionId, SetAssetContentArguments, StartSyncResult,
@@ -136,11 +137,16 @@ impl State {
         StartSyncResult::Started { session_id }
     }
 
-    /// Opens a one-asset sync for the `upload_asset` endpoint and returns the
-    /// final `execute_operations` call that writes it. The caller drives that
-    /// call to completion exactly as it would a sync's own, so the write, the
-    /// redirect-rule re-certification and the state-hash recompute all go
-    /// through the one tested path rather than a second copy of it.
+    /// Opens a sync for the `upload_assets` endpoint (and `upload_asset`, its
+    /// one-asset form) and returns the final `execute_operations` call that
+    /// writes every asset in `assets`. The caller applies it with
+    /// [`Self::apply_upload_operations`] and then drives the state-hash
+    /// recompute to completion, so the writes, the redirect-rule
+    /// re-certification and the hash all go through the one tested
+    /// `execute_operations` path rather than a second copy of it.
+    ///
+    /// Every asset is validated before the lock is taken or a byte is staged,
+    /// so one bad entry refuses the whole upload.
     ///
     /// Stricter than [`Self::start_sync`] about who goes first: an upload never
     /// reclaims a live sync, not even the caller's own, since landing between a
@@ -152,43 +158,54 @@ impl State {
     /// a direct write would bypass the vote, and an asset that no build
     /// contains could never be reproduced anyway.
     ///
-    /// The content becomes the asset's identity encoding and nothing else: any
-    /// existing asset at `key` is deleted first, so stale compressed copies go
-    /// with it. Keeping no compressed encoding is also what keeps the
+    /// Each asset's content becomes its identity encoding and nothing else: any
+    /// existing asset at the same key is deleted first, so stale compressed
+    /// copies go with it. Keeping no compressed encoding is also what keeps the
     /// preparation canary truthful, since the canary vouches only for encodings
     /// a client's compressors produced.
-    pub fn begin_upload_asset(
+    pub fn begin_upload_assets(
         &mut self,
         owner: Principal,
-        arg: UploadAssetArguments,
+        assets: Vec<UploadAssetArguments>,
         system_context: &SystemContext,
     ) -> Result<ExecuteOperationsArguments, String> {
         if self.governance_enabled() {
             return Err(
-                "upload_asset is disabled in by-proposal mode: add the file to the \
-                 project and deploy it through a proposal"
+                "uploading assets directly is disabled in by-proposal mode: add the \
+                 files to the project and deploy them through a proposal"
                     .to_string(),
             );
         }
-        if !arg.key.starts_with('/') {
-            return Err(format!("asset key must start with '/': {:?}", arg.key));
-        }
-        // A 404/410 page is served only from a single chunk; a bigger one would
-        // silently give way to the built-in 404. A sync refuses the same.
-        if arg.content.len() > MAX_CHUNK_SIZE
-            && let Some(rule) = self
-                .store
-                .redirect_rules()
-                .iter()
-                .find(|r| matches!(r.status, 404 | 410) && r.to == arg.key)
-        {
-            return Err(format!(
-                "{} is served as a {} error page, which must fit in one chunk \
-                 ({MAX_CHUNK_SIZE} bytes), but this upload is {} bytes",
-                arg.key,
-                rule.status,
-                arg.content.len()
-            ));
+        let mut keys = BTreeSet::new();
+        for asset in &assets {
+            if !asset.key.starts_with('/') {
+                return Err(format!("asset key must start with '/': {:?}", asset.key));
+            }
+            // Two writes to one key in a single call have no meaningful order.
+            if !keys.insert(asset.key.as_str()) {
+                return Err(format!(
+                    "asset key is listed more than once: {:?}",
+                    asset.key
+                ));
+            }
+            // A 404/410 page is served only from a single chunk; a bigger one
+            // would silently give way to the built-in 404. A sync refuses the
+            // same.
+            if asset.content.len() > MAX_CHUNK_SIZE
+                && let Some(rule) = self
+                    .store
+                    .redirect_rules()
+                    .iter()
+                    .find(|r| matches!(r.status, 404 | 410) && r.to == asset.key)
+            {
+                return Err(format!(
+                    "{} is served as a {} error page, which must fit in one chunk \
+                     ({MAX_CHUNK_SIZE} bytes), but this upload is {} bytes",
+                    asset.key,
+                    rule.status,
+                    asset.content.len()
+                ));
+            }
         }
         if let Some(active) = &self.sync_session {
             let idle = system_context
@@ -214,12 +231,64 @@ impl State {
             }
         };
 
+        let mut operations = Vec::with_capacity(assets.len() * 3);
+        for asset in assets {
+            self.stage_uploaded_asset(asset, &mut operations);
+        }
+
+        Ok(ExecuteOperationsArguments {
+            session_id,
+            operations,
+            is_final: true,
+        })
+    }
+
+    /// Applies every operation of an upload's `call` (from
+    /// [`Self::begin_upload_assets`]) without yielding, and returns the progress
+    /// from which `execute_operations` resumes: the state-hash recompute.
+    ///
+    /// This is what makes an upload all or nothing. A sync's driver yields to a
+    /// self-call between operations when the instruction budget runs low, which
+    /// commits the operations applied so far: visitors can see half of them,
+    /// and a later failure can't undo them. A sync accepts that, since it is
+    /// resumable; an upload must not. So its operations all run in the message
+    /// that opened it: if they fail, or don't fit in one message's instruction
+    /// limit, the caller traps and the whole message rolls back, the lock
+    /// included. Only the hashing that follows, which changes nothing a visitor
+    /// sees, is left to the yielding driver.
+    pub fn apply_upload_operations(
+        &mut self,
+        call: &ExecuteOperationsArguments,
+        system_context: &SystemContext,
+    ) -> Result<ExecuteOperationsProgress, String> {
+        let mut progress = ExecuteOperationsProgress::Starting;
+        loop {
+            match self.execute_operations(call, progress, system_context) {
+                ComputationStatus::InProgress(
+                    hashing @ ExecuteOperationsProgress::HashingState { .. },
+                ) => return Ok(hashing),
+                ComputationStatus::InProgress(next) => progress = next,
+                // An upload's call is final, so it never completes before the
+                // hashing phase.
+                ComputationStatus::Done(_) => return Err("upload did not finalize".to_string()),
+                ComputationStatus::Error(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Stages one uploaded asset's content as chunks of the open sync and
+    /// appends the operations that replace whatever is at its key with it.
+    fn stage_uploaded_asset(
+        &mut self,
+        asset: UploadAssetArguments,
+        operations: &mut Vec<Operation>,
+    ) {
         let UploadAssetArguments {
             key,
             content_type,
             headers,
             content,
-        } = arg;
+        } = asset;
         // Hashed here rather than trusted: unlike a sync, no client prepared
         // these bytes, and hashing a single ingress message is cheap.
         let sha256 = Sha256::digest(&content).to_vec();
@@ -251,7 +320,6 @@ impl State {
             })
             .collect();
 
-        let mut operations = Vec::with_capacity(3);
         if self.effective_contains_asset(&key) {
             operations.push(Operation::DeleteAsset(DeleteAssetArguments {
                 key: key.clone(),
@@ -269,12 +337,6 @@ impl State {
             sha256: ByteBuf::from(sha256),
             chunk_sha256,
         }));
-
-        Ok(ExecuteOperationsArguments {
-            session_id,
-            operations,
-            is_final: true,
-        })
     }
 
     /// Checks that `session_id` still names the active sync and that the sync is
