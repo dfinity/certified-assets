@@ -3,7 +3,9 @@ use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
 use crate::state::State;
-use crate::sync::{ComputationStatus, ExecuteOperationsProgress, SYNC_IDLE_TIMEOUT_NANOS};
+use crate::sync::{
+    ComputationStatus, ExecuteOperationsProgress, MaintenanceProgress, SYNC_IDLE_TIMEOUT_NANOS,
+};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use candid::Principal;
 use ic_certification_testing::CertificateBuilder;
@@ -423,6 +425,41 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
         rules,
     })];
     execute_all(state, session_id, ops, &system_context);
+}
+
+/// Drives a maintenance job (a protection toggle or env refresh) the way the
+/// canister does, without yielding.
+fn run_maintenance(state: &mut State, session: Result<SessionId, String>) {
+    let session_id = session.expect("maintenance job refused");
+    run_computation_until_completion(|progress| {
+        state.maintenance_step(session_id, progress, &mock_system_context())
+    })
+    .unwrap();
+}
+
+fn enable_protection(state: &mut State, login_page: &str) {
+    let session =
+        state.enable_protection(some_principal(), login_page.into(), &mock_system_context());
+    run_maintenance(state, session);
+}
+
+fn disable_protection(state: &mut State) {
+    let session = state.disable_protection(some_principal(), &mock_system_context());
+    run_maintenance(state, session);
+}
+
+fn refresh_env(state: &mut State, env: &crate::runtime::CanisterEnv) {
+    let session = state.refresh_env(some_principal(), env, &mock_system_context());
+    run_maintenance(state, session);
+}
+
+/// A sync that captures `env` at its start, as the canister's `start_sync`
+/// does, and changes nothing else.
+fn capture_env_in_sync(state: &mut State, env: &crate::runtime::CanisterEnv) {
+    let ctx = mock_system_context();
+    let session_id = start_session(state, &ctx);
+    state.capture_env_at_sync_start(env);
+    execute_all(state, session_id, vec![], &ctx);
 }
 
 mod sync {
@@ -3941,7 +3978,10 @@ mod env_cookie {
             &ctx,
             vec![html_asset("/page.html", b"<html></html>")],
         );
-        state.refresh_env(&env_with(&[("PUBLIC_API_URL", "https://example.com")]));
+        refresh_env(
+            &mut state,
+            &env_with(&[("PUBLIC_API_URL", "https://example.com")]),
+        );
 
         // `certified_http_request` panics unless the witness verifies — so it
         // passing *is* the assertion that the cookie is certified.
@@ -3976,7 +4016,7 @@ mod env_cookie {
                     .with_encoding("identity", vec![b"\x89PNG".as_ref()]),
             ],
         );
-        state.refresh_env(&env_with(&[("PUBLIC_X", "1")]));
+        refresh_env(&mut state, &env_with(&[("PUBLIC_X", "1")]));
 
         for path in ["/app.js", "/style.css", "/logo.png"] {
             let resp = certified_http_request(&state, RequestBuilder::get(path).build());
@@ -3995,7 +4035,7 @@ mod env_cookie {
         const INDEX: &[u8] = b"<!DOCTYPE html><html>index</html>";
         create_assets(&mut state, &ctx, vec![html_asset("/index.html", INDEX)]);
         set_root_spa_rule(&mut state, "/index.html");
-        state.refresh_env(&env_with(&[("PUBLIC_X", "1")]));
+        refresh_env(&mut state, &env_with(&[("PUBLIC_X", "1")]));
 
         // `/` is served by the 200-rewrite alias to /index.html — the common SPA
         // entry point, which is not a direct asset hit.
@@ -4037,7 +4077,7 @@ mod env_cookie {
                 ("DATABASE_URL".to_string(), "postgres://nope".to_string()),
             ],
         );
-        state.refresh_env(&env);
+        refresh_env(&mut state, &env);
 
         let resp = certified_http_request(&state, RequestBuilder::get("/index.html").build());
         let cookie = all_headers(&resp, "set-cookie")[0];
@@ -4089,14 +4129,14 @@ mod env_cookie {
             ],
         );
 
-        state.refresh_env(&env_with(&[("PUBLIC_X", "one")]));
+        refresh_env(&mut state, &env_with(&[("PUBLIC_X", "one")]));
         let html1 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         let cookie1 = all_headers(&html1, "set-cookie")[0].to_string();
         let js1 = certified_http_request(&state, RequestBuilder::get("/app.js").build());
         assert!(all_headers(&js1, "set-cookie").is_empty());
 
         // A second snapshot swaps the value; the new cookie is certified.
-        state.refresh_env(&env_with(&[("PUBLIC_X", "two")]));
+        refresh_env(&mut state, &env_with(&[("PUBLIC_X", "two")]));
         let html2 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         let cookie2 = all_headers(&html2, "set-cookie")[0].to_string();
         assert_ne!(cookie1, cookie2);
@@ -4133,7 +4173,7 @@ mod env_cookie {
                     .with_header("Set-Cookie", "session=xyz; Path=/"),
             ],
         );
-        state.refresh_env(&env_with(&[("PUBLIC_X", "1")]));
+        refresh_env(&mut state, &env_with(&[("PUBLIC_X", "1")]));
 
         // Passing certification proves the gateway/`ic-certification` accepts a
         // `set-cookie` listed twice in the certificate expression.
@@ -4155,7 +4195,7 @@ mod env_cookie {
         const INDEX: &[u8] = b"<!DOCTYPE html><html>index</html>";
         create_assets(&mut state, &ctx, vec![html_asset("/index.html", INDEX)]);
         let env = env_with(&[("PUBLIC_X", "kept")]);
-        state.refresh_env(&env);
+        refresh_env(&mut state, &env);
 
         let before = certified_http_request(&state, RequestBuilder::get("/index.html").build());
         let cookie_before = all_headers(&before, "set-cookie")[0].to_string();
@@ -4186,7 +4226,7 @@ mod env_cookie {
         );
 
         // First capture (was `None`): the cookie is published and certified.
-        state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "one")]));
+        capture_env_in_sync(&mut state, &env_with(&[("PUBLIC_X", "one")]));
         let r1 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         let cookie1 = all_headers(&r1, "set-cookie")[0].to_string();
         assert!(
@@ -4197,13 +4237,13 @@ mod env_cookie {
         );
 
         // Capturing the *same* env again is a no-op: still certified, unchanged.
-        state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "one")]));
+        capture_env_in_sync(&mut state, &env_with(&[("PUBLIC_X", "one")]));
         let r2 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         assert_eq!(all_headers(&r2, "set-cookie")[0], cookie1);
 
         // A *changed* env re-certifies the (untouched) asset: it now serves and
         // certifies the new cookie, and the old value no longer verifies.
-        state.capture_env_at_sync_start(&env_with(&[("PUBLIC_X", "two")]));
+        capture_env_in_sync(&mut state, &env_with(&[("PUBLIC_X", "two")]));
         let r3 = certified_http_request(&state, RequestBuilder::get("/page.html").build());
         let cookie3 = all_headers(&r3, "set-cookie")[0].to_string();
         assert_ne!(cookie1, cookie3);
@@ -4265,7 +4305,7 @@ mod access_protection {
                 html_asset(LOGIN_PAGE, LOGIN),
             ],
         );
-        state.enable_protection(LOGIN_PAGE.into());
+        enable_protection(&mut state, LOGIN_PAGE);
         state
             .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
             .unwrap();
@@ -4412,7 +4452,7 @@ mod access_protection {
                 html_asset(LOGIN_PAGE, LOGIN),
             ],
         );
-        state.enable_protection(LOGIN_PAGE.into());
+        enable_protection(&mut state, LOGIN_PAGE);
         state
             .issue_token("secret".into(), "owner".into(), 1, TEST_NOW)
             .unwrap();
@@ -4475,7 +4515,7 @@ mod access_protection {
             ],
         );
         set_root_spa_rule(&mut state, "/index.html");
-        state.enable_protection(LOGIN_PAGE.into());
+        enable_protection(&mut state, LOGIN_PAGE);
         state
             .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
             .unwrap();
@@ -4512,7 +4552,7 @@ mod access_protection {
             ],
         );
         set_exact_rewrite_rule(&mut state, "/", "/index.html");
-        state.enable_protection(LOGIN_PAGE.into());
+        enable_protection(&mut state, LOGIN_PAGE);
         state
             .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
             .unwrap();
@@ -4542,7 +4582,7 @@ mod access_protection {
         let ctx = mock_system_context();
 
         // Enable on an empty canister (the secure ordering): degraded until synced.
-        state.enable_protection(LOGIN_PAGE.into());
+        enable_protection(&mut state, LOGIN_PAGE);
         assert_eq!(
             state.check_protection_status(),
             ProtectionStatus::EnabledLoginPageMissing {
@@ -4593,7 +4633,7 @@ mod access_protection {
     #[test]
     fn disable_returns_to_public() {
         let mut state = protected_state();
-        state.disable_protection();
+        disable_protection(&mut state);
         assert_eq!(state.check_protection_status(), ProtectionStatus::Disabled);
         let r = certified_http_request(&state, RequestBuilder::get("/index.html").build());
         assert_eq!(r.status_code, 200);
@@ -4614,7 +4654,7 @@ mod access_protection {
                 html_asset(LOGIN_PAGE, LOGIN),
             ],
         );
-        state.enable_protection(LOGIN_PAGE.into());
+        enable_protection(&mut state, LOGIN_PAGE);
         state
             .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
             .unwrap();
@@ -4704,7 +4744,7 @@ mod access_protection {
         let mut state = State::default();
         let ctx = mock_system_context();
         create_assets(&mut state, &ctx, vec![html_asset(LOGIN_PAGE, LOGIN)]);
-        state.enable_protection(LOGIN_PAGE.into());
+        enable_protection(&mut state, LOGIN_PAGE);
         state
             .issue_token("old".into(), "old".into(), 1, TEST_NOW)
             .unwrap();
@@ -5758,5 +5798,480 @@ mod upload_asset {
         assert_eq!(hash, before);
         assert_eq!(body_of(&state, "/index.html").as_deref(), Some(&b"hi"[..]));
         start_session(&mut state, &ctx);
+    }
+}
+
+/// The sync path certifies redirect rules at the end of each `execute_operations`
+/// call, staged one rule per step and limited to the rules the call made stale.
+/// A site with thousands of HTML pages synthesises thousands of rules, whose
+/// certification can't fit in one message, so neither replacing the rule list
+/// nor changing a single asset may rebuild every rule in one step.
+mod rule_rebuild {
+    use super::*;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
+
+    /// Runs one `execute_operations` call to completion and returns how many of
+    /// its steps were spent rebuilding redirect rules.
+    fn run_counting_rule_steps(
+        state: &mut State,
+        session_id: SessionId,
+        operations: Vec<Operation>,
+        is_final: bool,
+    ) -> usize {
+        let ctx = mock_system_context();
+        let args = ExecuteOperationsArguments {
+            session_id,
+            operations,
+            is_final,
+        };
+        let mut rule_steps = 0;
+        let mut progress = ExecuteOperationsProgress::Starting;
+        loop {
+            if matches!(progress, ExecuteOperationsProgress::Recertifying { .. }) {
+                rule_steps += 1;
+            }
+            match state.execute_operations(&args, progress, &ctx) {
+                ComputationStatus::Done(_) => return rule_steps,
+                ComputationStatus::InProgress(p) => progress = p,
+                ComputationStatus::Error(e) => panic!("execute_operations failed: {e}"),
+            }
+        }
+    }
+
+    fn page(i: usize) -> String {
+        format!("/page{i}.html")
+    }
+
+    /// `n` HTML pages plus, per page, a `200` rewrite from its clean URL and a
+    /// `307` from its `.html` form — the shape `html_handling` synthesises.
+    fn seed_pages(state: &mut State, n: usize) {
+        let ctx = mock_system_context();
+        create_assets(
+            state,
+            &ctx,
+            (0..n)
+                .map(|i| {
+                    AssetBuilder::new(page(i), "text/html")
+                        .with_encoding("identity", vec![format!("page {i}")])
+                })
+                .collect(),
+        );
+        let rules = (0..n)
+            .flat_map(|i| {
+                [
+                    RedirectRule {
+                        from: RulePattern::Exact(format!("/page{i}")),
+                        to: page(i),
+                        status: 200,
+                        headers: vec![],
+                    },
+                    RedirectRule {
+                        from: RulePattern::Exact(format!("/page{i}/")),
+                        to: format!("/page{i}"),
+                        status: 307,
+                        headers: vec![],
+                    },
+                ]
+            })
+            .collect();
+        let session_id = start_session(state, &ctx);
+        let steps = run_counting_rule_steps(
+            state,
+            session_id,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules,
+            })],
+            true,
+        );
+        // Every one of the 2n rules is built in a step of its own.
+        assert!(
+            steps > 2 * n,
+            "replacing {} rules took only {steps} rebuild steps",
+            2 * n
+        );
+    }
+
+    fn assert_page_served(state: &State, i: usize, body: &str) {
+        let r = certified_http_request(state, RequestBuilder::get(format!("/page{i}")).build());
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body.as_ref(), body.as_bytes());
+        let r = certified_http_request(state, RequestBuilder::get(format!("/page{i}/")).build());
+        assert_eq!(r.status_code, 307);
+    }
+
+    #[test]
+    fn replacing_the_rules_certifies_them_one_per_step() {
+        let mut state = State::default();
+        seed_pages(&mut state, 20);
+        for i in 0..20 {
+            assert_page_served(&state, i, &format!("page {i}"));
+        }
+    }
+
+    #[test]
+    fn an_asset_change_rebuilds_only_the_rules_depending_on_it() {
+        const N: usize = 50;
+        let mut state = State::default();
+        seed_pages(&mut state, N);
+
+        // Re-upload one page: only its own `200` rewrite depends on it.
+        let ctx = mock_system_context();
+        let session_id = start_session(&mut state, &ctx);
+        let ops = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new(page(7), "text/html")
+                    .with_encoding("identity", vec!["page 7, edited"]),
+            ],
+            session_id,
+        );
+        let steps = run_counting_rule_steps(&mut state, session_id, ops, true);
+        assert!(
+            steps < 10,
+            "changing one page rebuilt {steps} rule steps (of {} rules)",
+            2 * N
+        );
+
+        assert_page_served(&state, 7, "page 7, edited");
+        for i in [0, 6, 8, N - 1] {
+            assert_page_served(&state, i, &format!("page {i}"));
+        }
+    }
+
+    #[test]
+    fn a_call_touching_no_rule_dependency_rebuilds_nothing() {
+        let mut state = State::default();
+        seed_pages(&mut state, 10);
+
+        let ctx = mock_system_context();
+        let session_id = start_session(&mut state, &ctx);
+        let ops = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/style.css", "text/css").with_encoding("identity", vec!["a{}"]),
+            ],
+            session_id,
+        );
+        assert_eq!(
+            run_counting_rule_steps(&mut state, session_id, ops, true),
+            0
+        );
+        assert_page_served(&state, 3, "page 3");
+    }
+
+    #[test]
+    fn an_asset_created_at_a_rule_source_shadows_it_and_deleting_it_restores_it() {
+        let mut state = State::default();
+        seed_pages(&mut state, 5);
+        let ctx = mock_system_context();
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/page2", "text/plain").with_encoding("identity", vec!["raw"])],
+        );
+        let r = certified_http_request(&state, RequestBuilder::get("/page2").build());
+        assert_eq!(r.body.as_ref(), b"raw");
+
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::DeleteAsset(DeleteAssetArguments {
+                key: "/page2".into(),
+            })],
+            &ctx,
+        );
+        assert_page_served(&state, 2, "page 2");
+    }
+
+    #[test]
+    fn deleting_the_root_rule_target_restores_the_builtin_404() {
+        // A root `/*` rule shares `<*>` with the built-in 404, so a targeted
+        // rebuild of it must hand the slot back when the rule goes inert, and
+        // take it again when the target returns.
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec!["spa"]),
+            ],
+        );
+        set_root_spa_rule(&mut state, "/index.html");
+        let r = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(r.body.as_ref(), b"spa");
+
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::DeleteAsset(DeleteAssetArguments {
+                key: "/index.html".into(),
+            })],
+            &ctx,
+        );
+        let r = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(r.status_code, 404);
+        assert_eq!(r.body.as_ref(), b"not found");
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html")
+                    .with_encoding("identity", vec!["spa 2"]),
+            ],
+        );
+        let r = certified_http_request(&state, RequestBuilder::get("/missing").build());
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body.as_ref(), b"spa 2");
+    }
+
+    #[test]
+    fn an_interrupted_rebuild_is_redone_in_full_by_the_next_call() {
+        const N: usize = 10;
+        let mut state = State::default();
+        seed_pages(&mut state, N);
+        let ctx = mock_system_context();
+
+        // Re-upload a few pages, then abandon the call a few steps into the
+        // (targeted) rule rebuild that follows: their rules' old leaves are
+        // gone and the new ones not yet certified.
+        let session_id = start_session(&mut state, &ctx);
+        let operations = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &ctx,
+            (0..4)
+                .map(|i| {
+                    AssetBuilder::new(page(i), "text/html")
+                        .with_encoding("identity", vec![format!("page {i}, edited")])
+                })
+                .collect(),
+            session_id,
+        );
+        let args = ExecuteOperationsArguments {
+            session_id,
+            operations,
+            is_final: true,
+        };
+        let mut progress = ExecuteOperationsProgress::Starting;
+        let mut rule_steps = 0;
+        while rule_steps < 5 {
+            if matches!(progress, ExecuteOperationsProgress::Recertifying { .. }) {
+                rule_steps += 1;
+            }
+            progress = match state.execute_operations(&args, progress, &ctx) {
+                ComputationStatus::InProgress(p) => p,
+                other => panic!("expected the rebuild to still be running, got {other:?}"),
+            };
+        }
+
+        // The owner reclaims and finishes with a call that touches nothing a
+        // rule depends on; it must still repair the rules left half-built.
+        let session_id = start_session(&mut state, &ctx);
+        assert!(run_counting_rule_steps(&mut state, session_id, vec![], true) > 2 * N);
+        for i in 0..N {
+            let body = if i < 4 {
+                format!("page {i}, edited")
+            } else {
+                format!("page {i}")
+            };
+            assert_page_served(&state, i, &body);
+        }
+    }
+}
+
+/// Protection toggles and `refresh_env` re-certify every asset and rule, staged
+/// across messages under the sync lock, so a large site can toggle at all.
+mod maintenance {
+    use super::*;
+    use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
+
+    const LOGIN_PAGE: &str = "/login.html";
+
+    /// `n` HTML pages, a login page, and a `200` rewrite per page.
+    fn site(n: usize) -> State {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        let mut assets: Vec<AssetBuilder> = (0..n)
+            .map(|i| {
+                AssetBuilder::new(format!("/page{i}.html"), "text/html")
+                    .with_encoding("identity", vec![format!("page {i}")])
+            })
+            .collect();
+        assets.push(
+            AssetBuilder::new(LOGIN_PAGE, "text/html").with_encoding("identity", vec!["login"]),
+        );
+        create_assets(&mut state, &ctx, assets);
+        let rules = (0..n)
+            .map(|i| RedirectRule {
+                from: RulePattern::Exact(format!("/page{i}")),
+                to: format!("/page{i}.html"),
+                status: 200,
+                headers: vec![],
+            })
+            .collect();
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules,
+            })],
+            &ctx,
+        );
+        state
+    }
+
+    /// Runs a maintenance job, returning how many steps it took.
+    fn count_steps(state: &mut State, session: Result<SessionId, String>) -> usize {
+        let session_id = session.expect("maintenance job refused");
+        let mut steps = 0;
+        let mut progress = MaintenanceProgress::Starting;
+        loop {
+            steps += 1;
+            match state.maintenance_step(session_id, progress, &mock_system_context()) {
+                ComputationStatus::Done(()) => return steps,
+                ComputationStatus::InProgress(p) => progress = p,
+                ComputationStatus::Error(e) => panic!("maintenance failed: {e}"),
+            }
+        }
+    }
+
+    fn assert_protected(state: &State, i: usize) {
+        for url in [format!("/page{i}.html"), format!("/page{i}")] {
+            let r = certified_http_request(state, RequestBuilder::get(url).build());
+            assert_eq!(r.status_code, 307);
+            assert_eq!(lookup_header(&r, "location"), Some(LOGIN_PAGE));
+        }
+    }
+
+    fn assert_public(state: &State, i: usize) {
+        for url in [format!("/page{i}.html"), format!("/page{i}")] {
+            let r = certified_http_request(state, RequestBuilder::get(url).build());
+            assert_eq!(r.status_code, 200);
+            assert_eq!(r.body.as_ref(), format!("page {i}").as_bytes());
+        }
+    }
+
+    #[test]
+    fn toggling_protection_recertifies_one_asset_or_rule_per_step() {
+        const N: usize = 20;
+        let mut state = site(N);
+
+        let session =
+            state.enable_protection(some_principal(), LOGIN_PAGE.into(), &mock_system_context());
+        let steps = count_steps(&mut state, session);
+        // Every one of the N + 1 assets, then every one of the N rules.
+        assert!(steps > 2 * N, "enabling protection took only {steps} steps");
+        for i in [0, N / 2, N - 1] {
+            assert_protected(&state, i);
+        }
+
+        let session = state.disable_protection(some_principal(), &mock_system_context());
+        assert!(count_steps(&mut state, session) > 2 * N);
+        for i in [0, N / 2, N - 1] {
+            assert_public(&state, i);
+        }
+    }
+
+    #[test]
+    fn refresh_env_recertifies_one_asset_or_rule_per_step() {
+        const N: usize = 20;
+        let mut state = site(N);
+        let env = crate::runtime::CanisterEnv {
+            root_key: vec![1, 2, 3],
+            public_vars: [("PUBLIC_X".to_string(), "1".to_string())].into(),
+        };
+        let session = state.refresh_env(some_principal(), &env, &mock_system_context());
+        assert!(count_steps(&mut state, session) > 2 * N);
+        // Through a rule, and an HTML asset no rule points at.
+        for url in ["/page3", LOGIN_PAGE] {
+            let r = certified_http_request(&state, RequestBuilder::get(url).build());
+            assert!(lookup_header(&r, "set-cookie").is_some_and(|c| c.starts_with("ic_env=")));
+        }
+    }
+
+    #[test]
+    fn a_toggle_is_refused_while_a_sync_is_in_progress() {
+        let mut state = site(2);
+        let ctx = mock_system_context();
+        start_session(&mut state, &ctx);
+        let err = state
+            .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
+            .unwrap_err();
+        assert!(err.contains("in progress"), "got: {err}");
+        let env = crate::runtime::CanisterEnv {
+            root_key: vec![1, 2, 3],
+            public_vars: Default::default(),
+        };
+        assert!(state.refresh_env(some_principal(), &env, &ctx).is_err());
+        // Nothing changed.
+        assert_eq!(state.check_protection_status(), ProtectionStatus::Disabled);
+    }
+
+    #[test]
+    fn a_sync_is_refused_while_a_toggle_is_in_progress() {
+        let mut state = site(2);
+        let ctx = mock_system_context();
+        let session_id = state
+            .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
+            .unwrap();
+        // Not even the job's own caller may start a sync until it finishes.
+        assert!(matches!(
+            state.start_sync(some_principal(), &ctx),
+            StartSyncResult::Busy { .. }
+        ));
+        assert!(state.disable_protection(some_principal(), &ctx).is_err());
+
+        run_maintenance(&mut state, Ok(session_id));
+        start_session(&mut state, &ctx);
+    }
+
+    #[test]
+    fn an_interrupted_toggle_is_finished_by_the_next_sync() {
+        const N: usize = 10;
+        let mut state = site(N);
+        let ctx = mock_system_context();
+        let session_id = state
+            .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
+            .unwrap();
+        // Die a few assets in.
+        let mut progress = MaintenanceProgress::Starting;
+        for _ in 0..4 {
+            progress = match state.maintenance_step(session_id, progress, &ctx) {
+                ComputationStatus::InProgress(p) => p,
+                other => panic!("expected the job to still be running, got {other:?}"),
+            };
+        }
+
+        // Issuing a token would publish the half-certified tree.
+        assert!(!state.certification_complete());
+        let err = state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap_err();
+        assert!(err.contains("still being applied"), "got: {err}");
+
+        // Once the lock goes stale, a sync takes it over and finishes the job.
+        let later = SystemContext {
+            current_timestamp_ns: TEST_NOW + SYNC_IDLE_TIMEOUT_NANOS,
+        };
+        let session_id = match state.start_sync(Principal::anonymous(), &later) {
+            StartSyncResult::Started { session_id } => session_id,
+            other => panic!("expected the stale lock to be reclaimed, got {other:?}"),
+        };
+        execute_all(&mut state, session_id, vec![], &later);
+        assert!(state.certification_complete());
+        for i in 0..N {
+            assert_protected(&state, i);
+        }
+        state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
     }
 }

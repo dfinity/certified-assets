@@ -33,6 +33,8 @@
 //! - [`sync`] — start/upload/execute sync orchestration (the `impl State` half of
 //!   the sync domain; its data types live in [`crate::sync`])
 //! - [`protection`] — access protection (the "private app" feature)
+//! - [`maintenance`] — the staged, lock-holding re-certification behind the
+//!   protection toggles and `refresh_env`
 //! - [`upgrade`] — rebuilding all derived heap state after an upgrade
 //!
 //! Because all of them are submodules here, `State`'s owned pieces
@@ -51,6 +53,7 @@ mod assets;
 mod env;
 mod governance;
 mod hashing;
+mod maintenance;
 mod protection;
 mod rules;
 mod serving;

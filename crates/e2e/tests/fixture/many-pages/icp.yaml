@@ -1,0 +1,21 @@
+# Fixture for tests/many_pages.rs. The test generates its `dist/` of many HTML
+# pages at run time, so nothing else is committed here.
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: frontend
+    build:
+      steps:
+        - type: pre-built
+          path: ../../dist/canister.wasm
+
+    sync:
+      steps:
+        - type: plugin
+          path: ../../dist/plugin.wasm
+          dirs:
+            - dist

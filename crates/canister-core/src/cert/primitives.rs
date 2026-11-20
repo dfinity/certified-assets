@@ -117,7 +117,7 @@ impl AssetPath {
 
 /// AssetPath that is ready to be inserted into asset_hashes.
 /// E.g. `["http_expr", "foo", "index.html", "<$>", "<expr_hash>", "<request hash>", "<response_hash>"]`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HashTreePath(pub Vec<NestedTreeKey>);
 
 impl From<Vec<NestedTreeKey>> for HashTreePath {
@@ -176,7 +176,7 @@ impl HashTreePath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NestedTreeKey {
     String(String),
     Bytes(Vec<u8>),
