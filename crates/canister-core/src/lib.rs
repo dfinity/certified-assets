@@ -21,6 +21,7 @@ use crate::{
 use candid::Principal;
 use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, time, trap};
 use std::cell::RefCell;
+use wire_types::SessionId;
 
 pub use governance::ProposedState;
 pub use http::{HttpRequest, HttpResponse};
@@ -104,12 +105,13 @@ pub fn start_sync() -> StartSyncResult {
         let result = s.start_sync(caller, &system_context);
         // Capture the env once, at sync start, so every asset (re)certified by
         // the operations that follow already carries the current `ic_env`
-        // cookie — no separate re-cert pass once the sync completes. Env vars
-        // aren't expected to change mid-sync; `refresh_env` publishes an
-        // env-only change without a sync. Only on a real start (not `Busy`).
+        // cookie. If it changed, the assets the sync doesn't touch are marked
+        // stale and re-certified by its `execute_operations` (which publishes
+        // `certified_data`), so nothing here changes the tree. Env vars aren't
+        // expected to change mid-sync; `refresh_env` publishes an env-only
+        // change without a sync. Only on a real start (not `Busy`).
         if matches!(result, StartSyncResult::Started { .. }) {
             s.capture_env_at_sync_start(&CanisterEnv::load());
-            certified_data_set(s.root_hash());
         }
         result
     })
@@ -253,20 +255,40 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
 
 /// Turns access protection on with `login_page` as the exempt login surface.
 /// Controller-guarded at the endpoint. Idempotent at the same page; see
-/// [`State::enable_protection`].
-pub fn enable_protection(login_page: String) {
-    STATE.with_borrow_mut(|s| {
-        s.enable_protection(login_page);
-        certified_data_set(s.root_hash());
-    })
+/// [`State::enable_protection`]. Re-certifies every asset and rule, staged
+/// across messages; refused while a sync is in progress.
+pub async fn enable_protection(login_page: String) {
+    let caller = msg_caller();
+    let session_id = STATE
+        .with_borrow_mut(|s| s.enable_protection(caller, login_page, &SystemContext::new()))
+        .unwrap_or_else(|msg| trap(&msg));
+    run_maintenance(session_id).await;
 }
 
 /// Turns access protection off and drops all tokens. Controller-guarded.
-pub fn disable_protection() {
-    STATE.with_borrow_mut(|s| {
-        s.disable_protection();
-        certified_data_set(s.root_hash());
+/// Staged like [`enable_protection`].
+pub async fn disable_protection() {
+    let caller = msg_caller();
+    let session_id = STATE
+        .with_borrow_mut(|s| s.disable_protection(caller, &SystemContext::new()))
+        .unwrap_or_else(|msg| trap(&msg));
+    run_maintenance(session_id).await;
+}
+
+/// Drives a maintenance job (see [`State::maintenance_step`]) to completion,
+/// yielding between steps when the instruction budget runs low, then publishes
+/// the re-certified tree. A trap partway leaves the work marked stale for the
+/// next job or sync to finish, and `certified_data` unpublished meanwhile.
+async fn run_maintenance(session_id: SessionId) {
+    loop_with_message_extension_until_completion(|progress| {
+        // Fresh per step: each step touches the lock with the current time, so
+        // a long job never looks idle.
+        let system_context = SystemContext::new();
+        STATE.with_borrow_mut(|s| s.maintenance_step(session_id, progress, &system_context))
     })
+    .await
+    .unwrap_or_else(|msg| trap(&msg));
+    STATE.with_borrow(|s| certified_data_set(s.root_hash()));
 }
 
 /// Issues an access token and returns its plaintext value (shown once). With
@@ -299,7 +321,9 @@ pub async fn issue_token(args: IssueTokenArgs) -> String {
 pub fn revoke_token(label: String) {
     STATE.with_borrow_mut(|s| {
         s.revoke_token(&label);
-        certified_data_set(s.root_hash());
+        if s.certification_complete() {
+            certified_data_set(s.root_hash());
+        }
     })
 }
 
@@ -515,12 +539,16 @@ pub fn guard_is_controller() -> Result<(), String> {
 /// and the redirect-rule entries (a 200-rewrite to an HTML asset borrows it).
 /// Controller-guarded at the endpoint; icp-cli calls this during deploy once the
 /// `PUBLIC_*` env vars are set.
-pub fn refresh_env() {
+///
+/// Re-certification is staged across messages like the protection toggles, and
+/// refused while a sync is in progress (a sync captures the env itself).
+pub async fn refresh_env() {
     let env = CanisterEnv::load(); // replicated context — system API is readable
-    STATE.with_borrow_mut(|s| {
-        s.refresh_env(&env);
-        certified_data_set(s.root_hash());
-    });
+    let caller = msg_caller();
+    let session_id = STATE
+        .with_borrow_mut(|s| s.refresh_env(caller, &env, &SystemContext::new()))
+        .unwrap_or_else(|msg| trap(&msg));
+    run_maintenance(session_id).await;
 }
 
 /// Applies the install argument to a freshly installed canister.

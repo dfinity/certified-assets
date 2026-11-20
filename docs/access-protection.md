@@ -42,6 +42,11 @@ That's it: `https://<canister-id>.icp.net/` now redirects strangers to
 > canister, *then* syncing, means there is never a window where your assets are
 > world-readable. Enabling on an already-public app necessarily had a public period.
 
+Turning the gate on or off re-certifies every page, so it waits for deploys: the call
+is rejected while a deploy is in progress, and a deploy started meanwhile waits for it.
+On a large site it takes a few seconds, during which pages fail verification
+instead of being served without the gate.
+
 ## Managing tokens
 
 | Method | Call | Effect |

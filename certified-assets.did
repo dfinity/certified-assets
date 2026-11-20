@@ -418,7 +418,8 @@ service: (opt InitArgs) -> {
   // callers as a sync (authorized syncers and controllers). The env is also
   // captured automatically at the start of every sync, so this is only needed to
   // publish an env-var change without a content sync. Blast radius is bounded:
-  // only `text/html` assets and redirect rules re-certify.
+  // only `text/html` assets and redirect rules re-certify. Rejected while a sync
+  // is in progress.
   refresh_env: () -> ();
 
   // ───────── Access protection ─────────
@@ -432,8 +433,10 @@ service: (opt InitArgs) -> {
 
   // Turn the gate on, naming the owner-supplied login-page asset (gate-exempt).
   // Does not require the page to exist yet (enable-first is the secure ordering).
+  // Re-certifies every asset, so it is rejected while a sync is in progress, and
+  // a sync started while it runs reports `Busy`.
   enable_protection : (login_page : Key) -> ();
-  // Turn the gate off and drop all tokens.
+  // Turn the gate off and drop all tokens. Same exclusion with syncs.
   disable_protection : () -> ();
   // Mint a token; returns the token value (shown once). A classic "password" is
   // one long-lived token.

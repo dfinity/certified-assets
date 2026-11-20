@@ -11,13 +11,17 @@
 //! (`token_index`) lives on `State` and is read here.
 
 use super::State;
+use crate::cert::AssetScope;
 use crate::cert::{AssetPath, HashTreePath, build_ic_certificate_expression_header};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::{
     ProtectionResponse, ProtectionStatus, TokenInfo, TokenMeta, access_cookie_values,
     parse_form_token, token_id,
 };
+use crate::runtime::SystemContext;
+use candid::Principal;
 use serde_bytes::ByteBuf;
+use wire_types::SessionId;
 
 impl State {
     // ---- serve helpers ----
@@ -136,38 +140,71 @@ impl State {
     /// endpoint). Enabling on a fresh canister before the first sync is the secure
     /// ordering — no window in which assets are world-readable. Idempotent if
     /// already enabled at the same page; re-pointing to a different page drops the
-    /// old tokens (their redeem certs live under the old subtree). Caller
-    /// publishes `certified_data` afterwards.
-    pub fn enable_protection(&mut self, login_page: String) {
+    /// old tokens (their redeem certs live under the old subtree).
+    ///
+    /// Takes the sync lock and flips the setting — the serve path enforces it
+    /// from here on — then marks every asset and rule stale. The caller drives
+    /// the returned maintenance session to completion (see
+    /// [`Self::maintenance_step`]), which re-certifies them under protection,
+    /// releases the lock, and then publishes `certified_data`. Until it does,
+    /// responses fail verification rather than verify unprotected.
+    pub fn enable_protection(
+        &mut self,
+        owner: Principal,
+        login_page: String,
+        system_context: &SystemContext,
+    ) -> Result<SessionId, String> {
+        let session_id = self.begin_maintenance(owner, system_context)?;
         let previous = self.protection_login_page();
         if previous.as_deref() == Some(login_page.as_str()) {
-            return;
+            return Ok(session_id);
         }
         if let Some(old) = previous {
             self.clear_tokens_and_login_responses(&old);
         }
-        self.store
-            .set_protection_login_page(Some(login_page.clone()));
-        self.certifier.recertify_all_assets(&self.store);
-        self.on_redirect_rules_change();
-        // Enable-first: if the page isn't synced yet, the asset loop didn't touch
-        // it, but the redeem endpoint must still work — assert its responses.
-        if !self.store.contains_asset(&login_page) {
-            self.certifier
-                .reassert_login_responses(&self.store, &login_page);
-        }
+        self.store.set_protection_login_page(Some(login_page));
+        self.certifier.mark_assets_stale(AssetScope::All);
+        Ok(session_id)
     }
 
     /// Turns access protection **off** and drops all tokens, restoring a fully public app.
-    /// Caller publishes `certified_data` afterwards.
-    pub fn disable_protection(&mut self) {
+    /// Takes the sync lock like [`Self::enable_protection`]; the caller drives the
+    /// returned maintenance session and publishes `certified_data` afterwards.
+    pub fn disable_protection(
+        &mut self,
+        owner: Principal,
+        system_context: &SystemContext,
+    ) -> Result<SessionId, String> {
+        let session_id = self.begin_maintenance(owner, system_context)?;
         let Some(login_page) = self.protection_login_page() else {
-            return;
+            return Ok(session_id);
         };
         self.store.set_protection_login_page(None);
         self.clear_tokens_and_login_responses(&login_page);
-        self.certifier.recertify_all_assets(&self.store);
-        self.on_redirect_rules_change();
+        self.certifier.mark_assets_stale(AssetScope::All);
+        Ok(session_id)
+    }
+
+    /// Whether every asset is certified for the current settings — false while a
+    /// protection toggle or env refresh is still (or was left) re-certifying.
+    /// Nothing may publish `certified_data` before then, or it would publish a
+    /// half-re-certified tree.
+    pub fn certification_complete(&self) -> bool {
+        !self.certifier.has_stale_assets()
+    }
+
+    /// Refuses issuing a token while asset certification is incomplete, since
+    /// issuing publishes `certified_data` (see [`Self::certification_complete`]).
+    /// Toggling again (even to the same page) finishes the job.
+    fn require_certification_complete(&self) -> Result<(), String> {
+        if !self.certification_complete() {
+            return Err(
+                "access protection is still being applied; retry once enable_protection \
+                 or disable_protection completes"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     /// Mints a token under `label`: stores the record (`token_id`, expiry,
@@ -186,6 +223,7 @@ impl State {
         let Some(login_page) = self.protection_login_page() else {
             return Err("protection is not enabled".to_string());
         };
+        self.require_certification_complete()?;
         self.sweep_expired_tokens(now);
         // Labels are the unique identifier: re-issuing under an existing label
         // rotates it — drop the old token's access-protection index entry and redeem cert first.
@@ -235,7 +273,10 @@ impl State {
     }
 
     /// Revokes the token with the given label (live — the next request bearing it
-    /// fails access protection). O(log n) by label. Caller publishes `certified_data`.
+    /// fails access protection). O(log n) by label. Never refused, unlike
+    /// `issue_token`: the caller publishes `certified_data` afterwards only when
+    /// [`Self::certification_complete`] — the serve side rejects the token
+    /// either way, so a still-certified redeem leaf grants nothing.
     pub fn revoke_token(&mut self, label: &str) {
         self.remove_token(label);
     }

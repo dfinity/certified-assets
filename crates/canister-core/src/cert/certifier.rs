@@ -30,6 +30,7 @@
 
 use ic_certification::{AsHashTree, Hash};
 use ic_representation_independent_hash::Value;
+use std::collections::{BTreeSet, HashSet};
 
 use super::primitives::{
     AssetKey, AssetPath, CertificateExpression, CertifiedResponses, HashTreePath, NestedTreeKey,
@@ -65,6 +66,99 @@ pub struct Certifier {
     /// rebuilt from the live system API in `post_upgrade` like the rest of the
     /// tree. See [`Self::effective_headers`].
     env_cookie: Option<Vec<String>>,
+    /// Rule entries known to be out of date, owed a rebuild by the next
+    /// [`Self::begin_recertification`]. See [`StaleRules`].
+    stale_rules: StaleRules,
+    /// Assets whose certified responses are out of date, owed a re-certification
+    /// pass by the next [`Self::begin_recertification`]: every asset after a
+    /// protection toggle (which changes every effective header set), the HTML
+    /// ones after an env change (the cookie). Kept set until a pass completes,
+    /// so an interrupted pass is redone by the next one.
+    stale_assets: Option<AssetScope>,
+}
+
+/// Which assets a re-certification pass covers. Ordered: `All` subsumes `Html`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssetScope {
+    /// Only `text/html` assets — the ones that carry the env cookie.
+    Html,
+    /// Every asset.
+    All,
+}
+
+/// A re-certification in progress, resumable one asset or rule at a time so it
+/// can be spread across messages: a pass over the stale assets (if any), then a
+/// rebuild of the stale redirect rules. Started by
+/// [`Certifier::begin_recertification`], driven by
+/// [`Certifier::recertification_step`].
+#[derive(Clone, Debug)]
+pub struct Recertification(RecertificationStage);
+
+#[derive(Clone, Debug)]
+enum RecertificationStage {
+    /// Re-certifying the assets in `scope`, in key order, resuming strictly
+    /// after `resume_after`.
+    Assets {
+        scope: AssetScope,
+        resume_after: Option<AssetKey>,
+    },
+    Rules(RulesRebuild),
+}
+
+/// Which redirect-rule entries are out of date.
+///
+/// A sync defers rule certification to the end of each `execute_operations`
+/// call rather than rebuilding every rule after every change, because a full
+/// rebuild is linear in the rule count with a large constant (every leaf insert
+/// rehashes its tree path) and a site with thousands of HTML pages synthesises
+/// thousands of rules — far more than one message can certify. Tracking *what*
+/// went stale lets the end-of-call rebuild touch only the rules that depend on
+/// the keys the call changed, and step through them across messages.
+struct StaleRules {
+    /// The whole list must be rebuilt: the rules themselves changed, a rebuild
+    /// was interrupted and left the entries in an unknown state, or none has run
+    /// yet (a fresh tree lacks even the built-in 404).
+    all: bool,
+    /// Asset keys changed since the last rebuild. Only rules whose exact `from`
+    /// (the slot an asset at that key clobbers or shadows) or whose `to` (the
+    /// target an alias rule borrows its response from) is one of these depend
+    /// on them.
+    keys: BTreeSet<AssetKey>,
+}
+
+impl Default for StaleRules {
+    fn default() -> Self {
+        Self {
+            all: true,
+            keys: BTreeSet::new(),
+        }
+    }
+}
+
+/// A redirect-rule rebuild in progress, resumable one rule at a time so a
+/// many-rule rebuild can be spread across messages. The rule stage of a
+/// [`Recertification`].
+#[derive(Clone, Debug)]
+struct RulesRebuild {
+    /// The rule indices to rebuild, ascending, or `None` for the whole list.
+    targets: Option<Vec<usize>>,
+    /// Whether the rebuild touches the root `<*>` slot, which it shares with
+    /// the built-in 404 (cleared before building, re-added at the end if no
+    /// rule claims it).
+    clears_fallback: bool,
+    phase: RebuildPhase,
+}
+
+#[derive(Clone, Debug)]
+enum RebuildPhase {
+    /// Dropping the `n`th target's old leaves. Every old leaf goes before any
+    /// new one is inserted: a rule that merely moved index certifies the very
+    /// same leaves, which a later removal would otherwise delete.
+    Remove(usize),
+    /// Certifying the `n`th target.
+    Build(usize),
+    /// The built-in 404 and the protection root sibling.
+    Finish,
 }
 
 impl Certifier {
@@ -353,41 +447,15 @@ impl Certifier {
         }
     }
 
-    /// Adds the protection layer's redirect-rule siblings after a rule rebuild:
-    /// the universal root `<*>` `307 → login`, plus a `307` at every non-root rule
-    /// location (whose exact entry would otherwise reject the root wildcard). The
-    /// per-rule siblings are tracked on the rule entry so the next rebuild removes
-    /// them; the root one is re-added each rebuild (cleared by
-    /// `remove_fallback_responses`). Only called while protection is on.
-    fn certify_rule_unauth_siblings(&mut self, login_page: &str) {
-        let redirect = ProtectionResponse::redirect_to_login(login_page);
-        let root = HashTreePath::not_found_base_path();
-        self.certify_protection_response(&root, &redirect);
-        for idx in 0..self.rule_certified_entries.len() {
-            let Some(location) = self
-                .rule_certified_entries
-                .get(idx)
-                .and_then(|e| e.as_ref())
-                .map(|e| e.location.clone())
-            else {
-                continue;
-            };
-            if location.0 == root.0 {
-                continue; // root <*> already covered by the universal sibling
-            }
-            let tp = self.certify_protection_response(&location, &redirect);
-            if let Some(entry) = self.rule_certified_entries[idx].as_mut() {
-                entry.tree_paths.push(tp);
-            }
-        }
-    }
-
     // ---- redirect rules ----
 
-    /// Rebuild the certified-tree entries for the redirect rules. Called whenever
-    /// the rule list changes (in `execute_operations`) or assets are restored
-    /// from stable memory (in `post_upgrade_rebuild`). Caller must refresh
-    /// `certified_data` after this.
+    /// Rebuild the certified-tree entries for every redirect rule, in one go.
+    /// Called by the single-message paths that change what every rule certifies
+    /// — an upgrade (`post_upgrade_rebuild`), the protection toggles, an env
+    /// refresh, a governance commit. A sync instead marks rules stale and steps
+    /// through [`Self::begin_rules_rebuild`] / [`Self::rules_rebuild_step`] so a
+    /// many-rule rebuild can span messages. Caller must refresh `certified_data`
+    /// after this.
     ///
     /// Status-200 rules borrow each encoding's certificate expression and
     /// response hash from the target asset, so this also has to run after any
@@ -399,35 +467,247 @@ impl Certifier {
     /// rule claims `<*>`. That keeps `build_http_response`'s fallthrough certified
     /// — the gateway rejects uncertified responses, so an uncertified fallback 404
     /// would be unservable.
+    ///
+    /// Any assets still marked stale (by an interrupted
+    /// [`Recertification`]) are re-certified first.
     pub fn on_redirect_rules_change(&mut self, store: &Store) {
-        for entry in self.rule_certified_entries.drain(..).flatten() {
-            for tp in &entry.tree_paths {
-                self.asset_hashes.remove_response_precomputed(tp);
+        self.mark_all_rules_stale();
+        let mut job = self.begin_recertification(store);
+        while let Some(j) = job {
+            job = self.recertification_step(store, j);
+        }
+    }
+
+    /// Whether some assets are still owed a re-certification pass.
+    pub fn has_stale_assets(&self) -> bool {
+        self.stale_assets.is_some()
+    }
+
+    /// Marks the assets in `scope` stale — and with them every rule entry, since
+    /// alias rules borrow their target's effective headers.
+    pub fn mark_assets_stale(&mut self, scope: AssetScope) {
+        self.stale_assets = self.stale_assets.max(Some(scope));
+        self.mark_all_rules_stale();
+    }
+
+    /// Plans a re-certification of whatever is stale, or `None` if nothing is.
+    /// Caller must refresh `certified_data` once it is done.
+    pub fn begin_recertification(&mut self, store: &Store) -> Option<Recertification> {
+        match self.stale_assets {
+            Some(scope) => Some(Recertification(RecertificationStage::Assets {
+                scope,
+                resume_after: None,
+            })),
+            None => self
+                .begin_rules_rebuild(store)
+                .map(|r| Recertification(RecertificationStage::Rules(r))),
+        }
+    }
+
+    /// Advances `job` by one asset or rule (or a closing step) and returns what
+    /// is left, or `None` once everything stale is certified. Each step does a
+    /// bounded amount of tree work, so a caller can yield between steps.
+    pub fn recertification_step(
+        &mut self,
+        store: &Store,
+        job: Recertification,
+    ) -> Option<Recertification> {
+        match job.0 {
+            RecertificationStage::Assets {
+                scope,
+                resume_after,
+            } => {
+                if let Some((key, meta)) = store.assets_from(resume_after.as_ref()).next() {
+                    if scope == AssetScope::All
+                        || crate::asset::is_html_content_type(&meta.content_type)
+                    {
+                        self.recertify_asset(store, &key, &meta);
+                    }
+                    return Some(Recertification(RecertificationStage::Assets {
+                        scope,
+                        resume_after: Some(key),
+                    }));
+                }
+                // Under protection the login page's redeem responses must be
+                // certified even while the page itself isn't synced (the asset
+                // pass re-asserts them only for a present page).
+                if let Some(login_page) = store.protection_login_page()
+                    && !store.contains_asset(&login_page)
+                {
+                    self.reassert_login_responses(store, &login_page);
+                }
+                // A wider scope marked during the pass restarts it.
+                if self.stale_assets == Some(scope) {
+                    self.stale_assets = None;
+                }
+                self.begin_recertification(store)
+            }
+            RecertificationStage::Rules(r) => self
+                .rules_rebuild_step(store, r)
+                .map(|r| Recertification(RecertificationStage::Rules(r))),
+        }
+    }
+
+    /// Marks every rule entry stale: the rule list itself was replaced.
+    pub fn mark_all_rules_stale(&mut self) {
+        self.stale_rules.all = true;
+    }
+
+    /// Marks stale the rule entries that depend on the asset at `key` — call
+    /// after any change to that asset (created, deleted, content or headers).
+    pub fn mark_rules_stale_for(&mut self, key: &str) {
+        if !self.stale_rules.all {
+            self.stale_rules.keys.insert(key.to_string());
+        }
+    }
+
+    /// Plans a rebuild of the stale rule entries, or `None` if none are stale.
+    ///
+    /// Beyond the rules that depend on a changed key, the plan takes in every
+    /// rule sharing a tree location with one of them: rules at the same location
+    /// can certify identical leaves (a duplicate rule, or the protection sibling
+    /// every rule at a location gets), so dropping one rule's leaves can take
+    /// another's with it. A rule at the root `<*>` also clears the built-in 404
+    /// there (see [`Self::on_redirect_rules_change`]), which removes every
+    /// root-subtree leaf, so those are all rebuilt together.
+    ///
+    /// Until the rebuild finishes, every entry counts as stale, so an
+    /// interrupted rebuild is redone in full by the next one.
+    fn begin_rules_rebuild(&mut self, store: &Store) -> Option<RulesRebuild> {
+        let rules = store.redirect_rules();
+        let targets = if self.stale_rules.all || self.rule_certified_entries.len() != rules.len() {
+            None
+        } else {
+            let keys = std::mem::take(&mut self.stale_rules.keys);
+            if keys.is_empty() {
+                return None;
+            }
+            let depends = |rule: &RedirectRule| {
+                keys.contains(&rule.to)
+                    || matches!(&rule.from, RulePattern::Exact(from) if keys.contains(from))
+            };
+            let locations: Vec<HashTreePath> =
+                rules.iter().map(crate::redirect::tree_location).collect();
+            let stale_locations: HashSet<&HashTreePath> = rules
+                .iter()
+                .zip(&locations)
+                .filter(|(rule, _)| depends(rule))
+                .map(|(_, location)| location)
+                .collect();
+            if stale_locations.is_empty() {
+                return None;
+            }
+            Some(
+                (0..rules.len())
+                    .filter(|&idx| stale_locations.contains(&locations[idx]))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let clears_fallback = match &targets {
+            None => true,
+            Some(targets) => {
+                let root = HashTreePath::not_found_base_path();
+                targets
+                    .iter()
+                    .any(|&idx| crate::redirect::tree_location(&rules[idx]) == root)
+            }
+        };
+        self.stale_rules.all = true;
+        Some(RulesRebuild {
+            targets,
+            clears_fallback,
+            phase: RebuildPhase::Remove(0),
+        })
+    }
+
+    /// Advances `rebuild` by one rule (or its closing step) and returns what is
+    /// left, or `None` once every planned entry is rebuilt. Each step does a
+    /// bounded amount of tree work, so a caller can yield between steps. Caller
+    /// must refresh `certified_data` once the rebuild is done.
+    fn rules_rebuild_step(
+        &mut self,
+        store: &Store,
+        mut rebuild: RulesRebuild,
+    ) -> Option<RulesRebuild> {
+        match rebuild.phase {
+            RebuildPhase::Remove(n) => {
+                let idx = match &rebuild.targets {
+                    // A full rebuild drops every *old* entry, however many
+                    // rules there are now.
+                    None => (n < self.rule_certified_entries.len()).then_some(n),
+                    Some(targets) => targets.get(n).copied(),
+                };
+                if let Some(idx) = idx {
+                    if let Some(entry) = self.rule_certified_entries[idx].take() {
+                        for tp in &entry.tree_paths {
+                            self.asset_hashes.remove_response_precomputed(tp);
+                        }
+                    }
+                    rebuild.phase = RebuildPhase::Remove(n + 1);
+                } else {
+                    if rebuild.targets.is_none() {
+                        self.rule_certified_entries = Vec::new();
+                        self.rule_certified_entries
+                            .resize_with(store.redirect_rules().len(), || None);
+                    }
+                    // Drop any built-in 404 before rebuilding so a rule taking
+                    // over `<*>` doesn't leave a stale fallback hash beside it
+                    // (re-added in `Finish` if `<*>` ends up rule-free).
+                    if rebuild.clears_fallback {
+                        self.asset_hashes.remove_fallback_responses();
+                    }
+                    rebuild.phase = RebuildPhase::Build(0);
+                }
+            }
+            RebuildPhase::Build(n) => {
+                let idx = match &rebuild.targets {
+                    None => (n < self.rule_certified_entries.len()).then_some(n),
+                    Some(targets) => targets.get(n).copied(),
+                };
+                if let Some(idx) = idx {
+                    let rule = &store.redirect_rules()[idx];
+                    let mut entry = self.build_rule_entry(store, rule);
+                    // Under protection, every certified rule location needs an
+                    // unauthenticated `307 → login` sibling (its exact entry
+                    // would otherwise reject the root wildcard). Tracked on the
+                    // entry so the next rebuild removes it.
+                    if let (Some(entry), Some(login_page)) =
+                        (entry.as_mut(), store.protection_login_page())
+                        && entry.location != HashTreePath::not_found_base_path()
+                    {
+                        let redirect = ProtectionResponse::redirect_to_login(&login_page);
+                        let tp = self.certify_protection_response(&entry.location, &redirect);
+                        entry.tree_paths.push(tp);
+                    }
+                    self.rule_certified_entries[idx] = entry;
+                    rebuild.phase = RebuildPhase::Build(n + 1);
+                } else {
+                    rebuild.phase = RebuildPhase::Finish;
+                }
+            }
+            RebuildPhase::Finish => {
+                if !self.asset_hashes.has_fallback_response() {
+                    self.certify_not_found_fallback();
+                }
+                // Under protection the root `<*>` carries a universal
+                // `307 → login` sibling too, layered on top of the rules and the
+                // built-in 404. Re-added every rebuild (it is cleared along with
+                // the fallback; re-inserting an existing leaf is a no-op).
+                if let Some(login_page) = store.protection_login_page() {
+                    let redirect = ProtectionResponse::redirect_to_login(&login_page);
+                    self.certify_protection_response(
+                        &HashTreePath::not_found_base_path(),
+                        &redirect,
+                    );
+                }
+                self.stale_rules = StaleRules {
+                    all: false,
+                    keys: BTreeSet::new(),
+                };
+                return None;
             }
         }
-        // Drop any built-in 404 before rebuilding so a rule taking over `<*>`
-        // doesn't leave a stale fallback hash beside it (and removing it now is
-        // safe — we re-add below if `<*>` ends up rule-free).
-        self.asset_hashes.remove_fallback_responses();
-
-        let rules = store.redirect_rules().to_vec();
-        let mut new_entries: Vec<Option<crate::redirect::CertifiedRuleEntry>> =
-            Vec::with_capacity(rules.len());
-        for rule in &rules {
-            new_entries.push(self.build_rule_entry(store, rule));
-        }
-        self.rule_certified_entries = new_entries;
-
-        if !self.asset_hashes.has_fallback_response() {
-            self.certify_not_found_fallback();
-        }
-
-        // Under protection, every certified path needs an unauthenticated sibling
-        // (and a universal root `<*>` fallback) so access protection can serve a
-        // verifiable 307/401 there. Added after the rules + built-in 404 so it layers on top.
-        if let Some(login_page) = store.protection_login_page() {
-            self.certify_rule_unauth_siblings(&login_page);
-        }
+        Some(rebuild)
     }
 
     /// Certifies the canister's built-in last-resort 404 ("not found") at the

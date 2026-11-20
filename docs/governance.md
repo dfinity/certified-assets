@@ -235,6 +235,14 @@ is recomputed — which measures at roughly 1.3M instructions per changed asset,
 the ceiling is in the tens of thousands of changed assets. Ordinary frontend
 updates are nowhere near it.
 
+The commit also re-certifies every redirect rule, and that is the tighter bound
+for a site with many pages: each HTML page adds about five rules for its clean
+URL and trailing-slash forms (see [Routing](routing.md)), whether or not the
+batch changes it. Past roughly 2,000 HTML pages the rules alone exceed one
+message, and the commit traps. An ordinary sync has no such limit, because it
+spreads this work across messages. A site that large can't be deployed through
+governance yet.
+
 **The commit traps instead of returning an error.** SNS governance discards a
 target method's reply and records any reply as success, so an error return would
 show an adopted proposal as *executed* while nothing happened. Trapping is the

@@ -436,14 +436,21 @@ impl State {
 
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
-                    // Asset ops in this call may have clobbered tree entries
-                    // that redirect rules own (any rule whose source path
-                    // collides with an asset's `<$>` slot). Re-cert them so
-                    // the call ends with a consistent rule tree. A by-proposal
-                    // prepare certifies nothing and changes no live rule, so it
-                    // has nothing to repair; the commit rebuilds them instead.
-                    if !self.by_proposal() {
-                        self.on_redirect_rules_change();
+                    // This call may have replaced the redirect rules, and its
+                    // asset ops may have clobbered tree entries rules own (an
+                    // exact rule whose source path collides with an asset's
+                    // `<$>` slot) or changed the target an alias rule borrows
+                    // from. Re-cert the stale rules so the call ends with a
+                    // consistent rule tree — staged one rule per step, then
+                    // back here with nothing left stale. The same pass picks up
+                    // assets left stale by an env change captured at sync start.
+                    // A by-proposal prepare marks nothing (it certifies nothing
+                    // and changes no live rule; the commit rebuilds them), so
+                    // there this only ever repairs live state.
+                    if let Some(job) = self.certifier.begin_recertification(&self.store) {
+                        return ComputationStatus::InProgress(
+                            ExecuteOperationsProgress::Recertifying { job },
+                        );
                     }
 
                     // Finalize the sync only when the caller signals this is the
@@ -586,11 +593,36 @@ impl State {
                 if let Err(e) = result {
                     return ComputationStatus::Error(e);
                 }
+                // An asset op leaves the rules depending on its key stale; the
+                // end of the call rebuilds them (`SetRedirectRules` marks the
+                // whole list itself).
+                if !self.by_proposal()
+                    && let Some(key) = asset_key(op)
+                {
+                    self.certifier.mark_rules_stale_for(key);
+                }
 
                 let progress = ExecuteOperationsProgress::ProcessingOperations {
                     operation_index: operation_index + 1,
                 };
                 ComputationStatus::InProgress(progress)
+            }
+            ExecuteOperationsProgress::Recertifying { job } => {
+                // Staged across messages like the operations themselves, so
+                // re-check the session before touching the tree.
+                if let Err(e) = self.require_mutable_session(arg.session_id) {
+                    return ComputationStatus::Error(e);
+                }
+                ComputationStatus::InProgress(
+                    match self.certifier.recertification_step(&self.store, job) {
+                        Some(job) => ExecuteOperationsProgress::Recertifying { job },
+                        // Done: resume the end of the operations, which now finds
+                        // nothing stale and moves on to finalizing.
+                        None => ExecuteOperationsProgress::ProcessingOperations {
+                            operation_index: arg.operations.len(),
+                        },
+                    },
+                )
             }
             ExecuteOperationsProgress::HashingState {
                 mut hasher,
@@ -634,5 +666,17 @@ impl State {
                 ComputationStatus::Done(Some(hash))
             }
         }
+    }
+}
+
+/// The asset an operation changes, if it changes one.
+fn asset_key(op: &Operation) -> Option<&str> {
+    match op {
+        Operation::CreateAsset(arg) => Some(&arg.key),
+        Operation::SetAssetContent(arg) => Some(&arg.key),
+        Operation::UnsetAssetContent(arg) => Some(&arg.key),
+        Operation::DeleteAsset(arg) => Some(&arg.key),
+        Operation::SetAssetHeaders(arg) => Some(&arg.key),
+        Operation::SetRedirectRules(_) | Operation::SetPreparationCanary(_) => None,
     }
 }
