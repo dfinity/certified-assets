@@ -1,0 +1,31 @@
+# Standalone PoC workspace: deliberately NOT a member of the repo-root workspace,
+# so nothing here touches the released crates. It only *depends* on `asset-prep`
+# (by path, at build time) to reuse the exact dist/ preparation the synced canister uses.
+[workspace]
+members = ["crates/*", "examples/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+embedded-certified-assets = { path = "crates/embedded-certified-assets" }
+embedded-certified-assets-build = { path = "crates/embedded-certified-assets-build" }
+asset-prep = { path = "../../crates/asset-prep" }
+wire-types = { path = "../../crates/wire-types" }
+candid = "0.10.18"
+ic-cdk = "0.20.1"
+ic-http-certification = "3.2.0"
+sha2 = "0.11.0"
+
+# Test-only: verify served responses exactly as the HTTP gateway does.
+ic-response-verification = "3.2.0"
+ic-certification-testing = { git = "https://github.com/dfinity/response-verification.git", rev = "66d33cf61e6ac17ec895598dd7f584605637bb42" }
+
+[profile.release]
+lto = true
+opt-level = "z"
+debug = false

@@ -1,0 +1,12 @@
+[package]
+name = "embedded-certified-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Serve certified static assets that were baked into the canister Wasm at compile time"
+
+[dependencies]
+candid.workspace = true
+ic-cdk.workspace = true
+ic-http-certification.workspace = true
