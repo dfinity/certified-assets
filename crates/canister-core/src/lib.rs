@@ -105,11 +105,12 @@ pub fn start_sync() -> StartSyncResult {
         let result = s.start_sync(caller, &system_context);
         // Capture the env once, at sync start, so every asset (re)certified by
         // the operations that follow already carries the current `ic_env`
-        // cookie. If it changed, the assets the sync doesn't touch are marked
-        // stale and re-certified by its `execute_operations` (which publishes
-        // `certified_data`), so nothing here changes the tree. Env vars aren't
-        // expected to change mid-sync; `refresh_env` publishes an env-only
-        // change without a sync. Only on a real start (not `Busy`).
+        // cookie. If it changed, the HTML assets are marked stale; the sync's
+        // `execute_operations` re-certifies them and publishes the new cookie
+        // along with them. Until then serving keeps the published cookie, so
+        // nothing here changes what is served. Env vars aren't expected to
+        // change mid-sync; `refresh_env` publishes an env-only change without a
+        // sync. Only on a real start (not `Busy`).
         if matches!(result, StartSyncResult::Started { .. }) {
             s.capture_env_at_sync_start(&CanisterEnv::load());
         }
@@ -323,9 +324,7 @@ pub async fn issue_token(args: IssueTokenArgs) -> String {
 pub fn revoke_token(label: String) {
     STATE.with_borrow_mut(|s| {
         s.revoke_token(&label);
-        if s.certification_complete() {
-            certified_data_set(s.root_hash());
-        }
+        certified_data_set(s.root_hash());
     })
 }
 
@@ -503,7 +502,10 @@ pub fn validate_set_governance(approver: Option<Principal>) -> Result<String, St
 /// without it a prepared batch blocks every further sync. Guarded like a sync,
 /// so the developer who prepared it can clean up without a proposal.
 pub fn discard_proposed_state() {
-    STATE.with_borrow_mut(|s| s.discard_proposed_state())
+    STATE.with_borrow_mut(|s| {
+        s.discard_proposed_state();
+        certified_data_set(s.root_hash());
+    })
 }
 
 /// `#[update(guard = ...)]` guard restricting a call to the governance approver.

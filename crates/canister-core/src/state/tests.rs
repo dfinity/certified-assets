@@ -2728,6 +2728,8 @@ mod certification {
                 headers: vec![("custom-header".into(), "value".into())],
             })
             .unwrap();
+        // Applied outside an `execute_operations` call, so publish by hand.
+        state.publish();
         let response = certified_http_request(
             &state,
             RequestBuilder::get("/contents.html")
@@ -5022,6 +5024,45 @@ mod governance {
         let _ = session_id;
     }
 
+    #[test]
+    fn a_maintenance_job_taking_over_an_abandoned_prepare_discards_it() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        enable(&mut state);
+        start_session(&mut state, &ctx);
+        assert!(matches!(
+            state.proposed_state(),
+            ProposedState::Preparing { .. }
+        ));
+
+        let later = SystemContext {
+            current_timestamp_ns: TEST_NOW + SYNC_IDLE_TIMEOUT_NANOS,
+        };
+        let session = state.enable_protection(some_principal(), "/login.html".into(), &later);
+        run_maintenance(&mut state, session);
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+    }
+
+    #[test]
+    fn a_maintenance_job_leaves_a_staged_batch_for_its_proposal() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        enable(&mut state);
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![b"x"]),
+            ],
+        );
+        let hash = staged_hash(&state);
+
+        let session = state.enable_protection(some_principal(), "/login.html".into(), &ctx);
+        run_maintenance(&mut state, session);
+        assert_eq!(staged_hash(&state), hash);
+        state.commit_proposed_state(hash).unwrap();
+    }
+
     /// A staged batch is the canister's pending governance decision, so it holds
     /// the sync lock until it is committed or discarded — mirroring the old asset
     /// canister's "batch N is already proposed".
@@ -6084,10 +6125,9 @@ mod rule_rebuild {
         assert_eq!(r.body.as_ref(), b"spa 2");
     }
 
-    /// Re-uploads pages `0..4` and abandons the call a few steps into the
-    /// (targeted) rule rebuild that follows: their rules' old leaves are gone
-    /// and the new ones not yet certified.
-    fn abandon_a_rebuild(state: &mut State) {
+    /// Re-uploads pages `0..4` of `n` and abandons the call a few steps into
+    /// the (targeted) rule rebuild that follows.
+    fn abandon_a_rebuild(state: &mut State, n: usize) {
         let session_id = start_session(state, &mock_system_context());
         let args = ExecuteOperationsArguments {
             session_id,
@@ -6096,7 +6136,12 @@ mod rule_rebuild {
         };
         let (progress, _) = drive(state, &args, ExecuteOperationsProgress::Starting, 3);
         assert!(progress.is_some(), "the rebuild finished too soon");
-        assert!(!state.certification_complete());
+        assert!(state.certification_pending());
+        // Nothing half-done is served: every page the call didn't touch still
+        // verifies, through its asset and its rules alike.
+        for i in 4..n {
+            assert_page_served(state, i, &format!("page {i}"));
+        }
     }
 
     #[test]
@@ -6104,28 +6149,32 @@ mod rule_rebuild {
         const N: usize = 10;
         let mut state = State::default();
         seed_pages(&mut state, N);
-        abandon_a_rebuild(&mut state);
+        abandon_a_rebuild(&mut state, N);
 
         // The owner reclaims and finishes with a call that touches nothing a
-        // rule depends on; it picks up the half-done rebuild where it stopped.
+        // rule depends on; it picks up the half-done rebuild where it stopped
+        // (a full one would build every one of the 2N rules).
         let session_id = start_session(&mut state, &mock_system_context());
         let steps = run_counting_rule_steps(&mut state, session_id, vec![], true);
-        assert!(steps > 0 && steps < N, "resuming took {steps} rule steps");
-        assert!(state.certification_complete());
+        assert!(
+            steps > 0 && steps < 2 * N,
+            "resuming took {steps} rule steps"
+        );
+        assert!(!state.certification_pending());
         assert_pages_served(&state, N, 0..4);
     }
 
     #[test]
-    fn a_change_during_a_rebuild_replans_it_in_full() {
+    fn a_change_during_a_rebuild_replans_it_with_both_changes() {
         const N: usize = 10;
         let mut state = State::default();
         seed_pages(&mut state, N);
-        abandon_a_rebuild(&mut state);
+        abandon_a_rebuild(&mut state, N);
 
         // The next call changes an asset no rule depends on. The abandoned plan
-        // predates it, so it is dropped — and the fresh plan must cover the
-        // rules the abandoned one had already torn down, which only a full
-        // rebuild can know.
+        // predates it and was still building (it hadn't touched the tree), so
+        // it is dropped and its marks handed back: the fresh plan covers the
+        // abandoned one's rules and the new change, and no others.
         let session_id = start_session(&mut state, &mock_system_context());
         let ops = assemble_create_assets_and_set_contents_operations(
             &mut state,
@@ -6135,7 +6184,13 @@ mod rule_rebuild {
             ],
             session_id,
         );
-        assert!(run_counting_rule_steps(&mut state, session_id, ops, true) > 2 * N);
+        // Building the 4 dependent rules and editing their few leaves, against
+        // building all 2N rules and certifying their ~3N leaves in full.
+        let steps = run_counting_rule_steps(&mut state, session_id, ops, true);
+        assert!(
+            steps > 0 && steps < 3 * N,
+            "replanning took {steps} rule steps"
+        );
         assert_pages_served(&state, N, 0..4);
     }
 
@@ -6185,7 +6240,7 @@ mod rule_rebuild {
                 .is_none()
         );
 
-        assert!(state.certification_complete());
+        assert!(!state.certification_pending());
         for i in 0..N - 1 {
             let edited = i >= N - 4 || i == 2;
             let body = if edited {
@@ -6200,6 +6255,94 @@ mod rule_rebuild {
             RequestBuilder::get(format!("/page{}", N - 1)).build(),
         );
         assert_eq!(r.status_code, 404);
+    }
+
+    #[test]
+    fn incremental_rebuilds_leave_the_tree_a_full_rebuild_builds() {
+        // A rule rebuild edits the tree by difference, so its correctness rests
+        // on the entries it tracks matching what is in the tree. Drive the
+        // cases that stress that — targeted rebuilds, an asset clobbering and
+        // releasing a rule's slot, the root `<*>` changing hands, a shortened
+        // rule list, protection siblings coming and going, an abandoned
+        // rebuild — and check the result against an upgrade's from-scratch
+        // rebuild after each. (Leaves, not root hashes: an `RbTree`'s shape,
+        // and so its root hash, depends on the order its keys were inserted.)
+        const N: usize = 8;
+        let memory = DefaultMemoryImpl::default();
+        let mut state = State::new(memory.clone());
+        let ctx = mock_system_context();
+        let check = |state: &State, stage: &str| {
+            assert!(!state.certification_pending(), "{stage}: work left pending");
+            let mut fresh = State::new(memory.clone());
+            fresh.post_upgrade_rebuild();
+            assert!(
+                fresh.published_leaves() == state.published_leaves(),
+                "{stage}: the incrementally maintained tree differs from a full rebuild"
+            );
+        };
+        seed_pages(&mut state, N);
+        check(&state, "seed");
+
+        let session_id = start_session(&mut state, &ctx);
+        let ops = edit_pages(&mut state, session_id, 1..3);
+        execute_all(&mut state, session_id, ops, &ctx);
+        check(&state, "edit");
+
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![AssetBuilder::new("/page4", "text/plain").with_encoding("identity", vec!["raw"])],
+        );
+        check(&state, "shadow");
+        let session_id = start_session(&mut state, &ctx);
+        let mut rules = state.store.redirect_rules().to_vec();
+        rules.truncate(2 * (N - 2));
+        rules.push(RedirectRule {
+            from: RulePattern::Subtree("/".into()),
+            to: page(0),
+            status: 200,
+            headers: vec![],
+        });
+        execute_all(
+            &mut state,
+            session_id,
+            vec![
+                Operation::DeleteAsset(DeleteAssetArguments { key: page(5) }),
+                Operation::SetRedirectRules(SetRedirectRulesArguments { rules }),
+            ],
+            &ctx,
+        );
+        check(&state, "rules");
+
+        let session = state.enable_protection(some_principal(), "/page3.html".into(), &ctx);
+        run_maintenance(&mut state, session);
+        check(&state, "enable");
+        let session_id = start_session(&mut state, &ctx);
+        let ops = edit_pages(&mut state, session_id, 0..1);
+        execute_all(&mut state, session_id, ops, &ctx);
+        check(&state, "edit-protected");
+        // Re-pointed to a path only a rule serves (`/page1/ → 307`): leaving
+        // it later clears that whole path, the rule's leaf with it, though the
+        // rule itself is unchanged.
+        let session = state.enable_protection(some_principal(), "/page1/".into(), &ctx);
+        run_maintenance(&mut state, session);
+        check(&state, "re-point");
+        let session = state.disable_protection(some_principal(), &ctx);
+        run_maintenance(&mut state, session);
+        check(&state, "disable");
+
+        // Abandoned a few steps into its rebuild, then finished by the next call.
+        let session_id = start_session(&mut state, &ctx);
+        let args = ExecuteOperationsArguments {
+            session_id,
+            operations: edit_pages(&mut state, session_id, 2..6),
+            is_final: true,
+        };
+        let (progress, _) = drive(&mut state, &args, ExecuteOperationsProgress::Starting, 3);
+        assert!(progress.is_some(), "the rebuild finished too soon");
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(&mut state, session_id, vec![], &ctx);
+        check(&state, "resumed");
     }
 
     #[test]
@@ -6383,38 +6526,42 @@ mod maintenance {
     }
 
     #[test]
-    fn no_token_is_issued_until_every_step_of_a_toggle_is_done() {
-        // Issuing publishes `certified_data`. Mid-toggle the tree still holds
-        // responses certified for the old setting — public rule aliases, before
-        // the rule pass replaces them — so it must not be published until the
-        // last rule is rebuilt, not just the last asset.
+    fn a_toggle_takes_effect_only_once_every_step_is_done() {
+        // Mid-toggle the working tree holds responses for both settings — public
+        // rule aliases until the rule pass replaces them — so none of it may be
+        // served: the site stays public, and verifiable, until the last step.
         const N: usize = 5;
         let mut state = site(N);
         let ctx = mock_system_context();
         let session_id = state
             .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
             .unwrap();
-        // Refused at every step that still had work to do: the first success
-        // must leave nothing for the job but its closing no-op step.
-        let mut steps = 0;
-        while state
+        // A token issued mid-toggle is kept, and redeemable once it publishes.
+        state
             .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
-            .is_err()
-        {
-            steps += 1;
+            .unwrap();
+        let mut steps = 0;
+        loop {
+            for i in [0, N - 1] {
+                assert_public(&state, i);
+            }
             match state.maintenance_step(session_id, &ctx) {
-                ComputationStatus::InProgress(()) => {}
-                other => panic!("expected the job to still be running, got {other:?}"),
+                ComputationStatus::InProgress(()) => steps += 1,
+                ComputationStatus::Done(()) => break,
+                ComputationStatus::Error(e) => panic!("maintenance failed: {e}"),
             }
         }
-        assert!(
-            steps > 2 * N,
-            "a token was issued {steps} steps into the toggle"
+        assert!(steps > 2 * N, "the toggle took only {steps} steps");
+        for i in 0..N {
+            assert_protected(&state, i);
+        }
+        let redeem = certified_http_request(
+            &state,
+            RequestBuilder::post(LOGIN_PAGE)
+                .with_body("token=secret")
+                .build(),
         );
-        assert!(matches!(
-            state.maintenance_step(session_id, &ctx),
-            ComputationStatus::Done(())
-        ));
+        assert_eq!(redeem.status_code, 302);
     }
 
     #[test]
@@ -6433,12 +6580,11 @@ mod maintenance {
             }
         }
 
-        // Issuing a token would publish the half-certified tree.
-        assert!(!state.certification_complete());
-        let err = state
-            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
-            .unwrap_err();
-        assert!(err.contains("still being updated"), "got: {err}");
+        // The half-certified tree is never served: the site stays public.
+        assert!(state.certification_pending());
+        for i in 0..N {
+            assert_public(&state, i);
+        }
 
         // Once the lock goes stale, a sync takes it over and finishes the job.
         let later = SystemContext {
@@ -6449,12 +6595,108 @@ mod maintenance {
             other => panic!("expected the stale lock to be reclaimed, got {other:?}"),
         };
         execute_all(&mut state, session_id, vec![], &later);
-        assert!(state.certification_complete());
+        assert!(!state.certification_pending());
         for i in 0..N {
             assert_protected(&state, i);
         }
+    }
+
+    #[test]
+    fn a_toggle_names_itself_when_refusing_others() {
+        let mut state = site(2);
+        let ctx = mock_system_context();
         state
-            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
             .unwrap();
+        let err = state
+            .disable_protection(some_principal(), &ctx)
+            .unwrap_err();
+        assert!(err.contains("re-certification by"), "got: {err}");
+        let upload = wire_types::UploadAssetArguments {
+            key: "/a.txt".into(),
+            content_type: "text/plain".into(),
+            headers: vec![],
+            content: ByteBuf::from(b"a".to_vec()),
+        };
+        let err = upload_assets(&mut state, vec![upload], &ctx).unwrap_err();
+        assert!(err.contains("re-certification by"), "got: {err}");
+    }
+
+    #[test]
+    fn an_upload_waits_for_an_interrupted_toggle_to_be_finished() {
+        // `upload_assets` re-certifies in a single message, so it must not take
+        // on a toggle's leftover work: on a large site that alone would trap.
+        let mut state = site(5);
+        let ctx = mock_system_context();
+        let session_id = state
+            .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
+            .unwrap();
+        for _ in 0..4 {
+            assert!(matches!(
+                state.maintenance_step(session_id, &ctx),
+                ComputationStatus::InProgress(())
+            ));
+        }
+        let later = SystemContext {
+            current_timestamp_ns: TEST_NOW + SYNC_IDLE_TIMEOUT_NANOS,
+        };
+        let upload = || wire_types::UploadAssetArguments {
+            key: "/a.txt".into(),
+            content_type: "text/plain".into(),
+            headers: vec![],
+            content: ByteBuf::from(b"a".to_vec()),
+        };
+        let err = upload_assets(&mut state, vec![upload()], &later).unwrap_err();
+        assert!(err.contains("refresh_env"), "got: {err}");
+
+        let env = crate::runtime::CanisterEnv {
+            root_key: vec![1, 2, 3],
+            public_vars: Default::default(),
+        };
+        let session = state.refresh_env(some_principal(), &env, &later);
+        run_maintenance(&mut state, session);
+        upload_assets(&mut state, vec![upload()], &later).unwrap();
+        assert_protected(&state, 0);
+    }
+
+    #[test]
+    fn an_env_change_at_a_sync_that_never_executes_serves_the_old_cookie() {
+        // `start_sync` captures a changed env, marking the HTML assets stale,
+        // but the sync ends without an `execute_operations` call (discarded,
+        // or its client gone). Serving must not pair the new cookie with the
+        // old certificates: it keeps the published cookie until a later sync
+        // re-certifies.
+        const N: usize = 3;
+        let mut state = site(N);
+        let ctx = mock_system_context();
+        let env = crate::runtime::CanisterEnv {
+            root_key: vec![1, 2, 3],
+            public_vars: [("PUBLIC_X".to_string(), "1".to_string())].into(),
+        };
+        start_session(&mut state, &ctx);
+        state.capture_env_at_sync_start(&env);
+        assert!(state.certification_pending());
+        for url in ["/page1", "/page1.html", LOGIN_PAGE] {
+            let r = certified_http_request(&state, RequestBuilder::get(url).build());
+            assert_eq!(r.status_code, 200, "{url}");
+            assert_eq!(lookup_header(&r, "set-cookie"), None, "{url}");
+        }
+
+        // The next sync finishes the job, and the new cookie goes out with it.
+        let later = SystemContext {
+            current_timestamp_ns: TEST_NOW + SYNC_IDLE_TIMEOUT_NANOS,
+        };
+        let session_id = match state.start_sync(some_principal(), &later) {
+            StartSyncResult::Started { session_id } => session_id,
+            other => panic!("expected the stale lock to be reclaimed, got {other:?}"),
+        };
+        execute_all(&mut state, session_id, vec![], &later);
+        for url in ["/page1", LOGIN_PAGE] {
+            let r = certified_http_request(&state, RequestBuilder::get(url).build());
+            assert!(
+                lookup_header(&r, "set-cookie").is_some_and(|c| c.starts_with("ic_env=")),
+                "{url}"
+            );
+        }
     }
 }

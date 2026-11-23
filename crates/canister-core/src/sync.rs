@@ -38,6 +38,22 @@ pub(crate) struct SyncSession {
     /// finalization that set it, so the idle timeout is the sole escape from a
     /// finalization that dies mid-flight.
     pub finalizing: bool,
+    /// Whether this is a maintenance job (a protection toggle or `refresh_env`
+    /// re-certifying) rather than a sync. Only changes how the holder is named
+    /// to a caller refused the lock; see [`Self::describe`].
+    pub maintenance: bool,
+}
+
+impl SyncSession {
+    /// Names what holds the sync lock, for the error refusing it to someone
+    /// else.
+    pub fn describe(&self) -> String {
+        if self.maintenance {
+            format!("a protection or env re-certification by {}", self.owner)
+        } else {
+            format!("a sync by {}", self.owner)
+        }
+    }
 }
 
 /// Status of an incremental computation

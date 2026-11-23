@@ -442,6 +442,7 @@ impl State {
         self.store.cache_state_hash(batch.prospective_hash);
         self.store.clear_pending_assets();
         self.store.set_prepared_batch(None);
+        self.publish();
 
         Ok(batch.prospective_hash)
     }

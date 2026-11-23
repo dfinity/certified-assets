@@ -1,7 +1,8 @@
 //! Environment cookie: capturing the canister's env snapshot and re-certifying
 //! whatever it affects. The rendered `ic_env` cookie is a certified header on
 //! `text/html` responses (and on any redirect rule that rewrites to an HTML
-//! asset), so a changed snapshot must re-certify those before it is served.
+//! asset), so a changed snapshot must re-certify those before it is served —
+//! which the published snapshot guarantees (see [`crate::cert::Certifier`]).
 //! Callers refresh `certified_data` afterwards.
 
 use super::State;
@@ -24,10 +25,10 @@ impl State {
     /// vars rarely change between syncs — this is a no-op. If it changed, the
     /// HTML assets (and the rules) are marked stale, and the sync's
     /// `execute_operations` re-certifies them at the end of its first call,
-    /// spread across messages: otherwise HTML assets the sync doesn't touch
-    /// would keep an old-cookie certificate while `effective_headers` serves the
-    /// new cookie, and the gateway would reject them. A sync always follows
-    /// `start_sync` with at least one (final) `execute_operations` call.
+    /// spread across messages. Serving keeps the published cookie until that
+    /// re-certification is published, so a sync that never gets that far
+    /// (discarded, or its client gone) delays the new cookie but breaks
+    /// nothing; the next sync or `refresh_env` finishes the work.
     pub fn capture_env_at_sync_start(&mut self, env: &crate::runtime::CanisterEnv) {
         if self.certifier.env_cookie() != Some(env.render_cookies().as_slice()) {
             self.store_env(env);

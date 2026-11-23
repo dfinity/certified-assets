@@ -85,7 +85,9 @@ canister's new state hash. Things to know:
 - **Stored uncompressed.** The file is served as uploaded, with no gzip or brotli copy.
 - **You set the headers.** `_headers` rules don't apply: pass any response headers
   in `headers`, and the content type in `content_type`.
-- **It waits for deploys.** The call is rejected while a deploy is in progress.
+- **It waits for deploys.** The call is rejected while a deploy or an
+  [access-protection](access-protection.md) toggle is in progress, and after an
+  interrupted toggle until `refresh_env` or a deploy finishes it.
 - **Not under governance.** A canister that [deploys by proposal](governance.md)
   rejects it, since every content change there has to go through a vote.
 

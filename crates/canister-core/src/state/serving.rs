@@ -105,17 +105,18 @@ impl State {
                 // ---- access protection ----
                 // Runs before asset/redirect resolution so an unauthenticated
                 // request never reaches asset content (a public app skips this
-                // entirely — `protection_login_page()` is `None`).
-                if let Some(login_page) = self.protection_login_page() {
+                // entirely). Enforced as published, like everything served: a
+                // toggle takes effect when its re-certified tree does.
+                if let Some(login_page) = self.certifier.served_login_page() {
                     if path == login_page {
                         // The login surface is exempt. A POST is a login
                         // attempt (validate + Set-Cookie / 401); a GET serves the
                         // page itself, so it falls through to normal serving.
                         if req.method.eq_ignore_ascii_case("POST") {
-                            return self.serve_redeem(&req, &login_page, certificate, now);
+                            return self.serve_redeem(&req, login_page, certificate, now);
                         }
                     } else if !self.cookie_token_valid(&req, now) {
-                        return self.serve_unauthenticated(&path, &login_page, certificate);
+                        return self.serve_unauthenticated(&path, login_page, certificate);
                     }
                 }
                 self.build_http_response(certificate, &path, encodings, etags, range_start)
@@ -148,8 +149,8 @@ impl State {
         &self,
         path: &str,
     ) -> Option<(&RedirectRule, &crate::redirect::CertifiedRuleEntry)> {
-        self.store
-            .redirect_rules()
+        self.certifier
+            .served_rules()
             .iter()
             .enumerate()
             .find_map(|(idx, rule)| {
@@ -282,7 +283,7 @@ impl State {
         }
 
         let mut headers = headers_for(
-            &self.certifier.effective_headers(&self.store, meta),
+            &self.certifier.served_headers(meta),
             &meta.content_type,
             encoding,
             &enc.sha256,
@@ -355,7 +356,7 @@ impl State {
         let chunk = self.store.read_chunk(enc.content_id, chunk_index);
         let content_range = format!("bytes {}-{}/{}", chunk_start, chunk_start + len - 1, total);
         let mut headers = range_headers_for(
-            &self.certifier.effective_headers(&self.store, meta),
+            &self.certifier.served_headers(meta),
             &meta.content_type,
             encoding,
             &enc.sha256,

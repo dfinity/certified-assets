@@ -132,6 +132,7 @@ impl State {
             owner,
             last_activity_ns: now,
             finalizing: false,
+            maintenance: false,
         });
 
         StartSyncResult::Started { session_id }
@@ -213,10 +214,22 @@ impl State {
                 .saturating_sub(active.last_activity_ns);
             if idle < SYNC_IDLE_TIMEOUT_NANOS {
                 return Err(format!(
-                    "a sync by {} is in progress; retry once it finishes",
-                    active.owner
+                    "{} is in progress; retry once it finishes",
+                    active.describe()
                 ));
             }
+        }
+        // The whole upload, re-certification included, runs in this call's
+        // first message (see `apply_upload_operations`), so it must not inherit
+        // a re-certification some earlier call left unfinished: on a large site
+        // a toggle's leftover work alone exceeds one message, and the upload
+        // would trap until someone finished it.
+        if self.certifier.has_unfinished_job() {
+            return Err(
+                "an earlier re-certification was left unfinished; call refresh_env \
+                 (or deploy) to finish it, then retry"
+                    .to_string(),
+            );
         }
 
         let session_id = match self.start_sync(owner, system_context) {
@@ -452,6 +465,8 @@ impl State {
                             ExecuteOperationsProgress::Recertifying,
                         );
                     }
+                    // Everything this call changed is certified: serve it.
+                    self.publish();
 
                     // Finalize the sync only when the caller signals this is the
                     // last call; otherwise keep the session open for further

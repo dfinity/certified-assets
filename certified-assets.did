@@ -362,7 +362,8 @@ service: (opt InitArgs) -> {
   // deploy a fixed bundle and must customize one file afterwards.
   //
   // Internally a one-asset sync: it needs no session, but takes the sync lock
-  // for its duration. Rejected while another sync is in progress, in
+  // for its duration. Rejected while another sync or a protection toggle is in
+  // progress (or an interrupted toggle is unfinished: call `refresh_env`), in
   // by-proposal mode (every content change goes through a proposal there), and
   // for a key not starting with `/`. The content must fit in one ingress
   // message (~2 MB).
@@ -439,9 +440,8 @@ service: (opt InitArgs) -> {
   // Turn the gate off and drop all tokens. Same exclusion with syncs.
   disable_protection : () -> ();
   // Mint a token; returns the token value (shown once). A classic "password" is
-  // one long-lived token. Rejected while a protection toggle or a deploy is
-  // still re-certifying; retry once it completes (`refresh_env` finishes an
-  // interrupted toggle).
+  // one long-lived token. Redeemable at once, or — while a protection toggle or
+  // a deploy is still re-certifying — once that completes.
   issue_token : (IssueTokenArgs) -> (text);
   // Revoke the token with the given label (live on the next request).
   revoke_token : (label : text) -> ();

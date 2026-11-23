@@ -142,12 +142,12 @@ impl State {
     /// already enabled at the same page; re-pointing to a different page drops the
     /// old tokens (their redeem certs live under the old subtree).
     ///
-    /// Takes the sync lock and flips the setting — the serve path enforces it
-    /// from here on — then marks every asset and rule stale. The caller drives
-    /// the returned maintenance session to completion (see
-    /// [`Self::maintenance_step`]), which re-certifies them under protection,
-    /// releases the lock, and then publishes `certified_data`. Until it does,
-    /// responses fail verification rather than verify unprotected.
+    /// Takes the sync lock, stores the setting and marks every asset and rule
+    /// stale. The caller drives the returned maintenance session to completion
+    /// (see [`Self::maintenance_step`]), which re-certifies them under
+    /// protection, releases the lock and publishes the result. Serving enforces
+    /// protection from that publish on — the same moment the tree certifies it
+    /// — so the site stays public, and verifiable, until the call completes.
     pub fn enable_protection(
         &mut self,
         owner: Principal,
@@ -169,7 +169,9 @@ impl State {
 
     /// Turns access protection **off** and drops all tokens, restoring a fully public app.
     /// Takes the sync lock like [`Self::enable_protection`]; the caller drives the
-    /// returned maintenance session and publishes `certified_data` afterwards.
+    /// returned maintenance session, and the site turns public when it publishes.
+    /// The tokens go at once, so until then every visitor is sent to the login
+    /// page.
     pub fn disable_protection(
         &mut self,
         owner: Principal,
@@ -185,39 +187,14 @@ impl State {
         Ok(session_id)
     }
 
-    /// Whether the certified tree matches the stored state: no asset or rule
-    /// entry is owed re-certification, and no job is partway through. False
-    /// while a protection toggle or env refresh is re-certifying (or was left
-    /// unfinished), and between the messages of a sync's `execute_operations`
-    /// call. Nothing may publish `certified_data` before then, or it would
-    /// publish a half-re-certified tree — after enabling protection, one that
-    /// still certifies some public responses.
-    pub fn certification_complete(&self) -> bool {
-        !self.certifier.has_pending_work()
-    }
-
-    /// Refuses issuing a token while certification is incomplete, since issuing
-    /// publishes `certified_data` (see [`Self::certification_complete`]). The
-    /// running deploy or toggle finishes the job; if it died, `refresh_env`
-    /// (or the next deploy) does.
-    fn require_certification_complete(&self) -> Result<(), String> {
-        if !self.certification_complete() {
-            return Err(
-                "certification is still being updated by a deploy or a protection \
-                 change; retry once it completes (if it was interrupted, call \
-                 refresh_env to finish it)"
-                    .to_string(),
-            );
-        }
-        Ok(())
-    }
-
     /// Mints a token under `label`: stores the record (`token_id`, expiry,
     /// redeem-cert path) and the access-protection index entry (`token_id → expiry`), certifies
     /// this token's redeem response, and first sweeps expired tokens so the
     /// store/tree track only live tokens. The plaintext `value` is supplied by the
     /// caller (random or chosen) and is never stored. Errors if protection is off.
-    /// Caller publishes `certified_data` afterwards.
+    ///
+    /// The token is redeemable once its redeem response is published: at once,
+    /// or — while a re-certification is in flight — when that finishes.
     pub fn issue_token(
         &mut self,
         value: String,
@@ -228,7 +205,6 @@ impl State {
         let Some(login_page) = self.protection_login_page() else {
             return Err("protection is not enabled".to_string());
         };
-        self.require_certification_complete()?;
         self.sweep_expired_tokens(now);
         // Labels are the unique identifier: re-issuing under an existing label
         // rotates it — drop the old token's access-protection index entry and redeem cert first.
@@ -248,6 +224,7 @@ impl State {
                 redeem_path: redeem_tp.0,
             },
         );
+        self.publish();
         Ok(())
     }
 
@@ -278,12 +255,11 @@ impl State {
     }
 
     /// Revokes the token with the given label (live — the next request bearing it
-    /// fails access protection). O(log n) by label. Never refused, unlike
-    /// `issue_token`: the caller publishes `certified_data` afterwards only when
-    /// [`Self::certification_complete`] — the serve side rejects the token
-    /// either way, so a still-certified redeem leaf grants nothing.
+    /// fails access protection: the serve side checks the live token index, so
+    /// a redeem leaf still published grants nothing). O(log n) by label.
     pub fn revoke_token(&mut self, label: &str) {
         self.remove_token(label);
+        self.publish();
     }
 
     /// Live tokens (label + expiry) for the management UI. Controller-guarded at

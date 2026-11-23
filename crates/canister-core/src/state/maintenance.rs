@@ -35,13 +35,25 @@ impl State {
             && now.saturating_sub(active.last_activity_ns) < SYNC_IDLE_TIMEOUT_NANOS
         {
             return Err(format!(
-                "a sync by {} is in progress; retry once it finishes",
-                active.owner
+                "{} is in progress; retry once it finishes",
+                active.describe()
             ));
         }
-        // Taking over an abandoned sync: drop its staged chunks, as a reclaiming
-        // `start_sync` would. Its cached hash was already invalidated when it
-        // started, and anything it left stale is picked up below.
+        // Taking over an abandoned sync: clean up after it as a reclaiming
+        // `start_sync` would. An unstaged prepared batch is an abandoned
+        // by-proposal upload — discard it (which also ends the session and
+        // drops its chunks); a staged one awaits its proposal and is left
+        // alone, since a maintenance job touches nothing it was prepared
+        // against. Then drop any staged chunks. The sync's cached hash was
+        // already invalidated when it started, and anything it left stale is
+        // picked up by this job.
+        if self
+            .store
+            .prepared_batch()
+            .is_some_and(|batch| !batch.staged)
+        {
+            self.discard_proposed_state();
+        }
         self.chunks.clear();
         let id = self.alloc_session_id();
         self.sync_session = Some(SyncSession {
@@ -49,13 +61,14 @@ impl State {
             owner,
             last_activity_ns: now,
             finalizing: true,
+            maintenance: true,
         });
         Ok(id)
     }
 
     /// Advances the maintenance job holding `session_id` by one asset or rule,
-    /// releasing the lock once everything stale is certified. Caller publishes
-    /// `certified_data` once it is `Done`.
+    /// releasing the lock and publishing the re-certified tree once everything
+    /// stale is certified. Caller sets `certified_data` once it is `Done`.
     pub fn maintenance_step(
         &mut self,
         session_id: SessionId,
@@ -77,6 +90,7 @@ impl State {
             ComputationStatus::InProgress(())
         } else {
             self.sync_session = None;
+            self.publish();
             ComputationStatus::Done(())
         }
     }
