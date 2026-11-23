@@ -101,6 +101,12 @@ impl State {
     /// Handles `POST <login_page>` (a certified query — no upgrade). Reads the
     /// presented value from the form body and returns this token's certified
     /// `302 + Set-Cookie` on success, or the certified `401` re-prompt otherwise.
+    ///
+    /// The token is checked against the live index (so a revocation or expiry
+    /// applies at once), but succeeds only once its redeem response is
+    /// published at `login_page`: a token issued while a re-certification is
+    /// pending, or under a login page a pending toggle is moving, gets the
+    /// certified `401` until then rather than an unverifiable `302`.
     pub(super) fn serve_redeem(
         &self,
         req: &HttpRequest,
@@ -116,7 +122,9 @@ impl State {
                 .is_some_and(|&expires_at| expires_at > now)
         {
             let resp = ProtectionResponse::redeem_success(&value);
-            return self.serve_protection_response(&resp, login_page, &location, certificate);
+            if self.certifier.serves_protection_response(&location, &resp) {
+                return self.serve_protection_response(&resp, login_page, &location, certificate);
+            }
         }
         let resp = ProtectionResponse::redeem_failure();
         self.serve_protection_response(&resp, login_page, &location, certificate)

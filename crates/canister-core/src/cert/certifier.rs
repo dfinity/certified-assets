@@ -325,6 +325,18 @@ impl Certifier {
         self.published.login_page.as_deref()
     }
 
+    /// Whether `resp` is certified at `location` in the published tree, so
+    /// serving it would verify.
+    pub fn serves_protection_response(
+        &self,
+        location: &HashTreePath,
+        resp: &ProtectionResponse,
+    ) -> bool {
+        self.published
+            .tree
+            .contains_leaf(protection_leaf(location, resp).as_vec())
+    }
+
     /// The header list a response is served with — [`Self::effective_headers`]
     /// under the published env cookie and protection setting.
     pub fn served_headers(&self, meta: &AssetMeta) -> Vec<(String, String)> {

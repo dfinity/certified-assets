@@ -460,8 +460,12 @@ impl State {
         // End the preparing sync too, if one is still running. Dropping the
         // batch out from under it would otherwise leave its remaining
         // operations writing into an overlay with nothing to stage them; ending
-        // the session makes those calls fail cleanly on their session id.
-        self.sync_session = None;
+        // the session makes those calls fail cleanly on their session id. A
+        // maintenance job holding the lock is no sync of this batch — it never
+        // touches it — so it keeps running.
+        if self.sync_session.as_ref().is_some_and(|s| !s.maintenance) {
+            self.sync_session = None;
+        }
         self.chunks.clear();
         // Everything from this prepare's watermark up to the allocator's current
         // position was allocated by it and is referenced by nothing live.

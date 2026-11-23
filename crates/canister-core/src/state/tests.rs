@@ -5044,6 +5044,25 @@ mod governance {
     }
 
     #[test]
+    fn discarding_a_proposal_leaves_a_running_maintenance_job_alone() {
+        let mut state = State::default();
+        let ctx = mock_system_context();
+        enable(&mut state);
+        create_assets(
+            &mut state,
+            &ctx,
+            vec![
+                AssetBuilder::new("/index.html", "text/html").with_encoding("identity", vec![b"x"]),
+            ],
+        );
+        let session = state.enable_protection(some_principal(), "/login.html".into(), &ctx);
+        state.discard_proposed_state();
+        assert!(matches!(state.proposed_state(), ProposedState::None));
+        run_maintenance(&mut state, session);
+        assert!(!state.certification_pending());
+    }
+
+    #[test]
     fn a_maintenance_job_leaves_a_staged_batch_for_its_proposal() {
         let mut state = State::default();
         let ctx = mock_system_context();
@@ -6599,6 +6618,38 @@ mod maintenance {
         for i in 0..N {
             assert_protected(&state, i);
         }
+    }
+
+    #[test]
+    fn a_token_issued_mid_job_redeems_once_its_response_is_published() {
+        // On a protected site the live token index admits a new token at once,
+        // but its redeem response is certified only when the pending job
+        // publishes. Until then the login POST gets the certified 401 — never
+        // an unverifiable 302.
+        let mut state = site(3);
+        let ctx = mock_system_context();
+        let session = state.enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx);
+        run_maintenance(&mut state, session);
+        let env = crate::runtime::CanisterEnv {
+            root_key: vec![1, 2, 3],
+            public_vars: Default::default(),
+        };
+        let session = state.refresh_env(some_principal(), &env, &ctx);
+        state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .unwrap();
+        let redeem = |state: &State| {
+            certified_http_request(
+                state,
+                RequestBuilder::post(LOGIN_PAGE)
+                    .with_body("token=secret")
+                    .build(),
+            )
+            .status_code
+        };
+        assert_eq!(redeem(&state), 401);
+        run_maintenance(&mut state, session);
+        assert_eq!(redeem(&state), 302);
     }
 
     #[test]

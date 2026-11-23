@@ -36,6 +36,24 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
+/// Mutably borrows the state, then sets `certified_data` to the published root
+/// before returning — in the same message. Every update path mutates the state
+/// through this, never `STATE.with_borrow_mut` directly.
+///
+/// The published snapshot (see [`cert::Certifier`]) is what serving reads, and
+/// it can change in any step of a multi-message call (a sync publishes before
+/// its hashing phase, a maintenance job on its last step). The certificate a
+/// query attaches must name that snapshot's root, so the register is updated in
+/// the very message that may have published, before the call can yield. Setting
+/// an unchanged root is harmless and cheap.
+fn with_state_mut<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    STATE.with_borrow_mut(|s| {
+        let result = f(s);
+        certified_data_set(s.root_hash());
+        result
+    })
+}
+
 /// The semver release version this canister was built with. The sync plugin
 /// checks this against its own version and refuses to proceed on a mismatch, and
 /// the value also encodes state-upgradability between releases. See
@@ -46,12 +64,12 @@ pub fn version() -> Version {
 
 /// Adds `principal` to the authorized set. Controller-guarded at the endpoint.
 pub fn authorize(principal: Principal) {
-    STATE.with_borrow_mut(|s| s.authorize(principal))
+    with_state_mut(|s| s.authorize(principal))
 }
 
 /// Removes `principal` from the authorized set. Controller-guarded at the endpoint.
 pub fn deauthorize(principal: Principal) {
-    STATE.with_borrow_mut(|s| s.deauthorize(&principal))
+    with_state_mut(|s| s.deauthorize(&principal))
 }
 
 /// Renders an `authorize` payload for voters — the `validator_method` of the SNS
@@ -101,7 +119,7 @@ pub fn start_sync() -> StartSyncResult {
     let system_context = SystemContext::new();
     let caller = msg_caller();
 
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         let result = s.start_sync(caller, &system_context);
         // Capture the env once, at sync start, so every asset (re)certified by
         // the operations that follow already carries the current `ic_env`
@@ -121,7 +139,7 @@ pub fn start_sync() -> StartSyncResult {
 pub fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
     let system_context = SystemContext::new();
 
-    STATE.with_borrow_mut(|s| match s.upload_chunks(arg, &system_context) {
+    with_state_mut(|s| match s.upload_chunks(arg, &system_context) {
         Ok(ids) => ids,
         Err(msg) => trap(&msg),
     })
@@ -141,14 +159,12 @@ pub async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteB
         // Fresh per step: a long call spans many messages, and the steps that
         // touch the sync lock must stamp the current time, not the call's start.
         let system_context = SystemContext::new();
-        STATE.with_borrow_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
+        with_state_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
     })
     .await
     .map_err(|msg| trap(&msg))
     .ok()
     .flatten();
-
-    STATE.with_borrow_mut(|s| certified_data_set(s.root_hash()));
 
     state_hash.map(|hash| ByteBuf::from(hash.to_vec()))
 }
@@ -174,24 +190,23 @@ pub async fn upload_assets(assets: Vec<UploadAssetArguments>) -> ByteBuf {
     let system_context = SystemContext::new();
     let caller = msg_caller();
 
-    let (call, hashing) = STATE
-        .with_borrow_mut(|s| {
-            let call = s.begin_upload_assets(caller, assets, &system_context)?;
-            // As in `start_sync`: capture the env before any asset is certified,
-            // so an uploaded HTML asset carries the current `ic_env` cookie.
-            s.capture_env_at_sync_start(&CanisterEnv::load());
-            let hashing = s.apply_upload_operations(&call, &system_context)?;
-            // Every asset is written: certify them before the first yield.
-            certified_data_set(s.root_hash());
-            Ok((call, hashing))
-        })
-        .unwrap_or_else(|msg: String| trap(&msg));
+    let (call, hashing) = with_state_mut(|s| {
+        let call = s.begin_upload_assets(caller, assets, &system_context)?;
+        // As in `start_sync`: capture the env before any asset is certified,
+        // so an uploaded HTML asset carries the current `ic_env` cookie.
+        s.capture_env_at_sync_start(&CanisterEnv::load());
+        let hashing = s.apply_upload_operations(&call, &system_context)?;
+        // Every asset is written and published; `with_state_mut` sets
+        // `certified_data` before the first yield.
+        Ok((call, hashing))
+    })
+    .unwrap_or_else(|msg: String| trap(&msg));
 
     // Only the state-hash recompute is left, which changes nothing served, so
     // it is safe to spread across messages.
     let call_ref = &call;
     let state_hash = loop_with_message_extension_from(hashing, |progress| {
-        STATE.with_borrow_mut(|s| s.execute_operations(call_ref, progress, &system_context))
+        with_state_mut(|s| s.execute_operations(call_ref, progress, &system_context))
     })
     .await
     .unwrap_or_else(|msg| trap(&msg))
@@ -262,9 +277,9 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
 /// across messages; refused while a sync is in progress.
 pub async fn enable_protection(login_page: String) {
     let caller = msg_caller();
-    let session_id = STATE
-        .with_borrow_mut(|s| s.enable_protection(caller, login_page, &SystemContext::new()))
-        .unwrap_or_else(|msg| trap(&msg));
+    let session_id =
+        with_state_mut(|s| s.enable_protection(caller, login_page, &SystemContext::new()))
+            .unwrap_or_else(|msg| trap(&msg));
     run_maintenance(session_id).await;
 }
 
@@ -272,26 +287,24 @@ pub async fn enable_protection(login_page: String) {
 /// Staged like [`enable_protection`].
 pub async fn disable_protection() {
     let caller = msg_caller();
-    let session_id = STATE
-        .with_borrow_mut(|s| s.disable_protection(caller, &SystemContext::new()))
+    let session_id = with_state_mut(|s| s.disable_protection(caller, &SystemContext::new()))
         .unwrap_or_else(|msg| trap(&msg));
     run_maintenance(session_id).await;
 }
 
 /// Drives a maintenance job (see [`State::maintenance_step`]) to completion,
-/// yielding between steps when the instruction budget runs low, then publishes
-/// the re-certified tree. A trap partway leaves the work marked stale for the
-/// next job or sync to finish, and `certified_data` unpublished meanwhile.
+/// yielding between steps when the instruction budget runs low. Its last step
+/// publishes the re-certified tree. A trap partway leaves the work marked stale
+/// for the next job or sync to finish, and the old tree served meanwhile.
 async fn run_maintenance(session_id: SessionId) {
     loop_with_message_extension_until_completion(|()| {
         // Fresh per step: each step touches the lock with the current time, so
         // a long job never looks idle.
         let system_context = SystemContext::new();
-        STATE.with_borrow_mut(|s| s.maintenance_step(session_id, &system_context))
+        with_state_mut(|s| s.maintenance_step(session_id, &system_context))
     })
     .await
     .unwrap_or_else(|msg| trap(&msg));
-    STATE.with_borrow(|s| certified_data_set(s.root_hash()));
 }
 
 /// Issues an access token and returns its plaintext value (shown once). With
@@ -310,11 +323,10 @@ pub async fn issue_token(args: IssueTokenArgs) -> String {
         }
     };
     let now = time();
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         if let Err(msg) = s.issue_token(value.clone(), args.label, args.ttl_secs, now) {
             trap(&msg);
         }
-        certified_data_set(s.root_hash());
     });
     value
 }
@@ -322,9 +334,8 @@ pub async fn issue_token(args: IssueTokenArgs) -> String {
 /// Revokes the token with the given label (live on the next request).
 /// Controller-guarded.
 pub fn revoke_token(label: String) {
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         s.revoke_token(&label);
-        certified_data_set(s.root_hash());
     })
 }
 
@@ -368,7 +379,7 @@ fn is_owner(caller: &Principal) -> bool {
 /// every sync then prepares instead of publishing. Controller-guarded at the
 /// endpoint; refused while a batch is prepared.
 pub fn set_governance(approver: Option<Principal>) {
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         if let Err(msg) = s.set_governance_approver(approver) {
             trap(&msg);
         }
@@ -408,11 +419,10 @@ pub fn proposed_state() -> ProposedState {
 /// as it was.
 pub fn commit_proposed_state(state_hash_hex: String) {
     let expected = governance::parse_state_hash(&state_hash_hex).unwrap_or_else(|e| trap(&e));
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         if let Err(msg) = s.commit_proposed_state(expected) {
             trap(&msg);
         }
-        certified_data_set(s.root_hash());
     })
 }
 
@@ -502,9 +512,8 @@ pub fn validate_set_governance(approver: Option<Principal>) -> Result<String, St
 /// without it a prepared batch blocks every further sync. Guarded like a sync,
 /// so the developer who prepared it can clean up without a proposal.
 pub fn discard_proposed_state() {
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         s.discard_proposed_state();
-        certified_data_set(s.root_hash());
     })
 }
 
@@ -549,8 +558,7 @@ pub fn guard_is_controller() -> Result<(), String> {
 pub async fn refresh_env() {
     let env = CanisterEnv::load(); // replicated context — system API is readable
     let caller = msg_caller();
-    let session_id = STATE
-        .with_borrow_mut(|s| s.refresh_env(caller, &env, &SystemContext::new()))
+    let session_id = with_state_mut(|s| s.refresh_env(caller, &env, &SystemContext::new()))
         .unwrap_or_else(|msg| trap(&msg));
     run_maintenance(session_id).await;
 }
@@ -577,7 +585,7 @@ pub fn init(args: Option<InitArgs>) {
         let pages = store::bucket_size_in_pages(&mib).unwrap_or_else(|e| trap(e));
         init_state_with_bucket_size(pages);
     }
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         for principal in args.authorize.into_iter().flatten() {
             s.authorize(principal);
         }
@@ -620,10 +628,9 @@ fn init_state_with_bucket_size(pages: u16) {
 /// and it would silently vanish until the next `refresh_env`.
 pub fn post_upgrade() {
     let env = CanisterEnv::load(); // replicated context — system API is readable
-    STATE.with_borrow_mut(|s| {
+    with_state_mut(|s| {
         s.store_env(&env);
         s.post_upgrade_rebuild();
-        certified_data_set(s.root_hash());
     });
 }
 
