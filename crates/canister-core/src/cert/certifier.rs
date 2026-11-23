@@ -260,13 +260,15 @@ enum RebuildPhase {
         n: usize,
         built: Vec<Option<CertifiedRuleEntry>>,
     },
-    /// Editing the tree: retracting `remove[..]` from `next`, then certifying
-    /// `insert[..]` from `next - remove.len()`.
+    /// Editing the tree, one edit per step from `next`: retracting
+    /// `remove[..]`, then certifying `insert[..]`, then re-certifying the
+    /// assets in `reassert[..]`.
     Apply {
         built: Vec<Option<CertifiedRuleEntry>>,
         fallback: Vec<HashTreePath>,
         remove: Vec<HashTreePath>,
         insert: Vec<HashTreePath>,
+        reassert: Vec<AssetKey>,
         next: usize,
     },
 }
@@ -930,12 +932,18 @@ impl Certifier {
                 fallback,
                 remove,
                 insert,
+                reassert,
                 next,
             } => {
                 if let Some(tp) = remove.get(next) {
                     self.asset_hashes.remove_response_precomputed(tp);
                 } else if let Some(tp) = insert.get(next - remove.len()) {
                     self.asset_hashes.certify_response_precomputed(tp);
+                } else if let Some(key) = reassert.get(next - remove.len() - insert.len()) {
+                    // Deleted since planning: its own op cleared the slot.
+                    if let Some(meta) = store.get_asset(key) {
+                        self.recertify_asset(store, key, &meta);
+                    }
                 } else {
                     self.install(rebuild.targets, built, rebuild.clears_fallback, fallback);
                     return None;
@@ -945,6 +953,7 @@ impl Certifier {
                     fallback,
                     remove,
                     insert,
+                    reassert,
                     next: next + 1,
                 };
             }
@@ -960,6 +969,13 @@ impl Certifier {
     /// for certifying, kept or not: an asset op may have wiped a kept leaf from
     /// the tree (it clears its whole path, which an exact rule shares), and
     /// certifying a leaf that is present is a cheap no-op.
+    ///
+    /// The reverse sharing is settled last: an old entry built before an
+    /// asset arrived at its exact source can hold leaves identical to that
+    /// asset's own (see [`CertifiedRuleEntry::slot_key`]), which retracting it
+    /// deletes. Such an asset now shadows every rule at its slot, so
+    /// re-certifying it afterwards restores exactly its leaves. In the steady
+    /// state a shadowed rule has no entry, so this costs nothing.
     fn plan_apply(
         &self,
         store: &Store,
@@ -986,19 +1002,22 @@ impl Certifier {
             }
         }
 
-        let old: Vec<&HashTreePath> = match targets {
-            None => self
-                .rule_certified_entries
-                .iter()
-                .flatten()
-                .flat_map(|entry| &entry.tree_paths)
-                .collect(),
+        let old_entries: Vec<&CertifiedRuleEntry> = match targets {
+            None => self.rule_certified_entries.iter().flatten().collect(),
             Some(targets) => targets
                 .iter()
                 .filter_map(|&idx| self.rule_certified_entries[idx].as_ref())
-                .flat_map(|entry| &entry.tree_paths)
                 .collect(),
         };
+        let old = old_entries.iter().flat_map(|entry| &entry.tree_paths);
+        let mut reassert: Vec<AssetKey> = old_entries
+            .iter()
+            .filter_map(|entry| entry.slot_key.as_ref())
+            .filter(|key| store.contains_asset(key))
+            .cloned()
+            .collect();
+        reassert.sort_unstable();
+        reassert.dedup();
         let old_fallback: &[HashTreePath] = if clears_fallback {
             &self.fallback_leaves
         } else {
@@ -1019,7 +1038,6 @@ impl Certifier {
         }
         let mut removed: HashSet<&HashTreePath> = HashSet::new();
         let remove: Vec<HashTreePath> = old
-            .into_iter()
             .chain(old_fallback)
             .filter(|tp| !new.contains(tp) && removed.insert(tp))
             .cloned()
@@ -1030,6 +1048,7 @@ impl Certifier {
             fallback,
             remove,
             insert,
+            reassert,
             next: 0,
         }
     }
@@ -1170,6 +1189,7 @@ impl Certifier {
             tree_paths,
             location,
             kind: crate::redirect::CertifiedRuleEntryKind::AliasOf { target_key, status },
+            slot_key: crate::redirect::exact_from(rule),
         })
     }
 }

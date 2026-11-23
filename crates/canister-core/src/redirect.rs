@@ -188,6 +188,12 @@ pub struct CertifiedRuleEntry {
     /// `expr_path` field of the `IC-Certificate` response header.
     pub location: HashTreePath,
     pub kind: CertifiedRuleEntryKind,
+    /// For an exact rule, the asset key whose `<$>` slot the rule shares. An
+    /// asset at that key shadows the rule, and certifies leaves at the same
+    /// location — some identical to the rule's (the protection `307` sibling,
+    /// or a rewrite of byte-identical content) — so retracting this entry
+    /// after such an asset arrived must give the asset its leaves back.
+    pub slot_key: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +210,15 @@ pub enum CertifiedRuleEntryKind {
     /// target asset's body but re-certifies each encoding with the override
     /// status (different response_hash than the asset's own 200 entry).
     AliasOf { target_key: String, status: u16 },
+}
+
+/// The key an exact rule's source shares its tree slot with (see
+/// [`CertifiedRuleEntry::slot_key`]).
+pub fn exact_from(rule: &RedirectRule) -> Option<String> {
+    match &rule.from {
+        RulePattern::Exact(from) => Some(from.clone()),
+        RulePattern::Subtree(_) => None,
+    }
 }
 
 /// Build the certified-tree entries for a 3xx redirect rule. The response
@@ -234,6 +249,7 @@ pub fn build_synthetic_entry(rule: &RedirectRule) -> CertifiedRuleEntry {
         tree_paths: vec![tree_path],
         location,
         kind: CertifiedRuleEntryKind::Synthetic { expression },
+        slot_key: exact_from(rule),
     }
 }
 

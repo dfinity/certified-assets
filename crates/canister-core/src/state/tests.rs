@@ -4334,6 +4334,38 @@ mod access_protection {
     }
 
     #[test]
+    fn an_asset_taking_over_a_rule_source_keeps_its_unauthenticated_redirect() {
+        // An exact rule at `/x.html` certifies a `307 → login` sibling there,
+        // the very leaf an HTML asset at `/x.html` certifies for itself. When
+        // such an asset arrives and shadows the rule, retracting the rule's
+        // leaves must not take the asset's with them.
+        use wire_types::{RedirectRule, RulePattern, SetRedirectRulesArguments};
+        let mut state = protected_state();
+        let ctx = mock_system_context();
+        let session_id = start_session(&mut state, &ctx);
+        execute_all(
+            &mut state,
+            session_id,
+            vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules: vec![RedirectRule {
+                    from: RulePattern::Exact("/x.html".into()),
+                    to: "/index.html".into(),
+                    status: 307,
+                    headers: vec![],
+                }],
+            })],
+            &ctx,
+        );
+        let r = certified_http_request(&state, RequestBuilder::get("/x.html").build());
+        assert_eq!(r.status_code, 307);
+
+        create_assets(&mut state, &ctx, vec![html_asset("/x.html", HTML)]);
+        let r = certified_http_request(&state, RequestBuilder::get("/x.html").build());
+        assert_eq!(r.status_code, 307);
+        assert_eq!(lookup_header(&r, "location"), Some(LOGIN_PAGE));
+    }
+
+    #[test]
     fn unauthenticated_non_html_gets_certified_401() {
         let state = protected_state();
         let r = certified_http_request(&state, RequestBuilder::get("/app.js").build());
@@ -6362,6 +6394,101 @@ mod rule_rebuild {
         let session_id = start_session(&mut state, &ctx);
         execute_all(&mut state, session_id, vec![], &ctx);
         check(&state, "resumed");
+    }
+
+    /// Sets a `200` rewrite `/copy → /page0.html` over `seed_pages`, staged
+    /// across steps, returning the call and where it stopped: `steps` into its
+    /// rebuild, or done (`None`).
+    fn rewrite_copy(
+        state: &mut State,
+        steps: usize,
+    ) -> (
+        ExecuteOperationsArguments,
+        Option<ExecuteOperationsProgress>,
+    ) {
+        let session_id = start_session(state, &mock_system_context());
+        let mut rules = state.store.redirect_rules().to_vec();
+        rules.push(RedirectRule {
+            from: RulePattern::Exact("/copy".into()),
+            to: page(0),
+            status: 200,
+            headers: vec![],
+        });
+        let args = ExecuteOperationsArguments {
+            session_id,
+            operations: vec![Operation::SetRedirectRules(SetRedirectRulesArguments {
+                rules,
+            })],
+            is_final: false,
+        };
+        let (progress, _) = drive(state, &args, ExecuteOperationsProgress::Starting, steps);
+        (args, progress)
+    }
+
+    /// Ops creating an asset at `/copy` byte-identical to `/page0.html`, so it
+    /// certifies the very leaves the `/copy` rewrite does.
+    fn copy_of_page0(state: &mut State, session_id: SessionId) -> Vec<Operation> {
+        assemble_create_assets_and_set_contents_operations(
+            state,
+            &mock_system_context(),
+            vec![AssetBuilder::new("/copy", "text/html").with_encoding("identity", vec!["page 0"])],
+            session_id,
+        )
+    }
+
+    #[test]
+    fn an_asset_taking_over_an_identical_rewrite_keeps_its_leaves() {
+        const N: usize = 3;
+        let mut state = State::default();
+        seed_pages(&mut state, N);
+        let (args, progress) = rewrite_copy(&mut state, usize::MAX);
+        assert!(progress.is_none());
+        let ops = copy_of_page0(&mut state, args.session_id);
+        execute_all(&mut state, args.session_id, ops, &mock_system_context());
+
+        let r = certified_http_request(&state, RequestBuilder::get("/copy").build());
+        assert_eq!(r.body.as_ref(), b"page 0");
+    }
+
+    #[test]
+    fn an_asset_arriving_while_a_rebuild_applies_keeps_its_leaves() {
+        // Call A plans the `/copy` rewrite while no asset is there, and is
+        // stopped once it is editing the tree. Call B then creates an
+        // identical asset at `/copy`; its end-of-call steps finish A's job
+        // (which runs on once applying) and then retract the now-shadowed rule.
+        const N: usize = 3;
+        let mut state = State::default();
+        seed_pages(&mut state, N);
+        // Past building all 2N + 1 rules and planning: applying.
+        let (a, a_progress) = rewrite_copy(&mut state, 2 * N + 2);
+        assert!(a_progress.is_some(), "the rebuild finished too soon");
+
+        let ops = copy_of_page0(&mut state, a.session_id);
+        let b = ExecuteOperationsArguments {
+            session_id: a.session_id,
+            operations: ops,
+            is_final: false,
+        };
+        assert!(
+            drive(
+                &mut state,
+                &b,
+                ExecuteOperationsProgress::Starting,
+                usize::MAX
+            )
+            .0
+            .is_none()
+        );
+        assert!(
+            drive(&mut state, &a, a_progress.unwrap(), usize::MAX)
+                .0
+                .is_none()
+        );
+
+        assert!(!state.certification_pending());
+        let r = certified_http_request(&state, RequestBuilder::get("/copy").build());
+        assert_eq!(r.body.as_ref(), b"page 0");
+        assert_page_served(&state, 0, "page 0");
     }
 
     #[test]
