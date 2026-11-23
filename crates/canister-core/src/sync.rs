@@ -14,7 +14,7 @@
 //! `execute_operations` — are the `State`-bound half, in [`crate::state`]'s
 //! private `sync` submodule.
 
-use crate::cert::{AssetKey, Recertification};
+use crate::cert::AssetKey;
 use candid::Principal;
 use wire_types::SessionId;
 
@@ -73,8 +73,9 @@ pub(crate) enum ExecuteOperationsProgress {
     /// replaced it, else only the rules depending on an asset key it touched.
     /// One asset or rule per step, so a site with thousands of (synthesised)
     /// rules stays within the per-message instruction limit. Then resumes the
-    /// end of `ProcessingOperations`.
-    Recertifying { job: Recertification },
+    /// end of `ProcessingOperations`. The job itself lives on the `Certifier`
+    /// (see `Certifier::recertification_step`).
+    Recertifying,
     /// After all operations of a **final** call are applied, recompute the cached
     /// canonical state hash (see the `state-hash` crate), folding in one asset per
     /// step so a many-asset state stays within the per-message instruction limit.
@@ -87,15 +88,4 @@ pub(crate) enum ExecuteOperationsProgress {
         /// (`None` ⇒ start from the first key).
         resume_after: Option<AssetKey>,
     },
-}
-
-/// Progress of a maintenance job (a protection toggle or env refresh): see
-/// `State::maintenance_step`.
-#[derive(Debug, Default)]
-pub(crate) enum MaintenanceProgress {
-    /// The job has taken the lock and marked what it changed stale.
-    #[default]
-    Starting,
-    /// Re-certifying the stale assets and rules, one per step.
-    Recertifying { job: Recertification },
 }

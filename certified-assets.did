@@ -439,7 +439,9 @@ service: (opt InitArgs) -> {
   // Turn the gate off and drop all tokens. Same exclusion with syncs.
   disable_protection : () -> ();
   // Mint a token; returns the token value (shown once). A classic "password" is
-  // one long-lived token.
+  // one long-lived token. Rejected while a protection toggle or a deploy is
+  // still re-certifying; retry once it completes (`refresh_env` finishes an
+  // interrupted toggle).
   issue_token : (IssueTokenArgs) -> (text);
   // Revoke the token with the given label (live on the next request).
   revoke_token : (label : text) -> ();

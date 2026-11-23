@@ -45,7 +45,9 @@ That's it: `https://<canister-id>.icp.net/` now redirects strangers to
 Turning the gate on or off re-certifies every page, so it waits for deploys: the call
 is rejected while a deploy is in progress, and a deploy started meanwhile waits for it.
 On a large site it takes a few seconds, during which pages fail verification
-instead of being served without the gate.
+instead of being served without the gate. `issue_token` is rejected until it finishes
+(and while a deploy is mid-call); retry once it has. If a toggle was interrupted,
+`refresh_env` finishes it.
 
 ## Managing tokens
 

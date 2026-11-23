@@ -67,14 +67,21 @@ pub struct Certifier {
     /// tree. See [`Self::effective_headers`].
     env_cookie: Option<Vec<String>>,
     /// Rule entries known to be out of date, owed a rebuild by the next
-    /// [`Self::begin_recertification`]. See [`StaleRules`].
+    /// [`Self::recertification_step`]. See [`StaleRules`].
     stale_rules: StaleRules,
     /// Assets whose certified responses are out of date, owed a re-certification
-    /// pass by the next [`Self::begin_recertification`]: every asset after a
+    /// pass by the next [`Self::recertification_step`]: every asset after a
     /// protection toggle (which changes every effective header set), the HTML
     /// ones after an env change (the cookie). Kept set until a pass completes,
-    /// so an interrupted pass is redone by the next one.
+    /// so an abandoned pass is finished by the next driver.
     stale_assets: Option<AssetScope>,
+    /// The re-certification in progress, if one was started and not finished.
+    /// Held here rather than by whichever call drives it, so every driver — two
+    /// `execute_operations` calls of one sync interleaving their steps, or a
+    /// sync taking over an abandoned maintenance job — advances the same job
+    /// instead of racing its own over the shared tree. Dropped by any new mark,
+    /// since it was planned before that change; see [`Self::recertification_step`].
+    job: Option<RecertificationStage>,
 }
 
 /// Which assets a re-certification pass covers. Ordered: `All` subsumes `Html`.
@@ -88,12 +95,8 @@ pub enum AssetScope {
 
 /// A re-certification in progress, resumable one asset or rule at a time so it
 /// can be spread across messages: a pass over the stale assets (if any), then a
-/// rebuild of the stale redirect rules. Started by
-/// [`Certifier::begin_recertification`], driven by
+/// rebuild of the stale redirect rules. Driven by
 /// [`Certifier::recertification_step`].
-#[derive(Clone, Debug)]
-pub struct Recertification(RecertificationStage);
-
 #[derive(Clone, Debug)]
 enum RecertificationStage {
     /// Re-certifying the assets in `scope`, in key order, resuming strictly
@@ -137,7 +140,7 @@ impl Default for StaleRules {
 
 /// A redirect-rule rebuild in progress, resumable one rule at a time so a
 /// many-rule rebuild can be spread across messages. The rule stage of a
-/// [`Recertification`].
+/// [`RecertificationStage`].
 #[derive(Clone, Debug)]
 struct RulesRebuild {
     /// The rule indices to rebuild, ascending, or `None` for the whole list.
@@ -468,19 +471,22 @@ impl Certifier {
     /// — the gateway rejects uncertified responses, so an uncertified fallback 404
     /// would be unservable.
     ///
-    /// Any assets still marked stale (by an interrupted
-    /// [`Recertification`]) are re-certified first.
+    /// Any assets still marked stale (by an interrupted re-certification) are
+    /// re-certified first.
     pub fn on_redirect_rules_change(&mut self, store: &Store) {
         self.mark_all_rules_stale();
-        let mut job = self.begin_recertification(store);
-        while let Some(j) = job {
-            job = self.recertification_step(store, j);
-        }
+        while self.recertification_step(store) {}
     }
 
-    /// Whether some assets are still owed a re-certification pass.
-    pub fn has_stale_assets(&self) -> bool {
-        self.stale_assets.is_some()
+    /// Whether anything is still owed re-certification — stale assets or rule
+    /// entries, or a job partway through. While it is, the tree is not
+    /// consistent with the stored state, so nothing may publish its root as
+    /// `certified_data`.
+    pub fn has_pending_work(&self) -> bool {
+        self.job.is_some()
+            || self.stale_assets.is_some()
+            || self.stale_rules.all
+            || !self.stale_rules.keys.is_empty()
     }
 
     /// Marks the assets in `scope` stale — and with them every rule entry, since
@@ -490,29 +496,50 @@ impl Certifier {
         self.mark_all_rules_stale();
     }
 
+    /// Does one asset or rule (or a closing step) of re-certifying whatever is
+    /// stale, starting a job if none is in progress. Returns `false`, having
+    /// done nothing, once nothing is stale. Each step does a bounded amount of
+    /// tree work, so a caller can yield between steps; it must refresh
+    /// `certified_data` once this returns `false`.
+    ///
+    /// The job lives on the certifier, so concurrent drivers share it. A mark
+    /// made while it runs drops it (the plan predates the change — a shortened
+    /// rule list would even leave it indexing past the end), and the next step
+    /// plans afresh. Every entry stays marked stale until a job finishes, so a
+    /// fresh plan after a dropped job covers whatever the dropped one had
+    /// already torn down.
+    pub fn recertification_step(&mut self, store: &Store) -> bool {
+        let job = match self.job.take() {
+            Some(job) => job,
+            None => match self.plan_recertification(store) {
+                Some(job) => job,
+                None => return false,
+            },
+        };
+        self.job = self.advance(store, job);
+        true
+    }
+
     /// Plans a re-certification of whatever is stale, or `None` if nothing is.
-    /// Caller must refresh `certified_data` once it is done.
-    pub fn begin_recertification(&mut self, store: &Store) -> Option<Recertification> {
+    fn plan_recertification(&mut self, store: &Store) -> Option<RecertificationStage> {
         match self.stale_assets {
-            Some(scope) => Some(Recertification(RecertificationStage::Assets {
+            Some(scope) => Some(RecertificationStage::Assets {
                 scope,
                 resume_after: None,
-            })),
+            }),
             None => self
                 .begin_rules_rebuild(store)
-                .map(|r| Recertification(RecertificationStage::Rules(r))),
+                .map(RecertificationStage::Rules),
         }
     }
 
-    /// Advances `job` by one asset or rule (or a closing step) and returns what
-    /// is left, or `None` once everything stale is certified. Each step does a
-    /// bounded amount of tree work, so a caller can yield between steps.
-    pub fn recertification_step(
+    /// Advances `job` by one step and returns what is left of it.
+    fn advance(
         &mut self,
         store: &Store,
-        job: Recertification,
-    ) -> Option<Recertification> {
-        match job.0 {
+        job: RecertificationStage,
+    ) -> Option<RecertificationStage> {
+        match job {
             RecertificationStage::Assets {
                 scope,
                 resume_after,
@@ -523,10 +550,10 @@ impl Certifier {
                     {
                         self.recertify_asset(store, &key, &meta);
                     }
-                    return Some(Recertification(RecertificationStage::Assets {
+                    return Some(RecertificationStage::Assets {
                         scope,
                         resume_after: Some(key),
-                    }));
+                    });
                 }
                 // Under protection the login page's redeem responses must be
                 // certified even while the page itself isn't synced (the asset
@@ -536,26 +563,25 @@ impl Certifier {
                 {
                     self.reassert_login_responses(store, &login_page);
                 }
-                // A wider scope marked during the pass restarts it.
-                if self.stale_assets == Some(scope) {
-                    self.stale_assets = None;
-                }
-                self.begin_recertification(store)
+                self.stale_assets = None;
+                self.plan_recertification(store)
             }
             RecertificationStage::Rules(r) => self
                 .rules_rebuild_step(store, r)
-                .map(|r| Recertification(RecertificationStage::Rules(r))),
+                .map(RecertificationStage::Rules),
         }
     }
 
     /// Marks every rule entry stale: the rule list itself was replaced.
     pub fn mark_all_rules_stale(&mut self) {
+        self.job = None;
         self.stale_rules.all = true;
     }
 
     /// Marks stale the rule entries that depend on the asset at `key` — call
     /// after any change to that asset (created, deleted, content or headers).
     pub fn mark_rules_stale_for(&mut self, key: &str) {
+        self.job = None;
         if !self.stale_rules.all {
             self.stale_rules.keys.insert(key.to_string());
         }

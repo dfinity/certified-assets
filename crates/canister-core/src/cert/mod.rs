@@ -27,7 +27,7 @@ mod certifier;
 mod nested_tree;
 mod primitives;
 
-pub(crate) use certifier::{AssetScope, Certifier, Recertification};
+pub(crate) use certifier::{AssetScope, Certifier};
 pub(crate) use primitives::{
     AssetKey, AssetPath, CertificateExpression, HashTreePath, NestedTreeKey, ResponseHash,
     build_ic_certificate_expression_from_headers,

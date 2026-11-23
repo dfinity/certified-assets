@@ -17,7 +17,7 @@
 
 use super::State;
 use crate::runtime::SystemContext;
-use crate::sync::{ComputationStatus, MaintenanceProgress, SYNC_IDLE_TIMEOUT_NANOS, SyncSession};
+use crate::sync::{ComputationStatus, SYNC_IDLE_TIMEOUT_NANOS, SyncSession};
 use candid::Principal;
 use wire_types::SessionId;
 
@@ -59,9 +59,8 @@ impl State {
     pub fn maintenance_step(
         &mut self,
         session_id: SessionId,
-        progress: MaintenanceProgress,
         system_context: &SystemContext,
-    ) -> ComputationStatus<(), MaintenanceProgress, String> {
+    ) -> ComputationStatus<(), (), String> {
         // Staged across messages, so the lock may have been taken over (after
         // the idle timeout) since the last step.
         match &mut self.sync_session {
@@ -74,18 +73,11 @@ impl State {
                 );
             }
         }
-        let next = match progress {
-            MaintenanceProgress::Starting => self.certifier.begin_recertification(&self.store),
-            MaintenanceProgress::Recertifying { job } => {
-                self.certifier.recertification_step(&self.store, job)
-            }
-        };
-        match next {
-            Some(job) => ComputationStatus::InProgress(MaintenanceProgress::Recertifying { job }),
-            None => {
-                self.sync_session = None;
-                ComputationStatus::Done(())
-            }
+        if self.certifier.recertification_step(&self.store) {
+            ComputationStatus::InProgress(())
+        } else {
+            self.sync_session = None;
+            ComputationStatus::Done(())
         }
     }
 }

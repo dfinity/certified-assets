@@ -447,9 +447,9 @@ impl State {
                     // A by-proposal prepare marks nothing (it certifies nothing
                     // and changes no live rule; the commit rebuilds them), so
                     // there this only ever repairs live state.
-                    if let Some(job) = self.certifier.begin_recertification(&self.store) {
+                    if self.certifier.has_pending_work() {
                         return ComputationStatus::InProgress(
-                            ExecuteOperationsProgress::Recertifying { job },
+                            ExecuteOperationsProgress::Recertifying,
                         );
                     }
 
@@ -607,22 +607,25 @@ impl State {
                 };
                 ComputationStatus::InProgress(progress)
             }
-            ExecuteOperationsProgress::Recertifying { job } => {
+            ExecuteOperationsProgress::Recertifying => {
                 // Staged across messages like the operations themselves, so
-                // re-check the session before touching the tree.
-                if let Err(e) = self.require_mutable_session(arg.session_id) {
+                // re-check the session before touching the tree — and touch it:
+                // a big rebuild can outlast the idle timeout, and must not be
+                // reclaimed while it is still making progress.
+                if let Err(e) =
+                    self.touch_session(arg.session_id, system_context.current_timestamp_ns)
+                {
                     return ComputationStatus::Error(e);
                 }
-                ComputationStatus::InProgress(
-                    match self.certifier.recertification_step(&self.store, job) {
-                        Some(job) => ExecuteOperationsProgress::Recertifying { job },
-                        // Done: resume the end of the operations, which now finds
-                        // nothing stale and moves on to finalizing.
-                        None => ExecuteOperationsProgress::ProcessingOperations {
-                            operation_index: arg.operations.len(),
-                        },
-                    },
-                )
+                ComputationStatus::InProgress(if self.certifier.recertification_step(&self.store) {
+                    ExecuteOperationsProgress::Recertifying
+                } else {
+                    // Done: resume the end of the operations, which now
+                    // finds nothing stale and moves on to finalizing.
+                    ExecuteOperationsProgress::ProcessingOperations {
+                        operation_index: arg.operations.len(),
+                    }
+                })
             }
             ExecuteOperationsProgress::HashingState {
                 mut hasher,

@@ -134,10 +134,12 @@ pub fn upload_chunks(arg: UploadChunksArguments) -> Vec<ChunkId> {
 /// verifying a deploy still reproduces the hash from source (see
 /// `docs/verifying-contents.md`).
 pub async fn execute_operations(arg: ExecuteOperationsArguments) -> Option<ByteBuf> {
-    let system_context = SystemContext::new();
     let arg_ref = &arg;
 
     let state_hash = loop_with_message_extension_until_completion(|progress| {
+        // Fresh per step: a long call spans many messages, and the steps that
+        // touch the sync lock must stamp the current time, not the call's start.
+        let system_context = SystemContext::new();
         STATE.with_borrow_mut(|s| s.execute_operations(arg_ref, progress, &system_context))
     })
     .await
@@ -280,11 +282,11 @@ pub async fn disable_protection() {
 /// the re-certified tree. A trap partway leaves the work marked stale for the
 /// next job or sync to finish, and `certified_data` unpublished meanwhile.
 async fn run_maintenance(session_id: SessionId) {
-    loop_with_message_extension_until_completion(|progress| {
+    loop_with_message_extension_until_completion(|()| {
         // Fresh per step: each step touches the lock with the current time, so
         // a long job never looks idle.
         let system_context = SystemContext::new();
-        STATE.with_borrow_mut(|s| s.maintenance_step(session_id, progress, &system_context))
+        STATE.with_borrow_mut(|s| s.maintenance_step(session_id, &system_context))
     })
     .await
     .unwrap_or_else(|msg| trap(&msg));

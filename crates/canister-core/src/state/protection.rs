@@ -185,22 +185,27 @@ impl State {
         Ok(session_id)
     }
 
-    /// Whether every asset is certified for the current settings — false while a
-    /// protection toggle or env refresh is still (or was left) re-certifying.
-    /// Nothing may publish `certified_data` before then, or it would publish a
-    /// half-re-certified tree.
+    /// Whether the certified tree matches the stored state: no asset or rule
+    /// entry is owed re-certification, and no job is partway through. False
+    /// while a protection toggle or env refresh is re-certifying (or was left
+    /// unfinished), and between the messages of a sync's `execute_operations`
+    /// call. Nothing may publish `certified_data` before then, or it would
+    /// publish a half-re-certified tree — after enabling protection, one that
+    /// still certifies some public responses.
     pub fn certification_complete(&self) -> bool {
-        !self.certifier.has_stale_assets()
+        !self.certifier.has_pending_work()
     }
 
-    /// Refuses issuing a token while asset certification is incomplete, since
-    /// issuing publishes `certified_data` (see [`Self::certification_complete`]).
-    /// Toggling again (even to the same page) finishes the job.
+    /// Refuses issuing a token while certification is incomplete, since issuing
+    /// publishes `certified_data` (see [`Self::certification_complete`]). The
+    /// running deploy or toggle finishes the job; if it died, `refresh_env`
+    /// (or the next deploy) does.
     fn require_certification_complete(&self) -> Result<(), String> {
         if !self.certification_complete() {
             return Err(
-                "access protection is still being applied; retry once enable_protection \
-                 or disable_protection completes"
+                "certification is still being updated by a deploy or a protection \
+                 change; retry once it completes (if it was interrupted, call \
+                 refresh_env to finish it)"
                     .to_string(),
             );
         }

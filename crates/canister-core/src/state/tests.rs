@@ -3,9 +3,7 @@ use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::ProtectionStatus;
 use crate::runtime::SystemContext;
 use crate::state::State;
-use crate::sync::{
-    ComputationStatus, ExecuteOperationsProgress, MaintenanceProgress, SYNC_IDLE_TIMEOUT_NANOS,
-};
+use crate::sync::{ComputationStatus, ExecuteOperationsProgress, SYNC_IDLE_TIMEOUT_NANOS};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use candid::Principal;
 use ic_certification_testing::CertificateBuilder;
@@ -431,8 +429,8 @@ fn set_exact_rewrite_rules(state: &mut State, pairs: &[(&str, &str)]) {
 /// canister does, without yielding.
 fn run_maintenance(state: &mut State, session: Result<SessionId, String>) {
     let session_id = session.expect("maintenance job refused");
-    run_computation_until_completion(|progress| {
-        state.maintenance_step(session_id, progress, &mock_system_context())
+    run_computation_until_completion(|()| {
+        state.maintenance_step(session_id, &mock_system_context())
     })
     .unwrap();
 }
@@ -5818,23 +5816,77 @@ mod rule_rebuild {
         operations: Vec<Operation>,
         is_final: bool,
     ) -> usize {
-        let ctx = mock_system_context();
         let args = ExecuteOperationsArguments {
             session_id,
             operations,
             is_final,
         };
+        let (progress, rule_steps) = drive(
+            state,
+            &args,
+            ExecuteOperationsProgress::Starting,
+            usize::MAX,
+        );
+        assert!(progress.is_none());
+        rule_steps
+    }
+
+    /// Steps one `execute_operations` call from `progress` until it is done
+    /// (`None`), or is about to re-certify having already spent
+    /// `max_rule_steps` steps doing so (the progress to resume from), returning
+    /// that and the re-certification steps taken. Only a step that does work
+    /// counts — not the one finding nothing left.
+    fn drive(
+        state: &mut State,
+        args: &ExecuteOperationsArguments,
+        mut progress: ExecuteOperationsProgress,
+        max_rule_steps: usize,
+    ) -> (Option<ExecuteOperationsProgress>, usize) {
+        let ctx = mock_system_context();
         let mut rule_steps = 0;
-        let mut progress = ExecuteOperationsProgress::Starting;
         loop {
-            if matches!(progress, ExecuteOperationsProgress::Recertifying { .. }) {
+            let recertifying = matches!(progress, ExecuteOperationsProgress::Recertifying);
+            if recertifying && rule_steps >= max_rule_steps {
+                return (Some(progress), rule_steps);
+            }
+            progress = match state.execute_operations(args, progress, &ctx) {
+                ComputationStatus::Done(_) => return (None, rule_steps),
+                ComputationStatus::InProgress(p) => p,
+                ComputationStatus::Error(e) => panic!("execute_operations failed: {e}"),
+            };
+            if recertifying && matches!(progress, ExecuteOperationsProgress::Recertifying) {
                 rule_steps += 1;
             }
-            match state.execute_operations(&args, progress, &ctx) {
-                ComputationStatus::Done(_) => return rule_steps,
-                ComputationStatus::InProgress(p) => progress = p,
-                ComputationStatus::Error(e) => panic!("execute_operations failed: {e}"),
-            }
+        }
+    }
+
+    /// Re-uploads pages `range` with an edited body, as one call's operations.
+    fn edit_pages(
+        state: &mut State,
+        session_id: SessionId,
+        range: std::ops::Range<usize>,
+    ) -> Vec<Operation> {
+        assemble_create_assets_and_set_contents_operations(
+            state,
+            &mock_system_context(),
+            range
+                .map(|i| {
+                    AssetBuilder::new(page(i), "text/html")
+                        .with_encoding("identity", vec![format!("page {i}, edited")])
+                })
+                .collect(),
+            session_id,
+        )
+    }
+
+    fn assert_pages_served(state: &State, n: usize, edited: std::ops::Range<usize>) {
+        for i in 0..n {
+            let body = if edited.contains(&i) {
+                format!("page {i}, edited")
+            } else {
+                format!("page {i}")
+            };
+            assert_page_served(state, i, &body);
         }
     }
 
@@ -6032,57 +6084,155 @@ mod rule_rebuild {
         assert_eq!(r.body.as_ref(), b"spa 2");
     }
 
+    /// Re-uploads pages `0..4` and abandons the call a few steps into the
+    /// (targeted) rule rebuild that follows: their rules' old leaves are gone
+    /// and the new ones not yet certified.
+    fn abandon_a_rebuild(state: &mut State) {
+        let session_id = start_session(state, &mock_system_context());
+        let args = ExecuteOperationsArguments {
+            session_id,
+            operations: edit_pages(state, session_id, 0..4),
+            is_final: true,
+        };
+        let (progress, _) = drive(state, &args, ExecuteOperationsProgress::Starting, 3);
+        assert!(progress.is_some(), "the rebuild finished too soon");
+        assert!(!state.certification_complete());
+    }
+
     #[test]
-    fn an_interrupted_rebuild_is_redone_in_full_by_the_next_call() {
+    fn an_interrupted_rebuild_is_resumed_by_the_next_call() {
         const N: usize = 10;
         let mut state = State::default();
         seed_pages(&mut state, N);
-        let ctx = mock_system_context();
-
-        // Re-upload a few pages, then abandon the call a few steps into the
-        // (targeted) rule rebuild that follows: their rules' old leaves are
-        // gone and the new ones not yet certified.
-        let session_id = start_session(&mut state, &ctx);
-        let operations = assemble_create_assets_and_set_contents_operations(
-            &mut state,
-            &ctx,
-            (0..4)
-                .map(|i| {
-                    AssetBuilder::new(page(i), "text/html")
-                        .with_encoding("identity", vec![format!("page {i}, edited")])
-                })
-                .collect(),
-            session_id,
-        );
-        let args = ExecuteOperationsArguments {
-            session_id,
-            operations,
-            is_final: true,
-        };
-        let mut progress = ExecuteOperationsProgress::Starting;
-        let mut rule_steps = 0;
-        while rule_steps < 5 {
-            if matches!(progress, ExecuteOperationsProgress::Recertifying { .. }) {
-                rule_steps += 1;
-            }
-            progress = match state.execute_operations(&args, progress, &ctx) {
-                ComputationStatus::InProgress(p) => p,
-                other => panic!("expected the rebuild to still be running, got {other:?}"),
-            };
-        }
+        abandon_a_rebuild(&mut state);
 
         // The owner reclaims and finishes with a call that touches nothing a
-        // rule depends on; it must still repair the rules left half-built.
-        let session_id = start_session(&mut state, &ctx);
-        assert!(run_counting_rule_steps(&mut state, session_id, vec![], true) > 2 * N);
-        for i in 0..N {
-            let body = if i < 4 {
+        // rule depends on; it picks up the half-done rebuild where it stopped.
+        let session_id = start_session(&mut state, &mock_system_context());
+        let steps = run_counting_rule_steps(&mut state, session_id, vec![], true);
+        assert!(steps > 0 && steps < N, "resuming took {steps} rule steps");
+        assert!(state.certification_complete());
+        assert_pages_served(&state, N, 0..4);
+    }
+
+    #[test]
+    fn a_change_during_a_rebuild_replans_it_in_full() {
+        const N: usize = 10;
+        let mut state = State::default();
+        seed_pages(&mut state, N);
+        abandon_a_rebuild(&mut state);
+
+        // The next call changes an asset no rule depends on. The abandoned plan
+        // predates it, so it is dropped — and the fresh plan must cover the
+        // rules the abandoned one had already torn down, which only a full
+        // rebuild can know.
+        let session_id = start_session(&mut state, &mock_system_context());
+        let ops = assemble_create_assets_and_set_contents_operations(
+            &mut state,
+            &mock_system_context(),
+            vec![
+                AssetBuilder::new("/style.css", "text/css").with_encoding("identity", vec!["a{}"]),
+            ],
+            session_id,
+        );
+        assert!(run_counting_rule_steps(&mut state, session_id, ops, true) > 2 * N);
+        assert_pages_served(&state, N, 0..4);
+    }
+
+    #[test]
+    fn interleaved_calls_of_one_sync_share_the_rebuild() {
+        // A client may have several `execute_operations` calls of a sync in
+        // flight; their steps interleave across messages. One call's change
+        // must neither be lost to another's rebuild finishing, nor leave that
+        // rebuild indexing a rule list it shortened.
+        const N: usize = 10;
+        let mut state = State::default();
+        seed_pages(&mut state, N);
+        let session_id = start_session(&mut state, &mock_system_context());
+
+        // Call A edits the last pages and gets a few steps into its rebuild.
+        let a = ExecuteOperationsArguments {
+            session_id,
+            operations: edit_pages(&mut state, session_id, N - 4..N),
+            is_final: false,
+        };
+        let (a_progress, _) = drive(&mut state, &a, ExecuteOperationsProgress::Starting, 3);
+
+        // Call B drops the last page's rules (some of A's targets) and edits
+        // page 2, stopping just as its own operations are done.
+        let mut rules = state.store.redirect_rules().to_vec();
+        rules.truncate(2 * (N - 1));
+        let mut operations = edit_pages(&mut state, session_id, 2..3);
+        operations.push(Operation::SetRedirectRules(SetRedirectRulesArguments {
+            rules,
+        }));
+        let b = ExecuteOperationsArguments {
+            session_id,
+            operations,
+            is_final: false,
+        };
+        let (b_progress, _) = drive(&mut state, &b, ExecuteOperationsProgress::Starting, 0);
+
+        // A resumes and finishes first, then B.
+        assert!(
+            drive(&mut state, &a, a_progress.unwrap(), usize::MAX)
+                .0
+                .is_none()
+        );
+        assert!(
+            drive(&mut state, &b, b_progress.unwrap(), usize::MAX)
+                .0
+                .is_none()
+        );
+
+        assert!(state.certification_complete());
+        for i in 0..N - 1 {
+            let edited = i >= N - 4 || i == 2;
+            let body = if edited {
                 format!("page {i}, edited")
             } else {
                 format!("page {i}")
             };
             assert_page_served(&state, i, &body);
         }
+        let r = certified_http_request(
+            &state,
+            RequestBuilder::get(format!("/page{}", N - 1)).build(),
+        );
+        assert_eq!(r.status_code, 404);
+    }
+
+    #[test]
+    fn a_rebuild_keeps_the_sync_lock_alive() {
+        // A big rebuild can outlast the idle timeout; each step must touch the
+        // session so another principal can't reclaim it mid-rebuild.
+        const N: usize = 10;
+        let mut state = State::default();
+        seed_pages(&mut state, N);
+        let session_id = start_session(&mut state, &mock_system_context());
+        let args = ExecuteOperationsArguments {
+            session_id,
+            operations: edit_pages(&mut state, session_id, 0..4),
+            is_final: true,
+        };
+        let (progress, _) = drive(&mut state, &args, ExecuteOperationsProgress::Starting, 1);
+        let later = SystemContext {
+            current_timestamp_ns: TEST_NOW + SYNC_IDLE_TIMEOUT_NANOS - 1,
+        };
+        let progress = match state.execute_operations(&args, progress.unwrap(), &later) {
+            ComputationStatus::InProgress(p) => p,
+            other => panic!("expected the rebuild to still be running, got {other:?}"),
+        };
+        assert!(matches!(progress, ExecuteOperationsProgress::Recertifying));
+
+        // A timeout after the call started, but not after its last step.
+        let stranger = SystemContext {
+            current_timestamp_ns: TEST_NOW + SYNC_IDLE_TIMEOUT_NANOS + 1,
+        };
+        assert!(matches!(
+            state.start_sync(Principal::anonymous(), &stranger),
+            StartSyncResult::Busy { .. }
+        ));
     }
 }
 
@@ -6132,12 +6282,11 @@ mod maintenance {
     fn count_steps(state: &mut State, session: Result<SessionId, String>) -> usize {
         let session_id = session.expect("maintenance job refused");
         let mut steps = 0;
-        let mut progress = MaintenanceProgress::Starting;
         loop {
             steps += 1;
-            match state.maintenance_step(session_id, progress, &mock_system_context()) {
+            match state.maintenance_step(session_id, &mock_system_context()) {
                 ComputationStatus::Done(()) => return steps,
-                ComputationStatus::InProgress(p) => progress = p,
+                ComputationStatus::InProgress(()) => {}
                 ComputationStatus::Error(e) => panic!("maintenance failed: {e}"),
             }
         }
@@ -6234,6 +6383,41 @@ mod maintenance {
     }
 
     #[test]
+    fn no_token_is_issued_until_every_step_of_a_toggle_is_done() {
+        // Issuing publishes `certified_data`. Mid-toggle the tree still holds
+        // responses certified for the old setting — public rule aliases, before
+        // the rule pass replaces them — so it must not be published until the
+        // last rule is rebuilt, not just the last asset.
+        const N: usize = 5;
+        let mut state = site(N);
+        let ctx = mock_system_context();
+        let session_id = state
+            .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
+            .unwrap();
+        // Refused at every step that still had work to do: the first success
+        // must leave nothing for the job but its closing no-op step.
+        let mut steps = 0;
+        while state
+            .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
+            .is_err()
+        {
+            steps += 1;
+            match state.maintenance_step(session_id, &ctx) {
+                ComputationStatus::InProgress(()) => {}
+                other => panic!("expected the job to still be running, got {other:?}"),
+            }
+        }
+        assert!(
+            steps > 2 * N,
+            "a token was issued {steps} steps into the toggle"
+        );
+        assert!(matches!(
+            state.maintenance_step(session_id, &ctx),
+            ComputationStatus::Done(())
+        ));
+    }
+
+    #[test]
     fn an_interrupted_toggle_is_finished_by_the_next_sync() {
         const N: usize = 10;
         let mut state = site(N);
@@ -6242,12 +6426,11 @@ mod maintenance {
             .enable_protection(some_principal(), LOGIN_PAGE.into(), &ctx)
             .unwrap();
         // Die a few assets in.
-        let mut progress = MaintenanceProgress::Starting;
         for _ in 0..4 {
-            progress = match state.maintenance_step(session_id, progress, &ctx) {
-                ComputationStatus::InProgress(p) => p,
+            match state.maintenance_step(session_id, &ctx) {
+                ComputationStatus::InProgress(()) => {}
                 other => panic!("expected the job to still be running, got {other:?}"),
-            };
+            }
         }
 
         // Issuing a token would publish the half-certified tree.
@@ -6255,7 +6438,7 @@ mod maintenance {
         let err = state
             .issue_token("secret".into(), "owner".into(), 3600, TEST_NOW)
             .unwrap_err();
-        assert!(err.contains("still being applied"), "got: {err}");
+        assert!(err.contains("still being updated"), "got: {err}");
 
         // Once the lock goes stale, a sync takes it over and finishes the job.
         let later = SystemContext {
