@@ -38,6 +38,22 @@ pub(crate) struct SyncSession {
     /// finalization that set it, so the idle timeout is the sole escape from a
     /// finalization that dies mid-flight.
     pub finalizing: bool,
+    /// Whether this is a maintenance job (a protection toggle or `refresh_env`
+    /// re-certifying) rather than a sync. Only changes how the holder is named
+    /// to a caller refused the lock; see [`Self::describe`].
+    pub maintenance: bool,
+}
+
+impl SyncSession {
+    /// Names what holds the sync lock, for the error refusing it to someone
+    /// else.
+    pub fn describe(&self) -> String {
+        if self.maintenance {
+            format!("a protection or env re-certification by {}", self.owner)
+        } else {
+            format!("a sync by {}", self.owner)
+        }
+    }
 }
 
 /// Status of an incremental computation
@@ -67,6 +83,15 @@ pub(crate) enum ExecuteOperationsProgress {
     /// the client supplies the hashes and the canister trusts them (see
     /// [`State::complete_set_asset_content`](crate::state::State)).
     ProcessingOperations { operation_index: usize },
+    /// After all operations of a call are applied, re-certify whatever they (or
+    /// an env change captured at sync start) left stale: assets whose effective
+    /// headers changed, then the redirect rules — the whole list if the call
+    /// replaced it, else only the rules depending on an asset key it touched.
+    /// One asset or rule per step, so a site with thousands of (synthesised)
+    /// rules stays within the per-message instruction limit. Then resumes the
+    /// end of `ProcessingOperations`. The job itself lives on the `Certifier`
+    /// (see `Certifier::recertification_step`).
+    Recertifying,
     /// After all operations of a **final** call are applied, recompute the cached
     /// canonical state hash (see the `state-hash` crate), folding in one asset per
     /// step so a many-asset state stays within the per-message instruction limit.

@@ -33,19 +33,23 @@ impl State {
 
     /// Rebuilds the certified-tree entries for the redirect rules and the
     /// built-in 404 fallback (and, under protection, the rule/root unauthenticated
-    /// siblings). Called whenever the rule list changes (in `execute_operations`),
-    /// after asset ops that could clobber a rule's tree slot, and on upgrade.
-    /// Delegates to the [`Certifier`]; the caller refreshes `certified_data`
-    /// afterwards.
+    /// siblings), in one message, then publishes. Used by the single-message
+    /// paths — a governance commit and an upgrade; a sync stages the rebuild
+    /// instead. Delegates to the [`Certifier`]; the caller refreshes
+    /// `certified_data` afterwards.
     ///
     /// [`Certifier`]: crate::cert::Certifier
     pub(super) fn on_redirect_rules_change(&mut self) {
         self.certifier.on_redirect_rules_change(&self.store);
+        self.publish();
     }
 
-    /// Replaces the redirect rules and rebuilds their certified entries.
+    /// Replaces the redirect rules and marks every certified rule entry stale.
+    /// The entries are rebuilt at the end of the `execute_operations` call (see
+    /// `ExecuteOperationsProgress::Recertifying`), spread across messages: a
+    /// many-rule list can't be certified in the one step an operation gets.
     pub(super) fn set_redirect_rules(&mut self, rules: Vec<RedirectRule>) {
         self.store.set_redirect_rules(rules);
-        self.on_redirect_rules_change();
+        self.certifier.mark_all_rules_stale();
     }
 }

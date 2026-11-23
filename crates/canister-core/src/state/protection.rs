@@ -11,13 +11,17 @@
 //! (`token_index`) lives on `State` and is read here.
 
 use super::State;
+use crate::cert::AssetScope;
 use crate::cert::{AssetPath, HashTreePath, build_ic_certificate_expression_header};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::protection::{
     ProtectionResponse, ProtectionStatus, TokenInfo, TokenMeta, access_cookie_values,
     parse_form_token, token_id,
 };
+use crate::runtime::SystemContext;
+use candid::Principal;
 use serde_bytes::ByteBuf;
+use wire_types::SessionId;
 
 impl State {
     // ---- serve helpers ----
@@ -97,6 +101,12 @@ impl State {
     /// Handles `POST <login_page>` (a certified query — no upgrade). Reads the
     /// presented value from the form body and returns this token's certified
     /// `302 + Set-Cookie` on success, or the certified `401` re-prompt otherwise.
+    ///
+    /// The token is checked against the live index (so a revocation or expiry
+    /// applies at once), but succeeds only once its redeem response is
+    /// published at `login_page`: a token issued while a re-certification is
+    /// pending, or under a login page a pending toggle is moving, gets the
+    /// certified `401` until then rather than an unverifiable `302`.
     pub(super) fn serve_redeem(
         &self,
         req: &HttpRequest,
@@ -112,7 +122,9 @@ impl State {
                 .is_some_and(|&expires_at| expires_at > now)
         {
             let resp = ProtectionResponse::redeem_success(&value);
-            return self.serve_protection_response(&resp, login_page, &location, certificate);
+            if self.certifier.serves_protection_response(&location, &resp) {
+                return self.serve_protection_response(&resp, login_page, &location, certificate);
+            }
         }
         let resp = ProtectionResponse::redeem_failure();
         self.serve_protection_response(&resp, login_page, &location, certificate)
@@ -136,38 +148,51 @@ impl State {
     /// endpoint). Enabling on a fresh canister before the first sync is the secure
     /// ordering — no window in which assets are world-readable. Idempotent if
     /// already enabled at the same page; re-pointing to a different page drops the
-    /// old tokens (their redeem certs live under the old subtree). Caller
-    /// publishes `certified_data` afterwards.
-    pub fn enable_protection(&mut self, login_page: String) {
+    /// old tokens (their redeem certs live under the old subtree).
+    ///
+    /// Takes the sync lock, stores the setting and marks every asset and rule
+    /// stale. The caller drives the returned maintenance session to completion
+    /// (see [`Self::maintenance_step`]), which re-certifies them under
+    /// protection, releases the lock and publishes the result. Serving enforces
+    /// protection from that publish on — the same moment the tree certifies it
+    /// — so the site stays public, and verifiable, until the call completes.
+    pub fn enable_protection(
+        &mut self,
+        owner: Principal,
+        login_page: String,
+        system_context: &SystemContext,
+    ) -> Result<SessionId, String> {
+        let session_id = self.begin_maintenance(owner, system_context)?;
         let previous = self.protection_login_page();
         if previous.as_deref() == Some(login_page.as_str()) {
-            return;
+            return Ok(session_id);
         }
         if let Some(old) = previous {
             self.clear_tokens_and_login_responses(&old);
         }
-        self.store
-            .set_protection_login_page(Some(login_page.clone()));
-        self.certifier.recertify_all_assets(&self.store);
-        self.on_redirect_rules_change();
-        // Enable-first: if the page isn't synced yet, the asset loop didn't touch
-        // it, but the redeem endpoint must still work — assert its responses.
-        if !self.store.contains_asset(&login_page) {
-            self.certifier
-                .reassert_login_responses(&self.store, &login_page);
-        }
+        self.store.set_protection_login_page(Some(login_page));
+        self.certifier.mark_assets_stale(AssetScope::All);
+        Ok(session_id)
     }
 
     /// Turns access protection **off** and drops all tokens, restoring a fully public app.
-    /// Caller publishes `certified_data` afterwards.
-    pub fn disable_protection(&mut self) {
+    /// Takes the sync lock like [`Self::enable_protection`]; the caller drives the
+    /// returned maintenance session, and the site turns public when it publishes.
+    /// The tokens go at once, so until then every visitor is sent to the login
+    /// page.
+    pub fn disable_protection(
+        &mut self,
+        owner: Principal,
+        system_context: &SystemContext,
+    ) -> Result<SessionId, String> {
+        let session_id = self.begin_maintenance(owner, system_context)?;
         let Some(login_page) = self.protection_login_page() else {
-            return;
+            return Ok(session_id);
         };
         self.store.set_protection_login_page(None);
         self.clear_tokens_and_login_responses(&login_page);
-        self.certifier.recertify_all_assets(&self.store);
-        self.on_redirect_rules_change();
+        self.certifier.mark_assets_stale(AssetScope::All);
+        Ok(session_id)
     }
 
     /// Mints a token under `label`: stores the record (`token_id`, expiry,
@@ -175,7 +200,9 @@ impl State {
     /// this token's redeem response, and first sweeps expired tokens so the
     /// store/tree track only live tokens. The plaintext `value` is supplied by the
     /// caller (random or chosen) and is never stored. Errors if protection is off.
-    /// Caller publishes `certified_data` afterwards.
+    ///
+    /// The token is redeemable once its redeem response is published: at once,
+    /// or — while a re-certification is in flight — when that finishes.
     pub fn issue_token(
         &mut self,
         value: String,
@@ -205,6 +232,7 @@ impl State {
                 redeem_path: redeem_tp.0,
             },
         );
+        self.publish();
         Ok(())
     }
 
@@ -235,9 +263,11 @@ impl State {
     }
 
     /// Revokes the token with the given label (live — the next request bearing it
-    /// fails access protection). O(log n) by label. Caller publishes `certified_data`.
+    /// fails access protection: the serve side checks the live token index, so
+    /// a redeem leaf still published grants nothing). O(log n) by label.
     pub fn revoke_token(&mut self, label: &str) {
         self.remove_token(label);
+        self.publish();
     }
 
     /// Live tokens (label + expiry) for the management UI. Controller-guarded at

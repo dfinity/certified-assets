@@ -9,8 +9,8 @@ impl State {
     /// Rebuilds all derived heap state from the durable stable-memory state
     /// after an upgrade: the certified-response tree for every asset, the
     /// redirect-rule certified entries, the built-in 404 fallback (the last two
-    /// via `on_redirect_rules_change`), and the access-protection token index. The caller
-    /// publishes `certified_data` afterwards.
+    /// via `on_redirect_rules_change`), and the access-protection token index,
+    /// then publishes the result. The caller sets `certified_data` afterwards.
     pub fn post_upgrade_rebuild(&mut self) {
         self.certifier.recertify_all_assets(&self.store);
         self.on_redirect_rules_change();
@@ -24,6 +24,7 @@ impl State {
             self.certifier
                 .reassert_login_responses(&self.store, &login_page);
         }
+        self.publish();
     }
 
     /// Rebuilds the in-heap access-protection index (`token_id → expires_at`) from the durable

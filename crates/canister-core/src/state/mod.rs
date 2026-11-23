@@ -33,6 +33,8 @@
 //! - [`sync`] — start/upload/execute sync orchestration (the `impl State` half of
 //!   the sync domain; its data types live in [`crate::sync`])
 //! - [`protection`] — access protection (the "private app" feature)
+//! - [`maintenance`] — the staged, lock-holding re-certification behind the
+//!   protection toggles and `refresh_env`
 //! - [`upgrade`] — rebuilding all derived heap state after an upgrade
 //!
 //! Because all of them are submodules here, `State`'s owned pieces
@@ -51,6 +53,7 @@ mod assets;
 mod env;
 mod governance;
 mod hashing;
+mod maintenance;
 mod protection;
 mod rules;
 mod serving;
@@ -193,6 +196,30 @@ impl State {
         self.store.is_authorized(principal)
     }
 
+    /// Publishes the working certification for serving, if it is complete and
+    /// changed (see [`crate::cert::Certifier::publish`]). Every operation that
+    /// changes what is certified ends with this; one that leaves work pending
+    /// publishes nothing, and whichever step finishes the work publishes it.
+    fn publish(&mut self) {
+        self.certifier.publish(&self.store);
+    }
+
+    /// Whether anything is owed re-certification, so the working state is not
+    /// yet published.
+    #[cfg(test)]
+    pub(crate) fn certification_pending(&self) -> bool {
+        self.certifier.has_pending_work()
+    }
+
+    /// See [`crate::cert::Certifier::published_leaves`].
+    #[cfg(test)]
+    pub(crate) fn published_leaves(&self) -> Vec<Vec<crate::cert::NestedTreeKey>> {
+        self.certifier.published_leaves()
+    }
+
+    /// The root of the published certified tree. Always safe to set as
+    /// `certified_data`: it only ever names a complete tree, and serving reads
+    /// that same tree.
     pub fn root_hash(&self) -> Hash {
         self.certifier.root_hash()
     }

@@ -132,6 +132,7 @@ impl State {
             owner,
             last_activity_ns: now,
             finalizing: false,
+            maintenance: false,
         });
 
         StartSyncResult::Started { session_id }
@@ -213,10 +214,22 @@ impl State {
                 .saturating_sub(active.last_activity_ns);
             if idle < SYNC_IDLE_TIMEOUT_NANOS {
                 return Err(format!(
-                    "a sync by {} is in progress; retry once it finishes",
-                    active.owner
+                    "{} is in progress; retry once it finishes",
+                    active.describe()
                 ));
             }
+        }
+        // The whole upload, re-certification included, runs in this call's
+        // first message (see `apply_upload_operations`), so it must not inherit
+        // a re-certification some earlier call left unfinished: on a large site
+        // a toggle's leftover work alone exceeds one message, and the upload
+        // would trap until someone finished it.
+        if self.certifier.has_unfinished_job() {
+            return Err(
+                "an earlier re-certification was left unfinished; call refresh_env \
+                 (or deploy) to finish it, then retry"
+                    .to_string(),
+            );
         }
 
         let session_id = match self.start_sync(owner, system_context) {
@@ -436,15 +449,24 @@ impl State {
 
                 // Process one operation per call
                 if operation_index >= arg.operations.len() {
-                    // Asset ops in this call may have clobbered tree entries
-                    // that redirect rules own (any rule whose source path
-                    // collides with an asset's `<$>` slot). Re-cert them so
-                    // the call ends with a consistent rule tree. A by-proposal
-                    // prepare certifies nothing and changes no live rule, so it
-                    // has nothing to repair; the commit rebuilds them instead.
-                    if !self.by_proposal() {
-                        self.on_redirect_rules_change();
+                    // This call may have replaced the redirect rules, and its
+                    // asset ops may have clobbered tree entries rules own (an
+                    // exact rule whose source path collides with an asset's
+                    // `<$>` slot) or changed the target an alias rule borrows
+                    // from. Re-cert the stale rules so the call ends with a
+                    // consistent rule tree — staged one rule per step, then
+                    // back here with nothing left stale. The same pass picks up
+                    // assets left stale by an env change captured at sync start.
+                    // A by-proposal prepare marks nothing (it certifies nothing
+                    // and changes no live rule; the commit rebuilds them), so
+                    // there this only ever repairs live state.
+                    if self.certifier.has_pending_work() {
+                        return ComputationStatus::InProgress(
+                            ExecuteOperationsProgress::Recertifying,
+                        );
                     }
+                    // Everything this call changed is certified: serve it.
+                    self.publish();
 
                     // Finalize the sync only when the caller signals this is the
                     // last call; otherwise keep the session open for further
@@ -586,11 +608,39 @@ impl State {
                 if let Err(e) = result {
                     return ComputationStatus::Error(e);
                 }
+                // An asset op leaves the rules depending on its key stale; the
+                // end of the call rebuilds them (`SetRedirectRules` marks the
+                // whole list itself).
+                if !self.by_proposal()
+                    && let Some(key) = asset_key(op)
+                {
+                    self.certifier.mark_rules_stale_for(key);
+                }
 
                 let progress = ExecuteOperationsProgress::ProcessingOperations {
                     operation_index: operation_index + 1,
                 };
                 ComputationStatus::InProgress(progress)
+            }
+            ExecuteOperationsProgress::Recertifying => {
+                // Staged across messages like the operations themselves, so
+                // re-check the session before touching the tree — and touch it:
+                // a big rebuild can outlast the idle timeout, and must not be
+                // reclaimed while it is still making progress.
+                if let Err(e) =
+                    self.touch_session(arg.session_id, system_context.current_timestamp_ns)
+                {
+                    return ComputationStatus::Error(e);
+                }
+                ComputationStatus::InProgress(if self.certifier.recertification_step(&self.store) {
+                    ExecuteOperationsProgress::Recertifying
+                } else {
+                    // Done: resume the end of the operations, which now
+                    // finds nothing stale and moves on to finalizing.
+                    ExecuteOperationsProgress::ProcessingOperations {
+                        operation_index: arg.operations.len(),
+                    }
+                })
             }
             ExecuteOperationsProgress::HashingState {
                 mut hasher,
@@ -634,5 +684,17 @@ impl State {
                 ComputationStatus::Done(Some(hash))
             }
         }
+    }
+}
+
+/// The asset an operation changes, if it changes one.
+fn asset_key(op: &Operation) -> Option<&str> {
+    match op {
+        Operation::CreateAsset(arg) => Some(&arg.key),
+        Operation::SetAssetContent(arg) => Some(&arg.key),
+        Operation::UnsetAssetContent(arg) => Some(&arg.key),
+        Operation::DeleteAsset(arg) => Some(&arg.key),
+        Operation::SetAssetHeaders(arg) => Some(&arg.key),
+        Operation::SetRedirectRules(_) | Operation::SetPreparationCanary(_) => None,
     }
 }

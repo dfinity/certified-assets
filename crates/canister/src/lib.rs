@@ -82,8 +82,8 @@ fn validate_deauthorize(principal: Principal) -> Result<String, String> {
 // at the start of every sync, so this is only needed to publish an env-var
 // change without a content sync.
 #[update(guard = "guard_can_sync")]
-fn refresh_env() {
-    canister_core::refresh_env()
+async fn refresh_env() {
+    canister_core::refresh_env().await
 }
 
 #[update]
@@ -160,13 +160,13 @@ async fn upload_assets(assets: Vec<UploadAssetArguments>) -> ByteBuf {
 // `http_request` query.
 
 #[update(guard = "guard_is_controller")]
-fn enable_protection(login_page: String) {
-    canister_core::enable_protection(login_page)
+async fn enable_protection(login_page: String) {
+    canister_core::enable_protection(login_page).await
 }
 
 #[update(guard = "guard_is_controller")]
-fn disable_protection() {
-    canister_core::disable_protection()
+async fn disable_protection() {
+    canister_core::disable_protection().await
 }
 
 #[update(guard = "guard_is_controller")]

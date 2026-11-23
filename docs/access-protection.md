@@ -42,6 +42,16 @@ That's it: `https://<canister-id>.icp.net/` now redirects strangers to
 > canister, *then* syncing, means there is never a window where your assets are
 > world-readable. Enabling on an already-public app necessarily had a public period.
 
+Turning the gate on or off re-certifies every page, so it can't overlap a deploy:
+the call is rejected while a deploy is in progress, and a deploy started meanwhile
+is rejected too (retry it once the toggle returns). On a large site the toggle
+takes a few seconds, and it takes effect all at once when it finishes: until then
+the site keeps being served, verifiably, under the old setting. Turning the gate
+off drops every token at once, though, so for those seconds visitors are sent to
+the login page. A token issued meanwhile works once the toggle finishes. If a
+toggle was interrupted, it takes effect once `refresh_env` or the next deploy
+finishes it.
+
 ## Managing tokens
 
 | Method | Call | Effect |
