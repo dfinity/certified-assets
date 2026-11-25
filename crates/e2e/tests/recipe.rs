@@ -120,11 +120,24 @@ fn recipe_metadata() {
 ///
 /// Reaches into icp-cli's build cache: `icp build` has no `--output`, and the
 /// visibility prefix exists nowhere else observable (see the note on the caller).
-/// That path is an icp-cli implementation detail, so this fails with an explicit
+/// That layout is an icp-cli implementation detail, so this fails with an explicit
 /// message if it moves — a version bump that relocates the artifact means
 /// updating this helper, not that the recipe broke.
+///
+/// Since icp-cli 1.9.0 the cache is content-addressed: `.refs/<canister>` holds
+/// the module's sha256, and the module lives at `.modules/<sha256>.wasm`. Before
+/// that, the wasm sat directly at `<canister>`; that path is still tried so the
+/// test passes on either side of the upgrade.
 fn wasm_metadata_sections(project: &std::path::Path) -> Vec<String> {
-    let artifact = project.join(".icp/cache/artifacts/frontend");
+    let cache = project.join(".icp/cache/artifacts");
+    let reference = cache.join(".refs/frontend");
+    let artifact = if reference.is_file() {
+        let sha = std::fs::read_to_string(&reference)
+            .unwrap_or_else(|e| panic!("read {}: {e}", reference.display()));
+        cache.join(".modules").join(format!("{}.wasm", sha.trim()))
+    } else {
+        cache.join("frontend") // icp-cli < 1.9.0
+    };
     assert!(
         artifact.is_file(),
         "no built wasm at {} — icp-cli's build-cache layout changed; find the new path \
