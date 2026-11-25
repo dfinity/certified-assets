@@ -1,0 +1,15 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: hello
+    build:
+      steps:
+        # build.rs embeds ./dist into the Wasm; there is no sync step.
+        - type: script
+          commands:
+            - cargo build -p hello --release --target wasm32-unknown-unknown
+            - cp ../../target/wasm32-unknown-unknown/release/hello.wasm "$ICP_WASM_OUTPUT_PATH"

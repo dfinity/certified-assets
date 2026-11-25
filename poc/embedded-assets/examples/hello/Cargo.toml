@@ -1,0 +1,21 @@
+[package]
+name = "hello"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candid.workspace = true
+embedded-certified-assets.workspace = true
+ic-cdk.workspace = true
+
+[dev-dependencies]
+ic-certification-testing.workspace = true
+ic-response-verification.workspace = true
+
+[build-dependencies]
+embedded-certified-assets-build.workspace = true

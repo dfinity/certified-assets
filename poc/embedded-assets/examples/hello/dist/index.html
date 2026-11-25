@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Embedded assets</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<h1>Hello from embedded certified assets</h1>
+<p>This page was compiled into the canister's Wasm module. No sync step.</p>
+<ul>
+  <li><a href="/about">About</a> (html-handling: serves about.html)</li>
+  <li><a href="/blog/">Blog</a> (serves blog/index.html)</li>
+  <li><a href="/old-about">/old-about</a> (301 to /about via _redirects)</li>
+  <li><a href="/app/some/deep/route">/app/…</a> (subtree rewrite to app.html)</li>
+  <li><a href="/nope">/nope</a> (custom 404.html)</li>
+</ul>
+</body>
+</html>
